@@ -1010,4 +1010,15 @@ export class MoviVideoDecoder {
   get isSoftware(): boolean {
     return this.useSoftware;
   }
+
+  /**
+   * Get decoder stats for nerd stats overlay
+   */
+  getStats(): { decoderType: string; queueSize: number; errorCount: number } {
+    return {
+      decoderType: this.useSoftware ? "Software (FFmpeg)" : "Hardware (WebCodecs)",
+      queueSize: this.queueSize,
+      errorCount: this.errorCount,
+    };
+  }
 }

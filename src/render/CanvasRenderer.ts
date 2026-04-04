@@ -62,6 +62,7 @@ export class CanvasRenderer {
   private activeSubtitleCue: SubtitleCue | null = null;
   private subtitleCues: SubtitleCue[] = [];
   private subtitleOverlay: HTMLElement | null = null;
+  private subtitleControlsPadding: number = 0; // Extra padding when controls visible
 
   // Animation state for object-fit transitions
   private currentScaleX: number = 0;
@@ -740,7 +741,8 @@ export class CanvasRenderer {
         this.subtitleOverlay.style.height = `${canvasHeight}px`;
         this.subtitleOverlay.style.margin = "0";
         this.subtitleOverlay.style.padding = "0";
-        this.subtitleOverlay.style.paddingBottom = `${bottomPadding}px`; // Responsive space above controls
+        const effectivePadding = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPadding;
+        this.subtitleOverlay.style.paddingBottom = `${effectivePadding}px`;
         this.subtitleOverlay.style.display = "flex";
         this.subtitleOverlay.style.flexDirection = "column";
         this.subtitleOverlay.style.justifyContent = "flex-end";
@@ -1339,6 +1341,24 @@ export class CanvasRenderer {
   }
 
   /**
+   * Set extra bottom padding for subtitles when controls are visible
+   * 0 = use default padding, >0 = use this value instead
+   */
+  setSubtitleControlsPadding(padding: number): void {
+    this.subtitleControlsPadding = padding;
+    // Apply immediately if overlay exists
+    if (this.subtitleOverlay) {
+      if (padding > 0) {
+        this.subtitleOverlay.style.paddingBottom = `${padding}px`;
+      } else {
+        const h = this.height || 672;
+        const minPad = Math.min(80, h * 0.1);
+        this.subtitleOverlay.style.paddingBottom = `${Math.max(minPad, 60)}px`;
+      }
+    }
+  }
+
+  /**
    * Set subtitle cues for rendering
    * If cues array is provided, it replaces the current list
    * If a single cue is provided, it's added to the list (maintaining active cues)
@@ -1514,7 +1534,8 @@ export class CanvasRenderer {
       // Calculate responsive bottom padding for image subtitles
       const minPaddingImg = Math.min(80, canvasHeight * 0.1); // At least 10% of height, max 80px
       const bottomPaddingImg = Math.max(minPaddingImg, 60); // Minimum 60px
-      this.subtitleOverlay.style.paddingBottom = `${bottomPaddingImg}px`; // Responsive space above controls
+      const effectivePaddingImg = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPaddingImg;
+      this.subtitleOverlay.style.paddingBottom = `${effectivePaddingImg}px`;
       this.subtitleOverlay.style.textAlign = "center";
       this.subtitleOverlay.style.boxSizing = "border-box";
       this.subtitleOverlay.style.margin = "0";
@@ -1736,7 +1757,8 @@ export class CanvasRenderer {
       this.subtitleOverlay.style.height = `${displayHeight}px`;
       this.subtitleOverlay.style.margin = "0";
       this.subtitleOverlay.style.padding = "0";
-      this.subtitleOverlay.style.paddingBottom = `${bottomPadding}px`;
+      const effectivePad = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPadding;
+      this.subtitleOverlay.style.paddingBottom = `${effectivePad}px`;
       this.subtitleOverlay.style.transform = "none";
       this.subtitleOverlay.style.boxSizing = "border-box";
       this.subtitleOverlay.style.display = "flex";
@@ -1744,7 +1766,6 @@ export class CanvasRenderer {
       this.subtitleOverlay.style.justifyContent = "flex-end";
       this.subtitleOverlay.style.alignItems = "center";
       this.subtitleOverlay.style.textAlign = "center";
-      this.subtitleOverlay.style.pointerEvents = "none";
       this.subtitleOverlay.style.pointerEvents = "none";
       // zIndex controlled by CSS (.movi-subtitle-overlay)
 
@@ -1871,6 +1892,19 @@ export class CanvasRenderer {
    */
   getQueueSize(): number {
     return this.frameQueue.length;
+  }
+
+  /**
+   * Get video rendering stats for nerd stats overlay
+   */
+  getStats(): { framesPresented: number; frameQueueSize: number; colorSpace: string; resolution: string; syncedToAudio: boolean } {
+    return {
+      framesPresented: this.framesPresented,
+      frameQueueSize: this.frameQueue.length,
+      colorSpace: this.colorSpace,
+      resolution: this.width > 0 ? `${this.width}x${this.height}` : "N/A",
+      syncedToAudio: this.syncedToAudio,
+    };
   }
 
   /**

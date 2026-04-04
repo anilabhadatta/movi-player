@@ -104,6 +104,7 @@ export default defineConfig({
     format: 'es',
   },
   server: {
+    allowedHosts: true,
     headers: {
       // Required for SharedArrayBuffer
       'Cross-Origin-Opener-Policy': 'same-origin',

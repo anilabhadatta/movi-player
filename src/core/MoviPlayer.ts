@@ -897,6 +897,16 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         Logger.debug(TAG, "Entered buffering state for playback rate change");
       }
       // Continue processing to allow new audio to be decoded and scheduled
+    } else if (!this.disableAudio && this.audioRenderer.isAudioStarved()) {
+      // Stable audio: enter buffering state when audio is starved (no data for extended period)
+      const currentState = this.stateManager.getState();
+      if (currentState === "playing") {
+        this.wasPlayingBeforeRebuffer = true;
+        this.stateManager.setState("buffering");
+        this.clock.pause();
+        Logger.warn(TAG, `Audio starvation detected (${this.audioRenderer.getStarvationDuration().toFixed(0)}ms), entering buffering state`);
+      }
+      // Continue processing to allow new audio to be decoded
     } else if (this.stateManager.getState() === "buffering" && this.wasPlayingBeforeRebuffer) {
       // Rebuffering complete, resume playback only if we were playing before
       // Transition to paused first, then let play() method handle the transition to playing
@@ -1866,6 +1876,34 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
   }
 
+  /**
+   * Generate timeline thumbnails at regular intervals
+   * @param count Number of thumbnails to generate (default 8)
+   * @param onProgress Callback for each generated thumbnail
+   * @returns Array of { time, blob } objects
+   */
+  async generateTimeline(
+    count: number = 8,
+    onProgress?: (index: number, total: number, blob: Blob, time: number) => void
+  ): Promise<Array<{ time: number; blob: Blob }>> {
+    const duration = this.mediaInfo?.duration ?? 0;
+    if (duration <= 0) return [];
+
+    const results: Array<{ time: number; blob: Blob }> = [];
+    const interval = duration / (count + 1); // Avoid first/last frames
+
+    for (let i = 1; i <= count; i++) {
+      const time = interval * i;
+      const blob = await this.getPreviewFrame(time);
+      if (blob) {
+        results.push({ time, blob });
+        onProgress?.(i, count, blob, time);
+      }
+    }
+
+    return results;
+  }
+
   private async initPreviewPipeline() {
     if (this.thumbnailBindings) return; // Already initialized
 
@@ -2256,6 +2294,15 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
   }
 
+  /**
+   * Set extra bottom padding for subtitles when controls are visible
+   */
+  setSubtitleControlsPadding(padding: number): void {
+    if (this.videoRenderer) {
+      this.videoRenderer.setSubtitleControlsPadding(padding);
+    }
+  }
+
   setFitMode(mode: "contain" | "cover" | "fill" | "zoom" | "control"): void {
     if (this.hlsWrapper) {
       this.hlsWrapper.setFitMode(mode);
@@ -2345,6 +2392,161 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
    */
   getMuted(): boolean {
     return this.muted;
+  }
+
+  /**
+   * Enable/disable stable audio mode
+   * Stable audio provides: smooth gain transitions, auto-recovery,
+   * gap filling on underrun, starvation detection, and fade on seek/reset
+   */
+  setStableAudio(enabled: boolean): void {
+    this.audioRenderer.setStableAudio(enabled);
+  }
+
+  /**
+   * Get stable audio mode state
+   */
+  getStableAudio(): boolean {
+    return this.audioRenderer.getStableAudio();
+  }
+
+  /**
+   * Get comprehensive player stats for "Stats for nerds" overlay
+   */
+  getStats(): Record<string, string | number | boolean> {
+    const mediaInfo = this.mediaInfo;
+    const videoTrack = this.trackManager.getActiveVideoTrack() as VideoTrack | null;
+    const audioTrack = this.trackManager.getActiveAudioTrack() as AudioTrack | null;
+    const videoDecoderStats = this.videoDecoder.getStats();
+    const audioDecoderStats = this.audioDecoder.getStats();
+    const rendererStats = this.videoRenderer?.getStats();
+    const audioBuffered = this.audioRenderer.getBufferedDuration();
+
+    const stats: Record<string, string | number | boolean> = {};
+
+    // Video info
+    if (videoTrack) {
+      stats["Video Codec"] = videoTrack.codec ?? "N/A";
+      stats["Resolution"] = `${videoTrack.width}x${videoTrack.height}`;
+      // Quality label
+      const h = videoTrack.height;
+      stats["Quality"] = h >= 2160 ? "4K" : h >= 1440 ? "2K" : h >= 1080 ? "1080p" : h >= 720 ? "720p" : h >= 480 ? "480p" : "SD";
+      stats["Frame Rate"] = `${videoTrack.frameRate} fps`;
+      stats["Video Bitrate"] = videoTrack.bitRate
+        ? `${(videoTrack.bitRate / 1000).toFixed(0)} kbps`
+        : "N/A";
+      if (videoTrack.pixelFormat) stats["Pixel Format"] = videoTrack.pixelFormat;
+      stats["Color Space"] = videoTrack.colorSpace ?? "N/A";
+      if (videoTrack.colorRange) stats["Color Range"] = videoTrack.colorRange;
+      if (videoTrack.colorPrimaries && videoTrack.colorPrimaries !== "unknown") {
+        stats["Color Primaries"] = videoTrack.colorPrimaries;
+      }
+      if (videoTrack.colorTransfer && videoTrack.colorTransfer !== "unknown") {
+        stats["Color Transfer"] = videoTrack.colorTransfer;
+      }
+      stats["HDR"] = videoTrack.isHDR ? "Yes" : "No";
+      if (videoTrack.rotation) stats["Rotation"] = `${videoTrack.rotation}°`;
+      stats["Video Decoder"] = videoDecoderStats.decoderType;
+    }
+
+    // Audio info
+    if (audioTrack) {
+      stats["Audio Codec"] = audioTrack.codec ?? "N/A";
+      if (audioTrack.language && audioTrack.language !== "und") {
+        stats["Language"] = audioTrack.language.toUpperCase();
+      }
+      stats["Sample Rate"] = `${audioTrack.sampleRate} Hz`;
+      stats["Channels"] = audioTrack.channels === 1 ? "Mono" :
+                          audioTrack.channels === 2 ? "Stereo" :
+                          audioTrack.channels === 6 ? "5.1 Surround" :
+                          audioTrack.channels === 8 ? "7.1 Surround" :
+                          `${audioTrack.channels}ch`;
+      stats["Audio Bitrate"] = audioTrack.bitRate
+        ? `${(audioTrack.bitRate / 1000).toFixed(0)} kbps`
+        : "N/A";
+      stats["Audio Decoder"] = audioDecoderStats.decoderType;
+    }
+
+    // Subtitle info
+    const subtitleTrack = this.trackManager.getActiveSubtitleTrack();
+    if (subtitleTrack) {
+      stats["Subtitle"] = `${subtitleTrack.codec ?? "text"}${subtitleTrack.language ? ` (${subtitleTrack.language.toUpperCase()})` : ""}`;
+    }
+
+    // Container
+    if (mediaInfo) {
+      stats["Container"] = mediaInfo.formatName ?? "N/A";
+      stats["Total Bitrate"] = mediaInfo.bitRate
+        ? `${(mediaInfo.bitRate / 1000).toFixed(0)} kbps`
+        : "N/A";
+    }
+
+    // Playback
+    stats["Playback State"] = this.stateManager.getState();
+    stats["Playback Rate"] = `${this.clock.getPlaybackRate()}x`;
+    stats["A/V Sync"] = this.clock.isSyncedToAudio() ? "Audio Master" : "Wall Clock";
+    stats["Stable Volume"] = this.audioRenderer.getStableAudio() ? "On" : "Off";
+
+    // Buffers
+    stats["Audio Buffer"] = `${audioBuffered.toFixed(2)}s`;
+    stats["Video Queue"] = `${rendererStats?.frameQueueSize ?? 0} frames`;
+    stats["Frames Rendered"] = rendererStats?.framesPresented ?? 0;
+    stats["Video Decoder Queue"] = videoDecoderStats.queueSize;
+    stats["Audio Decoder Queue"] = audioDecoderStats.queueSize;
+
+    // File
+    if (this.fileSize > 0) {
+      stats["File Size"] = this.fileSize > 1048576
+        ? `${(this.fileSize / 1048576).toFixed(1)} MB`
+        : `${(this.fileSize / 1024).toFixed(1)} KB`;
+    }
+
+    // Network (HttpSource) or Disk (FileSource) stats
+    if (this.source instanceof HttpSource) {
+      const net = this.source.getNetworkStats();
+      stats["Downloaded"] = net.totalBytes > 1048576
+        ? `${(net.totalBytes / 1048576).toFixed(1)} MB`
+        : `${(net.totalBytes / 1024).toFixed(1)} KB`;
+      stats["Network Speed"] = net.currentSpeed > 0
+        ? net.currentSpeed > 1048576
+          ? `${(net.currentSpeed / 1048576).toFixed(1)} MB/s`
+          : `${(net.currentSpeed / 1024).toFixed(0)} KB/s`
+        : "—";
+      stats["Connection Time"] = `${net.elapsed.toFixed(1)}s`;
+    } else if (this.source instanceof FileSource) {
+      const disk = this.source.getDiskStats();
+      stats["Disk Read"] = disk.totalBytes > 1048576
+        ? `${(disk.totalBytes / 1048576).toFixed(1)} MB`
+        : `${(disk.totalBytes / 1024).toFixed(1)} KB`;
+      stats["Read Speed"] = disk.currentSpeed > 0
+        ? disk.currentSpeed > 1048576
+          ? `${(disk.currentSpeed / 1048576).toFixed(1)} MB/s`
+          : `${(disk.currentSpeed / 1024).toFixed(0)} KB/s`
+        : "—";
+    }
+
+    return stats;
+  }
+
+  /**
+   * Get current I/O throughput in bytes/sec (for graph)
+   * Works for both network (HttpSource) and disk (FileSource)
+   */
+  getNetworkSpeed(): number {
+    if (this.source instanceof HttpSource) {
+      return this.source.getNetworkStats().currentSpeed;
+    }
+    if (this.source instanceof FileSource) {
+      return this.source.getDiskStats().currentSpeed;
+    }
+    return 0;
+  }
+
+  /**
+   * Check if source is a local file
+   */
+  isFileSource(): boolean {
+    return this.source instanceof FileSource;
   }
 
   /**

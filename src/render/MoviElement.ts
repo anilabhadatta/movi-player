@@ -54,6 +54,12 @@ export class MoviElement extends HTMLElement {
   private _contextMenuJustClosed: boolean = false;
   private lastTouchTime: number = 0;
 
+  // Nerd Stats
+  private _nerdStatsVisible: boolean = false;
+  private nerdStatsInterval: number | null = null;
+  private networkSpeedHistory: number[] = []; // speed samples for graph
+  private static readonly GRAPH_MAX_SAMPLES = 60; // 30 seconds of data (500ms interval)
+
   // Internal state
   private _src: string | File | null = null;
   private _autoplay: boolean = false;
@@ -434,14 +440,32 @@ export class MoviElement extends HTMLElement {
         <span class="movi-context-menu-shortcut">F</span>
       </div>
       <div class="movi-context-menu-item" data-action="loop-toggle">
-        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg class="movi-context-menu-icon movi-context-menu-loop-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
            <path d="M17 2l4 4-4 4"></path>
            <path d="M3 11v-1a4 4 0 0 1 4-4h14"></path>
            <path d="M7 22l-4-4 4-4"></path>
            <path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
         </svg>
+        <svg class="movi-context-menu-icon movi-context-menu-loop-filled" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+          <path d="M17 2l4 4-4 4"></path><path d="M3 11v-1a4 4 0 0 1 4-4h14"></path><path d="M7 22l-4-4 4-4"></path><path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
+        </svg>
         <span class="movi-context-menu-label">Loop</span>
         <span class="movi-context-menu-status movi-loop-status">Off</span>
+      </div>
+      <div class="movi-context-menu-item movi-context-menu-active" data-action="stable-audio-toggle">
+        <svg class="movi-context-menu-icon movi-context-menu-stable-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+          <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+          <path d="M6 15v-2"></path>
+          <path d="M9 15v-4"></path>
+          <path d="M12 15v-6"></path>
+          <path d="M15 15v-4"></path>
+          <path d="M18 15v-2"></path>
+        </svg>
+        <svg class="movi-context-menu-icon movi-context-menu-stable-filled" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 9v2h2v-2H5zm3-2v4h2v-4H8zm3-2v6h2V9h-2zm3 2v4h2v-4h-2zm3 2v2h2v-2h-2z"></path>
+        </svg>
+        <span class="movi-context-menu-label">Stable Volume</span>
+        <span class="movi-context-menu-status movi-stable-audio-status">On</span>
       </div>
       <div class="movi-context-menu-divider"></div>
       <div class="movi-context-menu-item" data-action="snapshot">
@@ -451,6 +475,28 @@ export class MoviElement extends HTMLElement {
         </svg>
         <span class="movi-context-menu-label">Snapshot</span>
         <span class="movi-context-menu-shortcut">S</span>
+      </div>
+      <div class="movi-context-menu-item" data-action="nerd-stats">
+        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20V10"></path>
+          <path d="M18 20V4"></path>
+          <path d="M6 20v-4"></path>
+        </svg>
+        <span class="movi-context-menu-label">Stats for nerds</span>
+      </div>
+      <div class="movi-context-menu-item" data-action="timeline">
+        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="6" height="5" rx="1"></rect>
+          <rect x="9" y="3" width="6" height="5" rx="1"></rect>
+          <rect x="16" y="3" width="6" height="5" rx="1"></rect>
+          <rect x="2" y="10" width="6" height="5" rx="1"></rect>
+          <rect x="9" y="10" width="6" height="5" rx="1"></rect>
+          <rect x="16" y="10" width="6" height="5" rx="1"></rect>
+          <line x1="2" y1="19" x2="22" y2="19"></line>
+          <line x1="2" y1="21" x2="22" y2="21"></line>
+        </svg>
+        <span class="movi-context-menu-label">Timeline</span>
+        <span class="movi-context-menu-shortcut">T</span>
       </div>
     `;
     shadowRoot.appendChild(contextMenu);
@@ -610,6 +656,22 @@ export class MoviElement extends HTMLElement {
                 </div>
               </div>
 
+              <div class="movi-stable-audio-container">
+                <button class="movi-btn movi-stable-audio-btn active" aria-label="Toggle Stable Audio">
+                  <svg class="movi-icon-stable-audio-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="2" y="4" width="20" height="16" rx="2"></rect>
+                    <path d="M6 15v-2"></path>
+                    <path d="M9 15v-4"></path>
+                    <path d="M12 15v-6"></path>
+                    <path d="M15 15v-4"></path>
+                    <path d="M18 15v-2"></path>
+                  </svg>
+                  <svg class="movi-icon-stable-audio-filled" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+                    <path d="M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2zm1 9v2h2v-2H5zm3-2v4h2v-4H8zm3-2v6h2V9h-2zm3 2v4h2v-4h-2zm3 2v2h2v-2h-2z"></path>
+                  </svg>
+                </button>
+              </div>
+
               <button class="movi-btn movi-aspect-ratio-btn" aria-label="Aspect Ratio">
                 <svg class="movi-icon-aspect-ratio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path class="movi-aspect-inner" d="M3 9h18M3 15h18M9 3v18M15 3v18"></path>
@@ -617,11 +679,14 @@ export class MoviElement extends HTMLElement {
               </button>
 
               <button class="movi-btn movi-loop-btn" aria-label="Toggle Loop">
-                <svg class="movi-icon-loop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <svg class="movi-icon-loop-outline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M17 2l4 4-4 4"></path>
                   <path d="M3 11v-1a4 4 0 0 1 4-4h14"></path>
                   <path d="M7 22l-4-4 4-4"></path>
                   <path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
+                </svg>
+                <svg class="movi-icon-loop-filled" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="display: none;">
+                  <path d="M17 2l4 4-4 4"></path><path d="M3 11v-1a4 4 0 0 1 4-4h14"></path><path d="M7 22l-4-4 4-4"></path><path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
                 </svg>
               </button>
             </div>
@@ -656,6 +721,52 @@ export class MoviElement extends HTMLElement {
     titleBar.style.display = "none";
     titleBar.innerHTML = `<span class="movi-title-text"></span>`;
     shadowRoot.appendChild(titleBar);
+
+    // Create Nerd Stats overlay
+    const nerdStats = document.createElement("div");
+    nerdStats.className = "movi-nerd-stats";
+    nerdStats.style.display = "none";
+    nerdStats.innerHTML = `
+      <div class="movi-nerd-stats-header">
+        <span class="movi-nerd-stats-title">Stats for nerds</span>
+        <button class="movi-nerd-stats-close" aria-label="Close stats">&times;</button>
+      </div>
+      <div class="movi-nerd-stats-body"></div>
+      <div class="movi-nerd-stats-graph-section">
+        <div class="movi-nerd-stats-graph-header">
+          <span class="movi-nerd-stats-graph-title">Network Activity</span>
+          <span class="movi-nerd-stats-graph-speed">— </span>
+        </div>
+        <canvas class="movi-nerd-stats-graph" width="340" height="80"></canvas>
+      </div>
+    `;
+    shadowRoot.appendChild(nerdStats);
+
+    // Nerd stats close button
+    nerdStats.querySelector(".movi-nerd-stats-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.toggleNerdStats(shadowRoot);
+    });
+
+    // Create Timeline panel (separate from nerd stats)
+    const timelinePanel = document.createElement("div");
+    timelinePanel.className = "movi-timeline-panel";
+    timelinePanel.style.display = "none";
+    timelinePanel.innerHTML = `
+      <div class="movi-timeline-header">
+        <span class="movi-timeline-title">Timeline</span>
+        <button class="movi-timeline-close" aria-label="Close timeline">&times;</button>
+      </div>
+      <div class="movi-timeline-strip"></div>
+      <div class="movi-timeline-status"></div>
+    `;
+    shadowRoot.appendChild(timelinePanel);
+
+    // Timeline close button
+    timelinePanel.querySelector(".movi-timeline-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      timelinePanel.style.display = "none";
+    });
 
     // Setup control handlers
     this.setupControlHandlers(shadowRoot);
@@ -786,6 +897,17 @@ export class MoviElement extends HTMLElement {
     loopBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       this.loop = !this.loop;
+    });
+
+    // Stable Audio Toggle
+    const stableAudioBtn = shadowRoot.querySelector(".movi-stable-audio-btn") as HTMLElement;
+    stableAudioBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (this.player) {
+        const current = this.player.getStableAudio();
+        this.player.setStableAudio(!current);
+        this.updateStableAudioUI(shadowRoot);
+      }
     });
 
     // Center play/pause button
@@ -1821,10 +1943,16 @@ export class MoviElement extends HTMLElement {
         if (tapTimer) clearTimeout(tapTimer);
         tapTimer = null;
 
+        let didSeek = false;
+
         // Check if fast seek is enabled
         if (this._fastSeek) {
           if (xPos < width * 0.3) {
             // Rewind
+            this.cumulativeSeekAmount = (this.lastSeekSide === "left" && now - this.lastSeekTime < 1000)
+              ? this.cumulativeSeekAmount + 10 : 10;
+            this.lastSeekSide = "left";
+            this.lastSeekTime = now;
             this.currentTime = Math.max(0, this.currentTime - 10);
             this.showOSD(
               `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1832,10 +1960,15 @@ export class MoviElement extends HTMLElement {
                 <path d="M3 3v5h5" />
                 <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
               </svg>`,
-              "- 10s",
+              `- ${this.cumulativeSeekAmount}s`,
             );
+            didSeek = true;
           } else if (xPos > width * 0.7) {
             // Forward
+            this.cumulativeSeekAmount = (this.lastSeekSide === "right" && now - this.lastSeekTime < 1000)
+              ? this.cumulativeSeekAmount + 10 : 10;
+            this.lastSeekSide = "right";
+            this.lastSeekTime = now;
             this.currentTime = Math.min(this.duration, this.currentTime + 10);
             this.showOSD(
               `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1843,8 +1976,9 @@ export class MoviElement extends HTMLElement {
                 <path d="M21 3v5h-5" />
                 <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
               </svg>`,
-              "+ 10s",
+              `+ ${this.cumulativeSeekAmount}s`,
             );
+            didSeek = true;
           } else {
             this.toggleFullscreen();
           }
@@ -1852,7 +1986,9 @@ export class MoviElement extends HTMLElement {
           // If seek disabled, always treat double tap as fullscreen toggle
           this.toggleFullscreen();
         }
-        lastTap = 0;
+        // Keep lastTap alive for continuous tapping (like YouTube)
+        // If we seeked, next tap should immediately seek again
+        lastTap = didSeek ? now : 0;
       } else {
         // First tap
         lastTap = now;
@@ -2268,6 +2404,18 @@ export class MoviElement extends HTMLElement {
           // F: Fullscreen
           e.preventDefault();
           this.toggleFullscreen();
+          break;
+        case "i":
+        case "I":
+          // I: Toggle nerd stats
+          e.preventDefault();
+          this.toggleNerdStats();
+          break;
+        case "t":
+        case "T":
+          // T: Toggle timeline
+          e.preventDefault();
+          this.toggleTimeline();
           break;
         case "0":
           // 0: Seek to start
@@ -2790,6 +2938,19 @@ export class MoviElement extends HTMLElement {
         hideContextMenu();
       } else if (action === "loop-toggle") {
         this.loop = !this.loop;
+        hideContextMenu();
+      } else if (action === "stable-audio-toggle") {
+        if (this.player) {
+          const current = this.player.getStableAudio();
+          this.player.setStableAudio(!current);
+          this.updateStableAudioUI(shadowRoot);
+        }
+        hideContextMenu();
+      } else if (action === "nerd-stats") {
+        this.toggleNerdStats(shadowRoot);
+        hideContextMenu();
+      } else if (action === "timeline") {
+        this.toggleTimeline();
         hideContextMenu();
       } else if (action === "fullscreen") {
         this.toggleFullscreen();
@@ -3681,6 +3842,13 @@ export class MoviElement extends HTMLElement {
       if (this.video) this.video.style.cursor = "default";
     }
 
+    // Shift subtitles up above controls
+    if (this.player) {
+      const bar = this.shadowRoot?.querySelector(".movi-controls-bar") as HTMLElement;
+      const barHeight = bar?.offsetHeight ?? 80;
+      this.player.setSubtitleControlsPadding(barHeight + 20);
+    }
+
     // Show title bar if showtitle is enabled
     if (this._showTitle && this.shadowRoot) {
       const titleBar = this.shadowRoot.querySelector(".movi-title-bar") as HTMLElement;
@@ -3755,6 +3923,11 @@ export class MoviElement extends HTMLElement {
       // Hide cursor
       if (this.canvas) this.canvas.style.cursor = "none";
       if (this.video) this.video.style.cursor = "none";
+    }
+
+    // Shift subtitles back to default position
+    if (this.player) {
+      this.player.setSubtitleControlsPadding(0);
     }
 
     // Hide title bar when controls are hidden
@@ -4860,15 +5033,382 @@ export class MoviElement extends HTMLElement {
         color: var(--movi-primary);
       }
 
-      .movi-loop-btn.active svg {
-        color: var(--movi-primary);
-        filter: drop-shadow(0 0 8px var(--movi-primary-glow));
+      .movi-loop-btn.active .movi-icon-loop-outline {
+        display: none;
+      }
+
+      .movi-loop-btn.active .movi-icon-loop-filled {
+        display: block !important;
+      }
+
+      .movi-stable-audio-container {
+        position: relative;
+      }
+
+      .movi-stable-audio-btn.active .movi-icon-stable-audio-outline {
+        display: none;
+      }
+
+      .movi-stable-audio-btn.active .movi-icon-stable-audio-filled {
+        display: block !important;
+      }
+
+      /* ========================================
+         NERD STATS OVERLAY
+      ======================================== */
+      .movi-nerd-stats {
+        position: absolute;
+        top: 12px;
+        left: 12px;
+        z-index: 9;
+        background: rgba(0, 0, 0, 0.82);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 8px;
+        padding: 0;
+        min-width: 280px;
+        max-width: 380px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.9);
+        pointer-events: auto;
+        user-select: text;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      }
+
+      .movi-nerd-stats::-webkit-scrollbar {
+        width: 4px;
+      }
+
+      .movi-nerd-stats::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .movi-nerd-stats::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 2px;
+      }
+
+      .movi-nerd-stats-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 12px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        flex-shrink: 0;
+      }
+
+      .movi-nerd-stats-title {
+        font-weight: 700;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: rgba(255, 255, 255, 0.6);
+      }
+
+      .movi-nerd-stats-close {
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 18px;
+        cursor: pointer;
+        padding: 0 2px;
+        line-height: 1;
+        transition: color 0.15s;
+      }
+
+      .movi-nerd-stats-close:hover {
+        color: #fff;
+      }
+
+      .movi-nerd-stats-body {
+        padding: 6px 12px 10px;
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+      }
+
+      .movi-nerd-stats-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 3px 0;
+        gap: 16px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      }
+
+      .movi-nerd-stats-row:last-child {
+        border-bottom: none;
+      }
+
+      .movi-nerd-stats-key {
+        color: rgba(255, 255, 255, 0.45);
+        white-space: nowrap;
+        font-size: 10.5px;
+      }
+
+      .movi-nerd-stats-value {
+        color: rgba(255, 255, 255, 0.95);
+        font-weight: 600;
+        text-align: right;
+        word-break: break-all;
+        font-size: 10.5px;
+      }
+
+      .movi-nerd-stats-graph-section {
+        border-top: 1px solid rgba(255, 255, 255, 0.08);
+        padding: 8px 12px 10px;
+        flex-shrink: 0;
+      }
+
+      .movi-nerd-stats-graph-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 6px;
+      }
+
+      .movi-nerd-stats-graph-title {
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: rgba(255, 255, 255, 0.45);
+      }
+
+      .movi-nerd-stats-graph-speed {
+        font-size: 11px;
+        font-weight: 700;
+        color: #00ff88;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .movi-nerd-stats-graph {
+        width: 100%;
+        height: 80px;
+        border-radius: 4px;
+        display: block;
+      }
+
+      @media (max-width: 640px) {
+        .movi-nerd-stats {
+          top: 4px;
+          left: 4px;
+          right: 4px;
+          min-width: unset;
+          max-width: unset;
+          font-size: 9px;
+          border-radius: 6px;
+        }
+
+        .movi-nerd-stats-header {
+          padding: 6px 10px;
+        }
+
+        .movi-nerd-stats-title {
+          font-size: 9px;
+        }
+
+        .movi-nerd-stats-body {
+          padding: 4px 10px 6px;
+        }
+
+        .movi-nerd-stats-row {
+          padding: 2px 0;
+          gap: 8px;
+        }
+
+        .movi-nerd-stats-key,
+        .movi-nerd-stats-value {
+          font-size: 8.5px;
+        }
+
+        .movi-nerd-stats-graph-section {
+          padding: 6px 10px 8px;
+        }
+
+        .movi-nerd-stats-graph {
+          height: 50px;
+        }
+
+        .movi-nerd-stats-graph-title {
+          font-size: 8px;
+        }
+
+        .movi-nerd-stats-graph-speed {
+          font-size: 9px;
+        }
+      }
+
+      /* ========================================
+         TIMELINE PANEL
+      ======================================== */
+      .movi-timeline-panel {
+        position: absolute;
+        bottom: 80px;
+        left: 12px;
+        right: 12px;
+        z-index: 9;
+        background: rgba(0, 0, 0, 0.88);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 10px;
+        padding: 0;
+        flex-direction: column;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        font-family: 'Inter', -apple-system, sans-serif;
+        max-height: 240px;
+        overflow: hidden;
+      }
+
+      .movi-timeline-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 10px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        flex-shrink: 0;
+      }
+
+      .movi-timeline-title {
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        color: rgba(255, 255, 255, 0.6);
+      }
+
+      .movi-timeline-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .movi-timeline-generate-btn {
+        background: var(--movi-primary);
+        border: none;
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 5px 12px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: opacity 0.2s;
+        font-family: inherit;
+      }
+
+      .movi-timeline-generate-btn:hover {
+        opacity: 0.85;
+      }
+
+      .movi-timeline-generate-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .movi-timeline-close {
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 20px;
+        cursor: pointer;
+        padding: 0 4px;
+        line-height: 1;
+        transition: color 0.15s;
+      }
+
+      .movi-timeline-close:hover {
+        color: #fff;
+      }
+
+      .movi-timeline-strip {
+        display: flex;
+        gap: 4px;
+        padding: 10px 14px;
+        overflow-x: auto;
+        overflow-y: hidden;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .movi-timeline-strip::-webkit-scrollbar {
+        height: 4px;
+      }
+
+      .movi-timeline-strip::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .movi-timeline-strip::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 2px;
+      }
+
+      .movi-timeline-item {
+        flex-shrink: 0;
+        cursor: pointer;
+        position: relative;
+        border-radius: 6px;
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        transition: border-color 0.2s, transform 0.2s;
+      }
+
+      .movi-timeline-item:hover {
+        border-color: var(--movi-primary);
+        transform: scale(1.05);
+      }
+
+      .movi-timeline-item img {
+        display: block;
+        height: 90px;
+        width: auto;
+        object-fit: cover;
+      }
+
+      .movi-timeline-time {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        text-align: center;
+        font-size: 10px;
+        font-weight: 600;
+        color: #fff;
+        background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+        padding: 12px 4px 4px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .movi-timeline-status {
+        padding: 0 14px 8px;
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.4);
+        text-align: center;
+        flex-shrink: 0;
+      }
+
+      @media (max-width: 640px) {
+        .movi-timeline-panel {
+          left: 8px;
+          right: 8px;
+          bottom: 70px;
+        }
+
+        .movi-timeline-item img {
+          height: 65px;
+        }
       }
 
       /* ========================================
          RESPONSIVE STYLES - Mobile First
       ======================================== */
-      
+
       /* Mobile devices (up to 640px) */
       @media (max-width: 640px) {
         :host {
@@ -5368,7 +5908,10 @@ export class MoviElement extends HTMLElement {
         display: none;
         text-align: center;
         padding: 0 5%;
+        transition: padding-bottom 0.3s ease;
       }
+
+      /* Subtitle shift is handled via JS in showControls/hideControls */
 
       .movi-subtitle-line {
         color: #FFFFFF;
@@ -6325,6 +6868,12 @@ export class MoviElement extends HTMLElement {
       "webglcontextrestored",
       this.handleContextRestored,
     );
+    // Cleanup nerd stats interval
+    if (this.nerdStatsInterval) {
+      clearInterval(this.nerdStatsInterval);
+      this.nerdStatsInterval = null;
+    }
+
     // Cleanup event handlers
     this.eventHandlers.forEach((unsubscribe) => unsubscribe());
     this.eventHandlers.clear();
@@ -7017,6 +7566,8 @@ export class MoviElement extends HTMLElement {
     this._titleAutoLoaded = false;
     this._lastDuration = 0;
 
+    this.resetTimeline();
+
     if (this.player) {
       // If player exists, destroy and recreate
       this.player.destroy();
@@ -7505,7 +8056,7 @@ export class MoviElement extends HTMLElement {
 
     // Controls to disable (everything except volume)
     const controlsToDisableSelector =
-      ".movi-play-pause, .movi-progress-container, .movi-audio-track-btn, .movi-subtitle-track-btn, .movi-hdr-btn, .movi-speed-btn, .movi-aspect-ratio-btn, .movi-loop-btn, .movi-fullscreen-btn, .movi-more-btn, .movi-center-play-pause, .movi-seek-backward, .movi-seek-forward";
+      ".movi-play-pause, .movi-progress-container, .movi-audio-track-btn, .movi-subtitle-track-btn, .movi-hdr-btn, .movi-speed-btn, .movi-stable-audio-btn, .movi-aspect-ratio-btn, .movi-loop-btn, .movi-fullscreen-btn, .movi-more-btn, .movi-center-play-pause, .movi-seek-backward, .movi-seek-forward";
     const controlsToDisable = shadowRoot.querySelectorAll(
       controlsToDisableSelector,
     );
@@ -7786,6 +8337,9 @@ export class MoviElement extends HTMLElement {
     this._titleAutoLoaded = false;
     this._lastDuration = 0;
 
+    // Reset timeline panel on source change
+    this.resetTimeline();
+
     if (value instanceof File) {
       // For File objects, store in memory (can't store in attributes)
       this._src = value;
@@ -7877,15 +8431,311 @@ export class MoviElement extends HTMLElement {
     );
     const loopStatus = shadowRoot.querySelector(".movi-loop-status");
 
+    // Context menu icons
+    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-loop-outline") as HTMLElement;
+    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-loop-filled") as HTMLElement;
+
     if (this._loop) {
       loopBtn?.classList.add("active");
       loopMenuItem?.classList.add("movi-context-menu-active");
       if (loopStatus) loopStatus.textContent = "On";
+      if (ctxOutline) ctxOutline.style.display = "none";
+      if (ctxFilled) ctxFilled.style.display = "block";
     } else {
       loopBtn?.classList.remove("active");
       loopMenuItem?.classList.remove("movi-context-menu-active");
       if (loopStatus) loopStatus.textContent = "Off";
+      if (ctxOutline) ctxOutline.style.display = "block";
+      if (ctxFilled) ctxFilled.style.display = "none";
     }
+  }
+
+  private updateStableAudioUI(shadowRoot: ShadowRoot | null = this.shadowRoot): void {
+    if (!shadowRoot) return;
+    const isEnabled = this.player?.getStableAudio() ?? true;
+
+    const stableBtn = shadowRoot.querySelector(".movi-stable-audio-btn");
+    const stableMenuItem = shadowRoot.querySelector(
+      '.movi-context-menu-item[data-action="stable-audio-toggle"]',
+    );
+    const stableStatus = shadowRoot.querySelector(".movi-stable-audio-status");
+
+    // Context menu icons
+    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-stable-outline") as HTMLElement;
+    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-stable-filled") as HTMLElement;
+
+    if (isEnabled) {
+      stableBtn?.classList.add("active");
+      stableMenuItem?.classList.add("movi-context-menu-active");
+      if (stableStatus) stableStatus.textContent = "On";
+      if (ctxOutline) ctxOutline.style.display = "none";
+      if (ctxFilled) ctxFilled.style.display = "block";
+    } else {
+      stableBtn?.classList.remove("active");
+      stableMenuItem?.classList.remove("movi-context-menu-active");
+      if (stableStatus) stableStatus.textContent = "Off";
+      if (ctxOutline) ctxOutline.style.display = "block";
+      if (ctxFilled) ctxFilled.style.display = "none";
+    }
+  }
+
+  /**
+   * Toggle nerd stats overlay
+   */
+  private toggleNerdStats(shadowRoot: ShadowRoot | null = this.shadowRoot): void {
+    if (!shadowRoot) return;
+    const overlay = shadowRoot.querySelector(".movi-nerd-stats") as HTMLElement;
+    if (!overlay) return;
+
+    this._nerdStatsVisible = !this._nerdStatsVisible;
+
+    if (this._nerdStatsVisible) {
+      overlay.style.display = "flex";
+      // Set max-height dynamically based on host element height
+      const hostHeight = (this as HTMLElement).offsetHeight || (this as HTMLElement).clientHeight || 400;
+      const controlsHeight = 100; // controls bar + progress + padding
+      overlay.style.maxHeight = `${hostHeight - controlsHeight}px`;
+      this.networkSpeedHistory = [];
+      this.updateNerdStats(shadowRoot);
+      // Update every 500ms
+      this.nerdStatsInterval = window.setInterval(() => {
+        this.updateNerdStats(shadowRoot);
+      }, 500);
+    } else {
+      overlay.style.display = "none";
+      if (this.nerdStatsInterval) {
+        clearInterval(this.nerdStatsInterval);
+        this.nerdStatsInterval = null;
+      }
+    }
+  }
+
+  /**
+   * Update nerd stats content and network graph
+   */
+  private updateNerdStats(shadowRoot: ShadowRoot): void {
+    if (!this.player || !this._nerdStatsVisible) return;
+    const body = shadowRoot.querySelector(".movi-nerd-stats-body");
+    if (!body) return;
+
+    const stats = this.player.getStats();
+    let html = "";
+    for (const [key, value] of Object.entries(stats)) {
+      html += `<div class="movi-nerd-stats-row">
+        <span class="movi-nerd-stats-key">${key}</span>
+        <span class="movi-nerd-stats-value">${value}</span>
+      </div>`;
+    }
+    body.innerHTML = html;
+
+    // Update I/O graph (network or disk)
+    const speed = this.player.getNetworkSpeed();
+    this.networkSpeedHistory.push(speed);
+    if (this.networkSpeedHistory.length > MoviElement.GRAPH_MAX_SAMPLES) {
+      this.networkSpeedHistory.shift();
+    }
+
+    // Update graph title based on source type
+    const graphTitle = shadowRoot.querySelector(".movi-nerd-stats-graph-title");
+    if (graphTitle) {
+      graphTitle.textContent = this.player.isFileSource() ? "Disk Activity" : "Network Activity";
+    }
+
+    // Update speed label
+    const speedLabel = shadowRoot.querySelector(".movi-nerd-stats-graph-speed");
+    if (speedLabel) {
+      speedLabel.textContent = speed > 1048576
+        ? `${(speed / 1048576).toFixed(1)} MB/s`
+        : speed > 0
+          ? `${(speed / 1024).toFixed(0)} KB/s`
+          : "—";
+    }
+
+    // Draw graph
+    this.drawNetworkGraph(shadowRoot);
+  }
+
+  /**
+   * Draw network throughput graph on canvas
+   */
+  private drawNetworkGraph(shadowRoot: ShadowRoot): void {
+    const canvas = shadowRoot.querySelector(".movi-nerd-stats-graph") as HTMLCanvasElement;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    const data = this.networkSpeedHistory;
+    const maxSamples = MoviElement.GRAPH_MAX_SAMPLES;
+
+    // Clear
+    ctx.clearRect(0, 0, w, h);
+
+    // Background
+    ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+    ctx.beginPath();
+    ctx.roundRect(0, 0, w, h, 4);
+    ctx.fill();
+
+    if (data.length < 2) return;
+
+    // Find max for scale (minimum 100KB/s for visual stability)
+    const maxSpeed = Math.max(102400, ...data);
+
+    // Grid lines (horizontal)
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.06)";
+    ctx.lineWidth = 1;
+    for (let i = 1; i <= 3; i++) {
+      const y = Math.round(h * (i / 4)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+    }
+
+    // Draw filled area
+    const stepX = w / (maxSamples - 1);
+    const startIdx = maxSamples - data.length;
+
+    ctx.beginPath();
+    ctx.moveTo(startIdx * stepX, h);
+    for (let i = 0; i < data.length; i++) {
+      const x = (startIdx + i) * stepX;
+      const y = h - (data[i] / maxSpeed) * (h - 4);
+      if (i === 0) {
+        ctx.lineTo(x, y);
+      } else {
+        // Smooth curve
+        const prevX = (startIdx + i - 1) * stepX;
+        const prevY = h - (data[i - 1] / maxSpeed) * (h - 4);
+        const cpX = (prevX + x) / 2;
+        ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
+      }
+    }
+    ctx.lineTo((startIdx + data.length - 1) * stepX, h);
+    ctx.closePath();
+
+    // Gradient fill
+    const gradient = ctx.createLinearGradient(0, 0, 0, h);
+    gradient.addColorStop(0, "rgba(0, 200, 120, 0.35)");
+    gradient.addColorStop(1, "rgba(0, 200, 120, 0.02)");
+    ctx.fillStyle = gradient;
+    ctx.fill();
+
+    // Draw line on top
+    ctx.beginPath();
+    for (let i = 0; i < data.length; i++) {
+      const x = (startIdx + i) * stepX;
+      const y = h - (data[i] / maxSpeed) * (h - 4);
+      if (i === 0) {
+        ctx.moveTo(x, y);
+      } else {
+        const prevX = (startIdx + i - 1) * stepX;
+        const prevY = h - (data[i - 1] / maxSpeed) * (h - 4);
+        const cpX = (prevX + x) / 2;
+        ctx.bezierCurveTo(cpX, prevY, cpX, y, x, y);
+      }
+    }
+    ctx.strokeStyle = "rgba(0, 220, 130, 0.9)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Current value dot
+    if (data.length > 0) {
+      const lastX = (startIdx + data.length - 1) * stepX;
+      const lastY = h - (data[data.length - 1] / maxSpeed) * (h - 4);
+      ctx.beginPath();
+      ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
+      ctx.fillStyle = "#00ff88";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0, 255, 136, 0.4)";
+      ctx.lineWidth = 4;
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Reset timeline panel (clear thumbnails, hide panel)
+   */
+  private resetTimeline(): void {
+    if (!this.shadowRoot) return;
+    const strip = this.shadowRoot.querySelector(".movi-timeline-strip") as HTMLElement;
+    const status = this.shadowRoot.querySelector(".movi-timeline-status") as HTMLElement;
+    const panel = this.shadowRoot.querySelector(".movi-timeline-panel") as HTMLElement;
+    if (strip) strip.innerHTML = "";
+    if (status) status.textContent = "";
+    if (panel) panel.style.display = "none";
+  }
+
+  /**
+   * Toggle timeline panel visibility
+   */
+  private toggleTimeline(): void {
+    const shadowRoot = this.shadowRoot;
+    if (!shadowRoot) return;
+    const panel = shadowRoot.querySelector(".movi-timeline-panel") as HTMLElement;
+    if (!panel) return;
+
+    if (panel.style.display === "none") {
+      panel.style.display = "flex";
+      // Auto-generate if strip is empty
+      const strip = shadowRoot.querySelector(".movi-timeline-strip") as HTMLElement;
+      if (strip && strip.children.length === 0) {
+        this.generateTimelineStrip(shadowRoot);
+      }
+    } else {
+      panel.style.display = "none";
+    }
+  }
+
+  /**
+   * Generate timeline thumbnail strip
+   */
+  private async generateTimelineStrip(shadowRoot: ShadowRoot): Promise<void> {
+    if (!this.player) return;
+
+    const strip = shadowRoot.querySelector(".movi-timeline-strip") as HTMLElement;
+    const status = shadowRoot.querySelector(".movi-timeline-status") as HTMLElement;
+    if (!strip || !status) return;
+
+    strip.innerHTML = "";
+    status.textContent = "Generating...";
+
+    const count = 20;
+
+    const formatTime = (s: number) => {
+      const m = Math.floor(s / 60);
+      const sec = Math.floor(s % 60);
+      return `${m}:${sec.toString().padStart(2, "0")}`;
+    };
+
+    await this.player.generateTimeline(count, (_i, _total, blob, time) => {
+      const item = document.createElement("div");
+      item.className = "movi-timeline-item";
+
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(blob);
+      img.alt = `Timeline ${formatTime(time)}`;
+
+      const label = document.createElement("span");
+      label.className = "movi-timeline-time";
+      label.textContent = formatTime(time);
+
+      item.appendChild(img);
+      item.appendChild(label);
+
+      // Click to seek
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.currentTime = time;
+      });
+
+      strip.appendChild(item);
+      status.textContent = `${strip.children.length} / ${count}`;
+    });
+
+    status.textContent = `${strip.children.length} thumbnails`;
   }
 
   get muted(): boolean {

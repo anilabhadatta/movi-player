@@ -68,6 +68,13 @@ export class HttpSource implements SourceAdapter {
   // Start with minimum size, will be resized when file size is known
   private bufferSize: number = MIN_BUFFER_SIZE;
 
+  // Network stats tracking
+  private totalBytesDownloaded: number = 0;
+  private streamStartTime: number = 0;
+  private lastSpeedBytes: number = 0;
+  private lastSpeedTime: number = 0;
+  private currentSpeed: number = 0; // bytes per second
+
   // Maximum buffer size (from cache config, defaults to DEFAULT_MAX_BUFFER_SIZE_MB)
   private maxBufferSizeMB: number;
 
@@ -434,6 +441,12 @@ export class HttpSource implements SourceAdapter {
         let lastLogBytes = 0;
         const startTime = Date.now();
 
+        // Initialize network stats timing
+        if (this.streamStartTime === 0) {
+          this.streamStartTime = startTime;
+          this.lastSpeedTime = startTime;
+        }
+
         // Read Loop
         while (this.atomicIsStreaming()) {
           const { done, value } = await this.reader.read();
@@ -444,6 +457,18 @@ export class HttpSource implements SourceAdapter {
 
           if (value) {
             downloadedBytes += value.length;
+
+            // Track global network stats
+            this.totalBytesDownloaded += value.length;
+            const now = Date.now();
+            const speedElapsed = (now - this.lastSpeedTime) / 1000;
+            if (speedElapsed >= 0.5) {
+              const bytesSinceLast = this.totalBytesDownloaded - this.lastSpeedBytes;
+              this.currentSpeed = bytesSinceLast / speedElapsed;
+              this.lastSpeedBytes = this.totalBytesDownloaded;
+              this.lastSpeedTime = now;
+            }
+
             if (downloadedBytes - lastLogBytes > 1024 * 1024) {
               // Log every 1MB
               const elapsed = (Date.now() - startTime) / 1000;
@@ -926,6 +951,17 @@ export class HttpSource implements SourceAdapter {
    */
   getBufferStart(): number {
     return this.atomicGetBufferStart();
+  }
+
+  /**
+   * Get network stats for nerd stats overlay
+   */
+  getNetworkStats(): { totalBytes: number; currentSpeed: number; elapsed: number } {
+    return {
+      totalBytes: this.totalBytesDownloaded,
+      currentSpeed: this.currentSpeed,
+      elapsed: this.streamStartTime > 0 ? (Date.now() - this.streamStartTime) / 1000 : 0,
+    };
   }
 }
 
