@@ -790,6 +790,7 @@ export class MoviElement extends HTMLElement {
     timelinePanel.querySelector(".movi-timeline-close")?.addEventListener("click", (e) => {
       e.stopPropagation();
       timelinePanel.style.display = "none";
+      this.focus();
     });
 
     // Create Resume Dialog
@@ -809,6 +810,7 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation();
       const time = parseFloat(resumeDialog.dataset.time || "0");
       resumeDialog.style.display = "none";
+      this.focus();
       if (this.player && time > 0) {
         this.player.seek(time).then(() => this.play()).catch(() => {});
       }
@@ -818,6 +820,10 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation();
       resumeDialog.style.display = "none";
       this.clearResumePosition();
+      if (this.player) {
+        this.player.seek(0).catch(() => {});
+      }
+      this.focus();
     });
 
     // Create Keyboard Shortcuts Panel
@@ -4028,11 +4034,23 @@ export class MoviElement extends HTMLElement {
       if (this.video) this.video.style.cursor = "default";
     }
 
-    // Shift subtitles up above controls
-    if (this.player) {
-      const bar = this.shadowRoot?.querySelector(".movi-controls-bar") as HTMLElement;
-      const barHeight = bar?.offsetHeight ?? 80;
-      this.player.setSubtitleControlsPadding(barHeight + 20);
+    // Shift timeline panel up above controls
+    const bar = this.shadowRoot?.querySelector(".movi-controls-bar") as HTMLElement;
+    const barHeight = bar?.offsetHeight ?? 80;
+    const timelinePanel = this.shadowRoot?.querySelector(".movi-timeline-panel") as HTMLElement;
+    let subtitlePadding = barHeight + 20;
+
+    if (timelinePanel && timelinePanel.style.display !== "none") {
+      timelinePanel.style.bottom = `${barHeight + 20}px`;
+      // Subtitle above timeline
+      requestAnimationFrame(() => {
+        const tlHeight = timelinePanel.offsetHeight || 0;
+        if (tlHeight > 0 && this.player) {
+          this.player.setSubtitleControlsPadding(barHeight + tlHeight + 30);
+        }
+      });
+    } else if (this.player) {
+      this.player.setSubtitleControlsPadding(subtitlePadding);
     }
 
     // Show title bar if showtitle is enabled
@@ -4111,9 +4129,22 @@ export class MoviElement extends HTMLElement {
       if (this.video) this.video.style.cursor = "none";
     }
 
-    // Shift subtitles back to default position
+    // Shift timeline panel down when controls hide
+    const timelinePanel = this.shadowRoot?.querySelector(".movi-timeline-panel") as HTMLElement;
+    if (timelinePanel) {
+      timelinePanel.style.bottom = "12px";
+    }
+
+    // Shift subtitles — if timeline open, keep above it
     if (this.player) {
-      this.player.setSubtitleControlsPadding(0);
+      if (timelinePanel && timelinePanel.style.display !== "none") {
+        requestAnimationFrame(() => {
+          const tlHeight = timelinePanel.offsetHeight || 0;
+          this.player?.setSubtitleControlsPadding(tlHeight + 24);
+        });
+      } else {
+        this.player.setSubtitleControlsPadding(0);
+      }
     }
 
     // Hide title bar when controls are hidden
@@ -5463,8 +5494,9 @@ export class MoviElement extends HTMLElement {
       ======================================== */
       .movi-timeline-panel {
         position: absolute;
-        bottom: 80px;
+        bottom: 120px;
         left: 12px;
+        transition: bottom 0.3s ease;
         right: 12px;
         z-index: 9;
         background: rgba(0, 0, 0, 0.88);
@@ -9465,10 +9497,35 @@ export class MoviElement extends HTMLElement {
       }
     }
 
-    // Timeline items — apply rotation transform
+    // Timeline items — apply rotation + margin fix
     const timelineImgs = this.shadowRoot.querySelectorAll(".movi-timeline-item img");
     timelineImgs.forEach((img) => {
-      (img as HTMLElement).style.transform = deg === 0 ? "none" : `rotate(${deg}deg)`;
+      const el = img as HTMLElement;
+      if (deg === 0) {
+        el.style.transform = "none";
+        el.style.margin = "";
+        el.style.width = "auto";
+        el.style.height = "90px";
+      } else if (is90) {
+        el.style.width = "90px";
+        el.style.height = "auto";
+        el.style.transform = `rotate(${deg}deg)`;
+        el.style.margin = "0";
+        requestAnimationFrame(() => {
+          const w = el.offsetWidth;
+          const h = el.offsetHeight;
+          if (w > 0 && h > 0) {
+            const diff = (w - h) / 2;
+            el.style.margin = `${diff}px ${-diff}px`;
+          }
+        });
+      } else {
+        // 180°
+        el.style.transform = `rotate(${deg}deg)`;
+        el.style.margin = "";
+        el.style.width = "auto";
+        el.style.height = "90px";
+      }
     });
   }
 
@@ -9608,6 +9665,7 @@ export class MoviElement extends HTMLElement {
       }
     } else {
       panel.style.display = "none";
+      this.focus();
     }
   }
 
@@ -9624,14 +9682,52 @@ export class MoviElement extends HTMLElement {
 
     strip.innerHTML = "";
 
-    // Detect portrait video
+    // Detect portrait video and apply rotation immediately
     const videoTrack = this.player.getVideoTracks()?.[0];
     const isPortrait = videoTrack && videoTrack.height > videoTrack.width;
-    if (isPortrait) {
+    const deg = this._currentManualRotation;
+    const is90 = deg % 180 !== 0;
+    const resultIsPortrait = is90 ? !isPortrait : isPortrait;
+
+    if (resultIsPortrait) {
       strip.classList.add("movi-timeline-portrait");
     } else {
       strip.classList.remove("movi-timeline-portrait");
     }
+
+    // Set timeline position based on controls visibility
+    const panel = shadowRoot.querySelector(".movi-timeline-panel") as HTMLElement;
+    if (panel) {
+      const controlsVisible = this.controlsContainer?.classList.contains("movi-controls-visible");
+      if (controlsVisible) {
+        const bar = shadowRoot.querySelector(".movi-controls-bar") as HTMLElement;
+        const barHeight = bar?.offsetHeight ?? 80;
+        panel.style.bottom = `${barHeight + 20}px`;
+      } else {
+        panel.style.bottom = "12px";
+      }
+    }
+
+    // Helper to apply rotation to a single image element
+    const applyRotationToImg = (el: HTMLElement) => {
+      if (deg === 0) return;
+      if (is90) {
+        el.style.width = "90px";
+        el.style.height = "auto";
+        el.style.transform = `rotate(${deg}deg)`;
+        el.style.margin = "0";
+        requestAnimationFrame(() => {
+          const w = el.offsetWidth;
+          const h = el.offsetHeight;
+          if (w > 0 && h > 0) {
+            const diff = (w - h) / 2;
+            el.style.margin = `${diff}px ${-diff}px`;
+          }
+        });
+      } else {
+        el.style.transform = `rotate(${deg}deg)`;
+      }
+    };
 
     const formatTime = (s: number) => {
       const h = Math.floor(s / 3600);
@@ -9687,6 +9783,8 @@ export class MoviElement extends HTMLElement {
         });
 
         strip.appendChild(item);
+        const chImg = item.querySelector("img") as HTMLElement;
+        if (chImg) applyRotationToImg(chImg);
         status.textContent = `${i + 1} / ${chapters.length}`;
       }
 
@@ -9718,11 +9816,13 @@ export class MoviElement extends HTMLElement {
         });
 
         strip.appendChild(item);
+        applyRotationToImg(img);
         status.textContent = `${strip.children.length} / ${count}`;
       });
 
       status.textContent = `${strip.children.length} thumbnails`;
     }
+
   }
 
   get muted(): boolean {

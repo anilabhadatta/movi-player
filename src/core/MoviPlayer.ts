@@ -2141,10 +2141,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
             }
           });
 
-          // Seek to current position to re-read packets including subtitle stream
-          const currentTime = this.getCurrentTime();
-          Logger.debug(TAG, `Seeking to ${currentTime.toFixed(2)}s to pick up subtitle packets`);
-          this.seek(currentTime).catch(() => {});
+          // TODO: Seek to re-read subtitle packets causes playback disruption
+          // const currentTime = this.getCurrentTime();
+          // Logger.debug(TAG, `Seeking to ${currentTime.toFixed(2)}s to pick up subtitle packets`);
+          // this.seek(currentTime).catch(() => {});
         } else {
           Logger.warn(
             TAG,
