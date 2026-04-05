@@ -2140,6 +2140,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
               Logger.warn(TAG, "Subtitle cue callback: videoRenderer is null!");
             }
           });
+
+          // Seek to current position to re-read packets including subtitle stream
+          const currentTime = this.getCurrentTime();
+          Logger.debug(TAG, `Seeking to ${currentTime.toFixed(2)}s to pick up subtitle packets`);
+          this.seek(currentTime).catch(() => {});
         } else {
           Logger.warn(
             TAG,
