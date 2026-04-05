@@ -2550,6 +2550,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     stats["Video Decoder Queue"] = videoDecoderStats.queueSize;
     stats["Audio Decoder Queue"] = audioDecoderStats.queueSize;
 
+    // Memory usage (Chrome only)
+    const mem = (performance as any).memory;
+    if (mem) {
+      stats["Memory Used"] = `${(mem.usedJSHeapSize / 1048576).toFixed(0)} MB`;
+      stats["Memory Limit"] = `${(mem.jsHeapSizeLimit / 1048576).toFixed(0)} MB`;
+    }
+
     // File
     if (this.fileSize > 0) {
       stats["File Size"] = this.fileSize > 1048576

@@ -498,14 +498,6 @@ export class MoviElement extends HTMLElement {
         <span class="movi-context-menu-label">Snapshot</span>
         <span class="movi-context-menu-shortcut">S</span>
       </div>
-      <div class="movi-context-menu-item" data-action="nerd-stats">
-        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12 20V10"></path>
-          <path d="M18 20V4"></path>
-          <path d="M6 20v-4"></path>
-        </svg>
-        <span class="movi-context-menu-label">Stats for nerds</span>
-      </div>
       <div class="movi-context-menu-item" data-action="timeline">
         <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <rect x="2" y="3" width="6" height="5" rx="1"></rect>
@@ -519,6 +511,14 @@ export class MoviElement extends HTMLElement {
         </svg>
         <span class="movi-context-menu-label">Timeline</span>
         <span class="movi-context-menu-shortcut">T</span>
+      </div>
+      <div class="movi-context-menu-item" data-action="nerd-stats">
+        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20V10"></path>
+          <path d="M18 20V4"></path>
+          <path d="M6 20v-4"></path>
+        </svg>
+        <span class="movi-context-menu-label">Stats for nerds</span>
       </div>
     `;
     shadowRoot.appendChild(contextMenu);
@@ -5345,6 +5345,8 @@ export class MoviElement extends HTMLElement {
         padding: 8px 12px;
         border-bottom: 1px solid rgba(255, 255, 255, 0.08);
         flex-shrink: 0;
+        position: relative;
+        z-index: 5;
       }
 
       .movi-nerd-stats-title {
@@ -5359,8 +5361,11 @@ export class MoviElement extends HTMLElement {
         background: none;
         border: none;
         color: rgba(255, 255, 255, 0.5);
-        font-size: 18px;
+        font-size: 20px;
         cursor: pointer;
+        pointer-events: auto;
+        padding: 4px 8px;
+        line-height: 1;
         padding: 0 2px;
         line-height: 1;
         transition: color 0.15s;
@@ -5451,7 +5456,13 @@ export class MoviElement extends HTMLElement {
         }
 
         .movi-nerd-stats-header {
+          padding: 8px 10px;
+        }
+
+        .movi-nerd-stats-close {
+          font-size: 24px;
           padding: 6px 10px;
+          pointer-events: auto;
         }
 
         .movi-nerd-stats-title {
@@ -5478,6 +5489,12 @@ export class MoviElement extends HTMLElement {
 
         .movi-nerd-stats-graph {
           height: 50px;
+          width: 100%;
+          display: block;
+        }
+
+        .movi-nerd-stats-graph-header {
+          margin-bottom: 4px;
         }
 
         .movi-nerd-stats-graph-title {
@@ -5975,26 +5992,33 @@ export class MoviElement extends HTMLElement {
         }
         
         .movi-time {
-          font-size: 11px;
+          font-size: 10px;
         }
-        
+
         .movi-controls-bar {
-          padding: 6px 16px 10px;
+          padding: 4px 10px 6px;
+          gap: 2px;
+          min-height: var(--movi-controls-height-mobile);
+        }
+
+        .movi-buttons-row {
           gap: 4px;
         }
-        
+
         .movi-controls-left,
         .movi-controls-right {
-          gap: 4px;
+          gap: 2px;
         }
-        
+
         .movi-btn {
-          padding: 8px;
+          padding: 6px;
+          width: 34px;
+          height: 34px;
         }
-        
+
         .movi-btn svg {
-          width: 20px;
-          height: 20px;
+          width: 18px;
+          height: 18px;
         }
         
         /* Show volume slider on mobile - user request */
@@ -6002,8 +6026,12 @@ export class MoviElement extends HTMLElement {
           /* display: none !important; REMOVED */
         }
         
+        .movi-volume-slider-container {
+          max-width: 50px;
+        }
+
         .movi-progress-container {
-          padding: 8px 0 2px;
+          padding: 6px 0 2px;
         }
         
         .movi-progress-bar {
@@ -9268,10 +9296,18 @@ export class MoviElement extends HTMLElement {
 
     if (this._nerdStatsVisible) {
       overlay.style.display = "flex";
-      // Set max-height dynamically based on host element height
+      // Set max-height dynamically — stay above controls
       const hostHeight = (this as HTMLElement).offsetHeight || (this as HTMLElement).clientHeight || 400;
-      const controlsHeight = 100; // controls bar + progress + padding
-      overlay.style.maxHeight = `${hostHeight - controlsHeight}px`;
+      const bar = this.shadowRoot?.querySelector(".movi-controls-bar") as HTMLElement;
+      const controlsHeight = (bar?.offsetHeight ?? 80) + 30;
+      const availableHeight = hostHeight - controlsHeight;
+      overlay.style.maxHeight = `${availableHeight}px`;
+
+      // Hide graph when height is too small
+      const graphSection = overlay.querySelector(".movi-nerd-stats-graph-section") as HTMLElement;
+      if (graphSection) {
+        graphSection.style.display = availableHeight < 300 ? "none" : "block";
+      }
       this.networkSpeedHistory = [];
       this.updateNerdStats(shadowRoot);
       // Update every 500ms
@@ -9284,6 +9320,7 @@ export class MoviElement extends HTMLElement {
         clearInterval(this.nerdStatsInterval);
         this.nerdStatsInterval = null;
       }
+      this.focus();
     }
   }
 
@@ -9340,6 +9377,13 @@ export class MoviElement extends HTMLElement {
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+
+    // Auto-resize canvas to match CSS width
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width > 0) {
+      canvas.width = Math.round(rect.width);
+      canvas.height = Math.round(rect.height);
+    }
 
     const w = canvas.width;
     const h = canvas.height;

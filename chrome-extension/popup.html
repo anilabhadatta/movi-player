@@ -4,271 +4,166 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 360px;
-      background: #0a0a0f;
+      width: 300px;
+      background: #0b0b12;
       color: #fff;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
 
-    .header {
-      padding: 16px 18px 12px;
+    .top {
+      padding: 18px 20px 14px;
       display: flex;
       align-items: center;
       gap: 10px;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
     }
+    .top img { width: 28px; height: 28px; border-radius: 7px; }
+    .top-text { display: flex; flex-direction: column; }
+    .top-text h1 { font-size: 15px; font-weight: 700; line-height: 1; }
+    .top-text span { font-size: 10px; color: #555; margin-top: 2px; }
 
-    .header img {
-      width: 28px;
-      height: 28px;
-      border-radius: 6px;
-    }
-
-    .header-text h1 {
-      font-size: 15px;
-      font-weight: 700;
-      letter-spacing: -0.3px;
-    }
-
-    .header-text span {
-      font-size: 10px;
-      color: #555;
-      font-weight: 500;
-    }
-
-    .body {
-      padding: 14px 18px 18px;
+    .cards {
+      padding: 0 14px 20px;
       display: flex;
       flex-direction: column;
       gap: 10px;
     }
 
-    .section-label {
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
-      color: #555;
-    }
-
-    .url-group {
-      display: flex;
-      gap: 6px;
-    }
-
-    input[type="text"] {
-      flex: 1;
-      background: #151520;
-      border: 1px solid #222;
-      color: #fff;
-      padding: 10px 12px;
-      border-radius: 8px;
-      font-size: 13px;
-      font-family: inherit;
-      transition: border-color 0.2s;
-    }
-
-    input[type="text"]:focus {
-      outline: none;
-      border-color: #8B5CF6;
-    }
-
-    input[type="text"]::placeholder { color: #444; }
-
-    .btn {
-      border: none;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 600;
+    .card {
+      background: #13131c;
+      border: 1px solid #1e1e2a;
+      border-radius: 14px;
+      padding: 16px 40px 16px 16px;
       cursor: pointer;
-      font-family: inherit;
-      transition: all 0.15s;
       display: flex;
       align-items: center;
-      justify-content: center;
-      gap: 6px;
-    }
-
-    .btn:hover { transform: translateY(-1px); }
-    .btn:active { transform: scale(0.97); }
-
-    .btn-primary {
-      background: #8B5CF6;
-      color: #fff;
-      padding: 10px 18px;
-    }
-
-    .btn-primary:hover { background: #7C3AED; }
-
-    .btn-file {
-      width: 100%;
-      background: #151520;
-      color: #aaa;
-      border: 1px dashed #333;
-      padding: 12px;
-      cursor: pointer;
+      gap: 14px;
+      transition: all 0.15s;
       position: relative;
       overflow: hidden;
     }
+    .card:hover { border-color: #8B5CF6; }
+    .card:active { transform: scale(0.985); }
 
-    .btn-file:hover {
-      border-color: #8B5CF6;
-      color: #fff;
-      background: #1a1a2a;
+
+    .card-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+    .card-icon svg { width: 20px; height: 20px; }
+
+    .card-icon-paste {
+      background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(139,92,246,0.05));
+      color: #A78BFA;
+    }
+    .card-icon-file {
+      background: linear-gradient(135deg, rgba(59,130,246,0.15), rgba(59,130,246,0.05));
+      color: #60A5FA;
     }
 
-    .btn-file input {
+    .card-body { display: flex; flex-direction: column; gap: 2px; }
+    .card-title { font-size: 13.5px; font-weight: 600; }
+    .card-desc { font-size: 10.5px; color: #555; line-height: 1.3; }
+    .card-desc.error { color: #ef4444; }
+    .card-desc.warn { color: #f59e0b; }
+
+    .card-arrow {
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      opacity: 0;
-      cursor: pointer;
-    }
-
-    .btn-file svg {
-      width: 18px;
-      height: 18px;
-      opacity: 0.5;
-    }
-
-    .divider {
-      display: flex;
-      align-items: center;
-      gap: 10px;
+      right: 18px;
       color: #333;
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-
-    .divider::before, .divider::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: #222;
-    }
-
-    .footer {
-      padding: 10px 18px 12px;
-      border-top: 1px solid rgba(255,255,255,0.04);
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .footer-hint {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 10px;
-      color: #444;
-    }
-
-    .footer-hint svg { flex-shrink: 0; color: #444; }
-
-    .footer-links {
-      display: flex;
-      gap: 12px;
-    }
-
-    .footer-links a {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 11px;
-      font-weight: 500;
-      color: #555;
-      text-decoration: none;
       transition: color 0.15s;
     }
+    .card:hover .card-arrow { color: #8B5CF6; }
 
-    .footer-links a:hover { color: #8B5CF6; }
-    .footer-links a svg { flex-shrink: 0; }
-
-    .formats {
+    .bottom {
+      padding: 10px 20px 14px;
+      border-top: 1px solid #111119;
       display: flex;
-      flex-wrap: wrap;
-      gap: 4px;
-      margin-top: 2px;
+      justify-content: space-between;
+      align-items: center;
     }
 
-    .format-tag {
-      font-size: 9px;
-      font-weight: 600;
-      color: #666;
-      background: #151520;
-      padding: 2px 6px;
-      border-radius: 3px;
+    .supported {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
     }
+    .supported span {
+      font-size: 8px;
+      font-weight: 700;
+      color: #2a2a3a;
+      letter-spacing: 0.3px;
+    }
+
+    .links { display: flex; gap: 12px; }
+    .links a {
+      color: #2a2a3a;
+      text-decoration: none;
+      display: flex;
+      transition: color 0.15s;
+    }
+    .links a:hover { color: #8B5CF6; }
+    .links a svg { width: 14px; height: 14px; }
   </style>
 </head>
 <body>
-  <div class="header">
+  <div class="top">
     <img src="icons/icon48.png" alt="">
-    <div class="header-text">
+    <div class="top-text">
       <h1>Movi Player</h1>
       <span>Play any video format</span>
     </div>
   </div>
 
-  <div class="body">
-    <div class="section-label">Play from URL</div>
-    <div class="url-group">
-      <input type="text" id="url" placeholder="https://example.com/video.mkv" />
-      <button class="btn btn-primary" id="play">
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M8 5v14l11-7z"/></svg>
-        Play
-      </button>
+  <div class="cards">
+    <div class="card" id="paste">
+      <div class="card-icon card-icon-paste">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+        </svg>
+      </div>
+      <div class="card-body">
+        <span class="card-title">Paste & Play</span>
+        <span class="card-desc" id="paste-hint">Play a video link from clipboard</span>
+      </div>
+      <svg class="card-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M9 18l6-6-6-6"/></svg>
     </div>
 
-    <div class="divider">or</div>
-
-    <button class="btn btn-file" id="file">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-        <polyline points="17 8 12 3 7 8"></polyline>
-        <line x1="12" y1="3" x2="12" y2="15"></line>
-      </svg>
-      Open Local File
-    </button>
-
-    <div class="formats">
-      <span class="format-tag">MP4</span>
-      <span class="format-tag">MKV</span>
-      <span class="format-tag">WebM</span>
-      <span class="format-tag">MOV</span>
-      <span class="format-tag">TS</span>
-      <span class="format-tag">AVI</span>
-      <span class="format-tag">HEVC</span>
-      <span class="format-tag">AV1</span>
-      <span class="format-tag">HDR</span>
+    <div class="card" id="file">
+      <div class="card-icon card-icon-file">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+          <line x1="8" y1="21" x2="16" y2="21"/>
+          <line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+      </div>
+      <div class="card-body">
+        <span class="card-title">Play from Computer</span>
+        <span class="card-desc">Open a video file from your device</span>
+      </div>
+      <svg class="card-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M9 18l6-6-6-6"/></svg>
     </div>
   </div>
 
-  <div class="footer">
-    <div class="footer-hint">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="12" height="12">
-        <circle cx="12" cy="12" r="10"></circle>
-        <line x1="12" y1="16" x2="12" y2="12"></line>
-        <line x1="12" y1="8" x2="12.01" y2="8"></line>
-      </svg>
-      <span>Right-click any video link for "Open with Movi Player"</span>
+  <div class="bottom">
+    <div class="supported">
+      <span>MP4</span><span>MKV</span><span>HEVC</span><span>AV1</span>
+      <span>HDR</span><span>4K</span><span>WebM</span>
     </div>
-    <div class="footer-links">
-      <a href="https://github.com/MrUjjwalG/movi-player" target="_blank">
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M12 .3a12 12 0 00-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6.1-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 016 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.6.3 2.8.2 3.2.7.8 1.2 1.9 1.2 3.1 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1.2.9 2.4v3.5c0 .3.2.7.8.6A12 12 0 0012 .3"></path></svg>
-        GitHub
+    <div class="links">
+      <a href="https://github.com/MrUjjwalG/movi-player" target="_blank" title="GitHub">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 00-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-6 0-1.2.5-2.3 1.3-3.1-.2-.4-.6-1.6.1-3.2 0 0 1-.3 3.4 1.2a11.5 11.5 0 016 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.6.3 2.8.2 3.2.7.8 1.2 1.9 1.2 3.1 0 4.6-2.8 5.6-5.5 5.9.5.4.9 1.2.9 2.4v3.5c0 .3.2.7.8.6A12 12 0 0012 .3"/></svg>
       </a>
-      <a href="https://www.npmjs.com/package/movi-player" target="_blank">
-        <svg viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M0 7.334v8h6.666v1.332H12v-1.332h12v-8H0zm6.666 6.664H5.334v-4H3.999v4H1.335V8.667h5.331v5.331zm4 0v1.336H8.001V8.667h5.334v5.331h-2.669zm12.001 0h-1.33v-4h-1.336v4h-1.335v-4h-1.33v4h-2.671V8.667h8.002v5.331z"></path></svg>
-        npm
+      <a href="https://www.npmjs.com/package/movi-player" target="_blank" title="npm">
+        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M0 7.334v8h6.666v1.332H12v-1.332h12v-8H0zm6.666 6.664H5.334v-4H3.999v4H1.335V8.667h5.331v5.331zm4 0v1.336H8.001V8.667h5.334v5.331h-2.669zm12.001 0h-1.33v-4h-1.336v4h-1.335v-4h-1.33v4h-2.671V8.667h8.002v5.331z"/></svg>
       </a>
-      <a href="https://mrujjwalg.github.io/movi-player/" target="_blank">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path></svg>
-        Docs
+      <a href="https://mrujjwalg.github.io/movi-player/" target="_blank" title="Docs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
       </a>
     </div>
   </div>

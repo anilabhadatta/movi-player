@@ -153,9 +153,12 @@ export class FileSource implements SourceAdapter {
    * Get disk read stats for nerd stats overlay
    */
   getDiskStats(): { totalBytes: number; currentSpeed: number; elapsed: number } {
+    // If no read in last 1s, speed is 0 (paused/idle)
+    const timeSinceLastRead = this.lastSpeedTime > 0 ? (Date.now() - this.lastSpeedTime) / 1000 : 0;
+    const speed = timeSinceLastRead > 1 ? 0 : this.currentReadSpeed;
     return {
       totalBytes: this.totalBytesRead,
-      currentSpeed: this.currentReadSpeed,
+      currentSpeed: speed,
       elapsed: this.readStartTime > 0 ? (Date.now() - this.readStartTime) / 1000 : 0,
     };
   }

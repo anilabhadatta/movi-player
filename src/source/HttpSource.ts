@@ -957,9 +957,11 @@ export class HttpSource implements SourceAdapter {
    * Get network stats for nerd stats overlay
    */
   getNetworkStats(): { totalBytes: number; currentSpeed: number; elapsed: number } {
+    const timeSinceLastRead = this.lastSpeedTime > 0 ? (Date.now() - this.lastSpeedTime) / 1000 : 0;
+    const speed = timeSinceLastRead > 1 ? 0 : this.currentSpeed;
     return {
       totalBytes: this.totalBytesDownloaded,
-      currentSpeed: this.currentSpeed,
+      currentSpeed: speed,
       elapsed: this.streamStartTime > 0 ? (Date.now() - this.streamStartTime) / 1000 : 0,
     };
   }

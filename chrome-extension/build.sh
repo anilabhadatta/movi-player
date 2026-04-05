@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build chrome extension — copies dist from main project
+# Build chrome extension — copies only required dist files
 
 set -e
 
@@ -10,9 +10,13 @@ echo "Building movi-player dist..."
 cd "$ROOT"
 npm run build:ts
 
-echo "Copying dist to extension..."
+echo "Copying required files to extension..."
 rm -rf "$DIR/dist"
-cp -r "$ROOT/dist" "$DIR/dist"
+mkdir -p "$DIR/dist"
 
-echo "Done! Load extension from: $DIR"
+# Only element.js (standalone bundle with everything) + WASM
+cp "$ROOT/dist/element.js" "$DIR/dist/"
+
+echo "Done! Extension size: $(du -sh "$DIR/dist" | cut -f1)"
+echo "Load extension from: $DIR"
 echo "  → chrome://extensions → Developer mode → Load unpacked"
