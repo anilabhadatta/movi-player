@@ -74,7 +74,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
   // Playback Loop
   private animationFrameId: number | null = null;
-  private backgroundIntervalId: number | null = null; // Fallback for background playback
+  private backgroundIntervalId: number | null = null;
+  private backgroundWorker: Worker | null = null; // Worker-based timer for Safari
 
   // WakeLock to prevent screen sleep during playback
   private wakeLock: WakeLockSentinel | null = null;
@@ -772,10 +773,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
-    if (this.backgroundIntervalId !== null) {
-      clearInterval(this.backgroundIntervalId);
-      this.backgroundIntervalId = null;
-    }
+    this.stopBackgroundTimer();
 
     Logger.info(TAG, "Paused");
   }
@@ -2662,31 +2660,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     const isPlaying = this.stateManager.getState() === "playing" || this.stateManager.getState() === "buffering";
 
     if (document.visibilityState === "hidden" && isPlaying) {
-      // Tab went to background — switch to setInterval for playback loop
-      // requestAnimationFrame stops in background tabs
-      if (!this.backgroundIntervalId) {
-        Logger.debug(TAG, "Tab hidden — switching to background interval");
-        this.backgroundIntervalId = window.setInterval(() => {
-          if (this.stateManager.getState() === "playing" || this.stateManager.getState() === "buffering") {
-            this.processLoop();
-          }
-        }, 16); // ~60fps equivalent
-      }
+      // Tab went to background — use Worker timer (Safari throttles setInterval to 1s+)
+      this.startBackgroundTimer();
 
       // Resume AudioContext if suspended
       if (this.audioRenderer) {
         (this.audioRenderer as any).audioContext?.resume?.().catch(() => {});
       }
     } else if (document.visibilityState === "visible") {
-      // Tab visible again — stop background interval, RAF takes over
-      if (this.backgroundIntervalId) {
-        clearInterval(this.backgroundIntervalId);
-        this.backgroundIntervalId = null;
-        Logger.debug(TAG, "Tab visible — back to requestAnimationFrame");
-      }
+      // Tab visible again — stop background timer, RAF takes over
+      this.stopBackgroundTimer();
 
       if (isPlaying) {
-        // Re-acquire WakeLock
         setTimeout(() => {
           if (this.stateManager.getState() === "playing") {
             this.requestWakeLock();
@@ -2695,6 +2680,62 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       }
     }
   };
+
+  /**
+   * Start background timer using Web Worker (Safari-safe, not throttled)
+   */
+  private startBackgroundTimer(): void {
+    if (this.backgroundWorker || this.backgroundIntervalId) return;
+    Logger.debug(TAG, "Starting background playback timer");
+
+    try {
+      // Create inline Worker — not throttled in background tabs
+      const blob = new Blob([`
+        let id = null;
+        self.onmessage = (e) => {
+          if (e.data === 'start') {
+            id = setInterval(() => self.postMessage('tick'), 16);
+          } else if (e.data === 'stop') {
+            clearInterval(id);
+            id = null;
+          }
+        };
+      `], { type: "application/javascript" });
+      this.backgroundWorker = new Worker(URL.createObjectURL(blob));
+      this.backgroundWorker.onmessage = () => {
+        const state = this.stateManager.getState();
+        if (state === "playing" || state === "buffering") {
+          this.processLoop();
+        }
+      };
+      this.backgroundWorker.postMessage("start");
+    } catch {
+      // Worker not available — fallback to setInterval
+      Logger.debug(TAG, "Worker unavailable, using setInterval fallback");
+      this.backgroundIntervalId = window.setInterval(() => {
+        const state = this.stateManager.getState();
+        if (state === "playing" || state === "buffering") {
+          this.processLoop();
+        }
+      }, 16);
+    }
+  }
+
+  /**
+   * Stop background timer
+   */
+  private stopBackgroundTimer(): void {
+    if (this.backgroundWorker) {
+      this.backgroundWorker.postMessage("stop");
+      this.backgroundWorker.terminate();
+      this.backgroundWorker = null;
+      Logger.debug(TAG, "Background worker stopped");
+    }
+    if (this.backgroundIntervalId !== null) {
+      clearInterval(this.backgroundIntervalId);
+      this.backgroundIntervalId = null;
+    }
+  }
 
   /**
    * Release WakeLock
@@ -2863,10 +2904,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
     }
-    if (this.backgroundIntervalId !== null) {
-      clearInterval(this.backgroundIntervalId);
-      this.backgroundIntervalId = null;
-    }
+    this.stopBackgroundTimer();
 
     // Destroy HLS wrapper
     if (this.hlsWrapper) {
