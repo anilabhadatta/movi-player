@@ -1076,18 +1076,8 @@ export class MoviElement extends HTMLElement {
           if (thumbnailPlaceholder) thumbnailPlaceholder.style.display = "none";
           thumbnailImg.style.display = "block";
 
-          // Re-apply rotation margin if rotated
-          if (this._currentManualRotation % 180 !== 0) {
-            requestAnimationFrame(() => {
-              thumbnailImg.style.margin = "0";
-              const w = thumbnailImg.offsetWidth;
-              const h = thumbnailImg.offsetHeight;
-              if (w > 0 && h > 0) {
-                const diff = (w - h) / 2;
-                thumbnailImg.style.margin = `${diff}px ${-diff}px ${diff + 6}px ${-diff}px`;
-              }
-            });
-          }
+          // Re-apply rotation transform + margin on each preview load
+          this.applyThumbnailRotation(thumbnailImg);
         }
       } catch (e) {
         // Ignore aborts
@@ -9441,6 +9431,38 @@ export class MoviElement extends HTMLElement {
    * Reset timeline panel (clear thumbnails, hide panel)
    */
   /**
+   * Apply rotation transform + margin to a seek thumbnail image
+   */
+  private applyThumbnailRotation(img: HTMLImageElement): void {
+    const deg = this._currentManualRotation;
+    if (deg === 0) {
+      img.style.transform = "none";
+      img.style.margin = "";
+      return;
+    }
+    img.style.transform = `rotate(${deg}deg)`;
+    if (deg % 180 === 0) {
+      img.style.margin = "";
+      return;
+    }
+    // 90/270: need margin fix after image has dimensions
+    const fixMargin = () => {
+      img.style.margin = "0";
+      const w = img.offsetWidth;
+      const h = img.offsetHeight;
+      if (w > 0 && h > 0) {
+        const diff = (w - h) / 2;
+        img.style.margin = `${diff}px ${-diff}px ${diff + 6}px ${-diff}px`;
+      }
+    };
+    if (img.complete && img.naturalWidth > 0 && img.offsetWidth > 0) {
+      fixMargin();
+    } else {
+      img.addEventListener("load", fixMargin, { once: true });
+    }
+  }
+
+  /**
    * Sync thumbnail and timeline rotation with video rotation
    */
   private syncThumbnailRotation(deg: number): void {
@@ -9456,40 +9478,8 @@ export class MoviElement extends HTMLElement {
 
     // Seek thumbnail
     const thumbImg = this.shadowRoot.querySelector(".movi-thumbnail-img") as HTMLImageElement;
-    const thumbContainer = this.shadowRoot.querySelector(".movi-seek-thumbnail") as HTMLElement;
     if (thumbImg) {
-      thumbImg.style.maxWidth = "180px";
-      thumbImg.style.maxHeight = "200px";
-
-      if (deg === 0) {
-        thumbImg.style.transform = "none";
-        thumbImg.style.margin = "";
-      } else if (is90) {
-        // Rotate + adjust margin so layout reflects rotated dimensions
-        // After rotate(90), the image visually swaps W↔H but layout stays original
-        // margin hack: shift by (W-H)/2 to compensate
-        thumbImg.style.transform = `rotate(${deg}deg)`;
-        const fixLayout = () => {
-          const w = thumbImg.offsetWidth;
-          const h = thumbImg.offsetHeight;
-          if (w > 0 && h > 0) {
-            const diff = (w - h) / 2;
-            thumbImg.style.margin = `${diff}px ${-diff}px ${diff + 6}px ${-diff}px`;
-          }
-        };
-        if (thumbImg.complete && thumbImg.naturalWidth) {
-          requestAnimationFrame(fixLayout);
-        }
-        thumbImg.addEventListener("load", () => requestAnimationFrame(fixLayout), { once: true });
-      } else {
-        // 180°
-        thumbImg.style.transform = `rotate(${deg}deg)`;
-        thumbImg.style.margin = "";
-      }
-    }
-    // Reset container
-    if (thumbContainer) {
-      thumbContainer.style.width = "";
+      this.applyThumbnailRotation(thumbImg);
     }
 
     // Timeline — update portrait/landscape class based on result after rotation
