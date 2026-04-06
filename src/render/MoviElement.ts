@@ -367,29 +367,6 @@ export class MoviElement extends HTMLElement {
         <span class="movi-context-menu-label">Playback Speed</span>
         <span class="movi-context-menu-arrow">▶</span>
       </div>
-      <div class="movi-context-menu-item" data-action="fit">
-        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
-          <line x1="3" y1="9" x2="21" y2="9"></line>
-          <line x1="3" y1="15" x2="21" y2="15"></line>
-          <line x1="9" y1="3" x2="9" y2="21"></line>
-          <line x1="15" y1="3" x2="15" y2="21"></line>
-        </svg>
-        <span class="movi-context-menu-label">Aspect Ratio</span>
-        <span class="movi-context-menu-arrow">▶</span>
-      </div>
-      <div class="movi-context-menu-submenu" data-submenu="fit">
-        <div class="movi-context-menu-item movi-context-menu-back" data-action="back">
-          <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M15 18l-6-6 6-6"/>
-          </svg>
-          <span class="movi-context-menu-label">Back</span>
-        </div>
-        <div class="movi-context-menu-item" data-fit="contain">Contain</div>
-        <div class="movi-context-menu-item" data-fit="cover">Cover</div>
-        <div class="movi-context-menu-item" data-fit="fill">Stretch</div>
-        <div class="movi-context-menu-item" data-fit="zoom">Zoom</div>
-      </div>
       <div class="movi-context-menu-submenu" data-submenu="speed">
         <div class="movi-context-menu-item movi-context-menu-back" data-action="back">
           <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -405,6 +382,37 @@ export class MoviElement extends HTMLElement {
         <div class="movi-context-menu-item" data-speed="1.5">1.5x</div>
         <div class="movi-context-menu-item" data-speed="1.75">1.75x</div>
         <div class="movi-context-menu-item" data-speed="2">2x</div>
+      </div>
+      <div class="movi-context-menu-item" data-action="fit">
+        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/><rect x="6" y="8" width="12" height="8" rx="1"/>
+        </svg>
+        <span class="movi-context-menu-label">Aspect Ratio</span>
+        <span class="movi-context-menu-arrow">▶</span>
+      </div>
+      <div class="movi-context-menu-submenu" data-submenu="fit">
+        <div class="movi-context-menu-item movi-context-menu-back" data-action="back">
+          <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+          <span class="movi-context-menu-label">Back</span>
+        </div>
+        <div class="movi-context-menu-item" data-fit="contain">
+          <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="6" y="8" width="12" height="8" rx="1"/></svg>
+          <span class="movi-context-menu-label">Contain</span>
+        </div>
+        <div class="movi-context-menu-item" data-fit="cover">
+          <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><rect x="1" y="7" width="22" height="10" rx="1"/></svg>
+          <span class="movi-context-menu-label">Cover</span>
+        </div>
+        <div class="movi-context-menu-item" data-fit="fill">
+          <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 3h18v18H3z"/></svg>
+          <span class="movi-context-menu-label">Stretch</span>
+        </div>
+        <div class="movi-context-menu-item" data-fit="zoom">
+          <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
+          <span class="movi-context-menu-label">Zoom</span>
+        </div>
       </div>
       <div class="movi-context-menu-divider movi-context-menu-divider-audio" style="display: none;"></div>
       <div class="movi-context-menu-item movi-context-menu-item-audio" data-action="audio-track" style="display: none;">
@@ -698,7 +706,8 @@ export class MoviElement extends HTMLElement {
 
               <button class="movi-btn movi-aspect-ratio-btn" aria-label="Aspect Ratio">
                 <svg class="movi-icon-aspect-ratio" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                  <path class="movi-aspect-inner" d="M3 9h18M3 15h18M9 3v18M15 3v18"></path>
+                  <rect x="3" y="3" width="18" height="18" rx="2"/>
+                  <rect class="movi-aspect-inner" x="6" y="8" width="12" height="8" rx="1"/>
                 </svg>
               </button>
 
@@ -845,6 +854,7 @@ export class MoviElement extends HTMLElement {
           <div class="movi-shortcut-row"><kbd>Ctrl+&rarr;</kbd><span>Next Frame</span></div>
           <div class="movi-shortcut-row"><kbd>0</kbd><span>Seek to Start</span></div>
           <div class="movi-shortcut-row"><kbd>R</kbd><span>Rotate Video</span></div>
+          <div class="movi-shortcut-row"><kbd>A</kbd><span>Aspect Ratio</span></div>
           <div class="movi-shortcut-row"><kbd>I</kbd><span>Stats for Nerds</span></div>
           <div class="movi-shortcut-row"><kbd>T</kbd><span>Timeline</span></div>
           <div class="movi-shortcut-row"><kbd>?</kbd><span>This Panel</span></div>
@@ -1526,25 +1536,27 @@ export class MoviElement extends HTMLElement {
     document.addEventListener("click", closeSubtitleMenuHandler);
 
     // Aspect Ratio
-    // Aspect Ratio
     const aspectRatioBtn = shadowRoot.querySelector(
       ".movi-aspect-ratio-btn",
     ) as HTMLElement;
     aspectRatioBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
-      const modes: Array<"contain" | "cover" | "fill" | "zoom"> = [
-        "contain",
-        "cover",
-        "fill",
-        "zoom",
-      ];
-      const currentIndex = modes.indexOf(this._currentFit);
-      const nextIndex = (currentIndex + 1) % modes.length;
-      this._currentFit = modes[nextIndex];
+      const fits = ["contain", "cover", "fill", "zoom"] as const;
+      const current = this._objectFit === "control" ? this._currentFit : this._objectFit;
+      const idx = fits.indexOf(current as any);
+      const next = fits[(idx + 1) % fits.length];
+      if (this._objectFit === "control") {
+        this._currentFit = next;
+      } else {
+        this._objectFit = next;
+      }
       this.updateFitMode();
-      this.updateAspectRatioIcon();
-
-      Logger.info(TAG, `Internal Aspect Ratio changed to: ${this._currentFit}`);
+      const labels: Record<string, string> = { contain: "Fit", cover: "Fill", fill: "Stretch", zoom: "Zoom" };
+      const osdSvg = MoviElement.ASPECT_ICONS[next] || MoviElement.ASPECT_ICONS.contain;
+      this.showOSD(
+        `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${osdSvg}</svg>`,
+        labels[next],
+      );
     });
 
     // Playback Speed
@@ -2549,6 +2561,30 @@ export class MoviElement extends HTMLElement {
             this.syncThumbnailRotation(deg);
           }
           break;
+        case "a":
+        case "A":
+          // A: Cycle aspect ratio (contain → cover → fill)
+          e.preventDefault();
+          {
+            const fits = ["contain", "cover", "fill", "zoom"] as const;
+            const current = this._objectFit === "control" ? this._currentFit : this._objectFit;
+            const idx = fits.indexOf(current as any);
+            const next = fits[(idx + 1) % fits.length];
+            if (this._objectFit === "control") {
+              this._currentFit = next;
+            } else {
+              this._objectFit = next;
+            }
+            this.updateFitMode();
+            this.updateAspectRatioIcon();
+            const labels: Record<string, string> = { contain: "Fit", cover: "Fill", fill: "Stretch", zoom: "Zoom" };
+            const osdSvg = MoviElement.ASPECT_ICONS[next] || MoviElement.ASPECT_ICONS.contain;
+            this.showOSD(
+              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${osdSvg}</svg>`,
+              labels[next],
+            );
+          }
+          break;
         case "?":
           // ?: Show keyboard shortcuts
           e.preventDefault();
@@ -2982,10 +3018,7 @@ export class MoviElement extends HTMLElement {
           submenu.classList.add("movi-context-menu-submenu-visible");
         }
       } else if (action === "fit") {
-        // Show fit submenu (changed from toggle to add)
-        const submenu = shadowRoot.querySelector(
-          '.movi-context-menu-submenu[data-submenu="fit"]',
-        ) as HTMLElement;
+        const submenu = shadowRoot.querySelector('.movi-context-menu-submenu[data-submenu="fit"]') as HTMLElement;
         if (submenu) {
           contextMenu.scrollTop = 0;
           submenu.classList.add("movi-context-menu-submenu-visible");
@@ -3045,31 +3078,24 @@ export class MoviElement extends HTMLElement {
 
         hideContextMenu();
       } else if (item.dataset.fit) {
-        // Set object fit mode
-        const fitMode = item.dataset.fit as
-          | "contain"
-          | "cover"
-          | "fill"
-          | "zoom";
-
+        const fitMode = item.dataset.fit as "contain" | "cover" | "fill" | "zoom";
         if (this._objectFit === "control") {
-          // If in control mode, just update the current choice so button stays visible
           this._currentFit = fitMode;
-          this.updateFitMode();
-          this.updateAspectRatioIcon();
         } else {
-          // Otherwise update the main property (which might be a fixed mode)
-          this.objectFit = fitMode;
+          this._objectFit = fitMode;
         }
-
-        // Update active state
-        contextMenu
-          .querySelectorAll(".movi-context-menu-item[data-fit]")
-          .forEach((el) => {
-            el.classList.remove("movi-context-menu-active");
-          });
+        this.updateFitMode();
+        this.updateAspectRatioIcon();
+        contextMenu.querySelectorAll(".movi-context-menu-item[data-fit]").forEach((el) => {
+          el.classList.remove("movi-context-menu-active");
+        });
         item.classList.add("movi-context-menu-active");
-
+        // Update the new context menu status too
+        const aspectStatus = shadowRoot.querySelector(".movi-aspect-status");
+        if (aspectStatus) {
+          const labels: Record<string, string> = { contain: "Fit", cover: "Fill", fill: "Stretch", zoom: "Zoom" };
+          aspectStatus.textContent = labels[fitMode] || fitMode;
+        }
         hideContextMenu();
       } else if (action === "hdr-toggle") {
         this.hdr = !this.hdr;
@@ -3522,39 +3548,20 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  private static readonly ASPECT_ICONS: Record<string, string> = {
+    contain: `<rect x="3" y="3" width="18" height="18" rx="2"/><rect x="6" y="8" width="12" height="8" rx="1"/>`,
+    cover: `<rect x="3" y="3" width="18" height="18" rx="2"/><rect x="1" y="7" width="22" height="10" rx="1"/>`,
+    fill: `<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 3h18v18H3z"/>`,
+    zoom: `<circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v6M8 11h6"/>`,
+  };
+
   private updateAspectRatioIcon(): void {
-    const icon = this.shadowRoot?.querySelector(
-      ".movi-icon-aspect-ratio",
-    ) as HTMLElement;
-    const inner = icon?.querySelector(".movi-aspect-inner") as HTMLElement;
+    const icon = this.shadowRoot?.querySelector(".movi-icon-aspect-ratio") as SVGElement;
+    if (!icon) return;
 
-    if (!inner) return;
-
-    const fit =
-      this._objectFit === "control"
-        ? this._currentFit
-        : (this._objectFit as any);
-
-    if (fit === "contain") {
-      // Fit inside (Standard wide frame)
-      inner.setAttribute("d", "M3 7h18v10H3z");
-      inner.style.opacity = "1";
-    } else if (fit === "cover") {
-      // Expand to cover (Corners)
-      inner.setAttribute("d", "M15 3h6v6 M21 3l-7 7 M9 21H3v-6 M3 21l7-7");
-      inner.style.opacity = "1";
-    } else if (fit === "fill") {
-      // Stretch to fill (Full box with crosshair)
-      inner.setAttribute("d", "M3 3h18v18H3z M12 3v18 M3 12h18");
-      inner.style.opacity = "1";
-    } else if (fit === "zoom") {
-      // Zoom (Brackets with center plus)
-      inner.setAttribute(
-        "d",
-        "M10 3H3v7 M14 3h7v7 M3 14v7h10 M21 14v7h-7 M12 9v6 M9 12h6",
-      );
-      inner.style.opacity = "1";
-    }
+    const fit = this._objectFit === "control" ? this._currentFit : (this._objectFit as any);
+    const svg = MoviElement.ASPECT_ICONS[fit] || MoviElement.ASPECT_ICONS.contain;
+    icon.innerHTML = svg;
   }
 
   private updateAudioTrackMenu(): void {
@@ -7785,16 +7792,8 @@ export class MoviElement extends HTMLElement {
       }
     }
 
-    // Update button visibility - move outside of player check
-    const aspectRatioBtn = this.shadowRoot?.querySelector(
-      ".movi-aspect-ratio-btn",
-    ) as HTMLElement;
-    if (aspectRatioBtn) {
-      aspectRatioBtn.style.display =
-        this._objectFit === "control" ? "flex" : "none";
-      // Ensure icon matches the state immediately
-      this.updateAspectRatioIcon();
-    }
+    // Ensure icon matches the state immediately
+    this.updateAspectRatioIcon();
   }
 
   /**

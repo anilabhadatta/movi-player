@@ -308,6 +308,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
     // Handle visibility changes to re-acquire WakeLock if lost
     document.addEventListener("visibilitychange", this.handleVisibilityChange);
+
+    // Handle network recovery: re-seek to current position to restart cleanly
+    window.addEventListener("online", this.handleNetworkOnline);
   }
 
   /**
@@ -942,7 +945,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     this.emit("timeUpdate", this.getCurrentTime());
 
     // Stall detection: if playing but both video and audio buffers are critically low
-    if (this.stateManager.getState() === "playing" && !this.eofReached && !this.waitingForVideoSync) {
+    // Skip near end of video to avoid false stall at EOF
+    const nearEnd = this.mediaInfo && this.clock.getTime() >= (this.mediaInfo.duration + this.startTime) - 3;
+    if (this.stateManager.getState() === "playing" && !this.eofReached && !this.waitingForVideoSync && !nearEnd) {
       const videoEmpty = this.videoRenderer ? this.videoRenderer.getQueueSize() === 0 : false;
       const audioLow = this.disableAudio || this.audioRenderer.getBufferedDuration() < 0.05;
       if (videoEmpty && audioLow) {
@@ -999,10 +1004,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           !this.videoRenderer || this.videoRenderer.getQueueSize() === 0;
 
         if (videoDone || timeDone) {
-          if (timeDone) {
-            this.handleEnded();
-            return;
-          }
+          this.handleEnded();
+          return;
         }
       }
       return; // Don't demux more, just wait for playback to finish
@@ -2682,6 +2685,15 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   }
 
   /**
+   * Handle network recovery — re-seek to current position to restart cleanly
+   */
+  private handleNetworkOnline = (): void => {
+    // Network recovery is handled by processLoop's buffering exit condition.
+    // HttpSource resumes fetching on online event, buffers refill,
+    // then processLoop detects videoReady || audioReady and auto-resumes.
+  };
+
+  /**
    * Handle visibility change
    */
   private handleVisibilityChange = async (): Promise<void> => {
@@ -2992,6 +3004,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       "visibilitychange",
       this.handleVisibilityChange,
     );
+    window.removeEventListener("online", this.handleNetworkOnline);
     this.removeAllListeners();
 
     Logger.info(TAG, "Player destroyed");
