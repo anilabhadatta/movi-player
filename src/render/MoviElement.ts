@@ -163,6 +163,8 @@ export class MoviElement extends HTMLElement {
       "tokenurl",
       "videourl",
       "videoid",
+      "drm",
+      "licenseurl",
     ];
   }
 
@@ -8281,17 +8283,43 @@ export class MoviElement extends HTMLElement {
         ...(this._fps > 0 && { frameRate: this._fps }),
       };
 
-      // Use canvas mode
-      playerConfig.renderer = "canvas";
-      playerConfig.canvas = this.canvas;
+      // DRM mode: use native video element for HLS (EME requires <video>)
+      const isDrm = this.hasAttribute("drm");
+      const isHLS = typeof this._src === "string" &&
+        (this._src.includes(".m3u8") || this._src.toLowerCase().endsWith("m3u8"));
 
-      // Update visibility
-      this.canvas.style.display = "block";
-      this.video.style.display = "none";
+      if (isDrm && isHLS) {
+        playerConfig.renderer = "video";
+        playerConfig.drm = true;
+        playerConfig.licenseUrl = this.getAttribute("licenseurl") || "";
+        this.canvas.style.display = "none";
+        this.video.style.display = "block";
+      } else {
+        playerConfig.renderer = "canvas";
+        playerConfig.canvas = this.canvas;
+        this.canvas.style.display = "block";
+        this.video.style.display = "none";
+      }
 
       // Create Player instance
-      Logger.info(TAG, "Initializing MoviPlayer (Canvas Renderer Mode)");
+      const mode = playerConfig.drm ? "DRM/Native Video" : "Canvas Renderer";
+      Logger.info(TAG, `Initializing MoviPlayer (${mode} Mode)`);
       this.player = new MoviPlayer(playerConfig);
+
+      // In DRM mode, use HLS wrapper's video element directly
+      if (playerConfig.drm) {
+        const hlsVideo = this.player.getHLSVideoElement();
+        if (hlsVideo && this.video) {
+          // Replace our video element with HLS's video element
+          hlsVideo.style.width = "100%";
+          hlsVideo.style.height = "100%";
+          hlsVideo.style.display = "block";
+          hlsVideo.style.objectFit = "contain";
+          this.video.replaceWith(hlsVideo);
+          this.video = hlsVideo;
+          Logger.info(TAG, "DRM: Swapped in HLS native video element");
+        }
+      }
 
       // Reset unsupported state
       this._isUnsupported = false;

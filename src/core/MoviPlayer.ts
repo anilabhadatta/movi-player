@@ -2334,6 +2334,14 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   }
 
   /**
+   * Get HLS video element (DRM mode) for direct DOM insertion
+   */
+  getHLSVideoElement(): HTMLVideoElement | null {
+    return this.hlsWrapper?.getVideoElement() ?? null;
+  }
+
+
+  /**
    * Get chapters from the media (empty array if none)
    */
   getChapters(): Array<{ title: string; start: number; end: number }> {

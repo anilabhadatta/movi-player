@@ -62,6 +62,7 @@ export class CanvasRenderer {
   private fitMode: "contain" | "cover" | "fill" | "zoom" | "control" =
     "contain"; // Default to contain (maintain aspect ratio)
 
+
   // Subtitle rendering
   private activeSubtitleCue: SubtitleCue | null = null;
   private subtitleCues: SubtitleCue[] = [];
@@ -404,6 +405,7 @@ export class CanvasRenderer {
       gl.useProgram(this.program);
       gl.uniform1i(uImage, 0);
     }
+
   }
 
   /**
@@ -557,6 +559,7 @@ export class CanvasRenderer {
         `Set u_hdrEnabled uniform to: ${this.hdrEnabled ? 1.0 : 0.0}`,
       );
     }
+
   }
 
   private lastPrimaries?: string;

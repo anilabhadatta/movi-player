@@ -106,6 +106,9 @@ export interface PlayerConfig {
   wasmBinary?: Uint8Array; // Embedded WASM binary data
   enablePreviews?: boolean; // Enable thumbnail preview pipeline (default: false)
   frameRate?: number; // Override frame rate (fps) - 0 = auto
+  drm?: boolean; // Enable DRM mode for HLS (native video element, no canvas)
+  licenseUrl?: string; // Widevine/FairPlay license server URL
+  licenseHeaders?: Record<string, string>; // Custom headers for license requests (e.g., auth tokens)
 }
 
 // ============================================================================

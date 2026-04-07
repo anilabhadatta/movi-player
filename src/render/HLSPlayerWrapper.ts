@@ -38,7 +38,9 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
     (this.videoElement as any).mozPreservesPitch = true; // Firefox
     (this.videoElement as any).webkitPreservesPitch = true; // Safari/older Chrome
 
-    if (config.renderer === "canvas" && config.canvas) {
+    // DRM mode: use native video element directly (no canvas)
+    // Canvas can't access DRM-protected frames (browser blocks VideoFrame copy)
+    if (!config.drm && config.renderer === "canvas" && config.canvas) {
       this.canvasRenderer = new CanvasRenderer(config.canvas);
     }
 
@@ -197,12 +199,19 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
       throw new Error("HLS source must be a URL");
     }
 
+    if (this.config.drm) {
+      Logger.info(TAG, "DRM mode enabled — using native video element (no canvas)");
+      if (this.config.licenseUrl) {
+        this.setupEME(this.config.licenseUrl, this.config.licenseHeaders);
+      }
+    }
+
     this.hls = new Hls({
       enableWorker: true,
       lowLatencyMode: false,
       backBufferLength: 90,
-      maxBufferLength: 30, // 30 seconds
-      maxMaxBufferLength: 600, // Allow large buffer to avoid full errors during seeking/quality switch
+      maxBufferLength: 30,
+      maxMaxBufferLength: 600,
     });
 
     this.hls.attachMedia(this.videoElement);
@@ -409,6 +418,72 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
     if (this.canvasRenderer) {
       this.canvasRenderer.setHDREnabled(enabled);
     }
+  }
+
+  /**
+   * Setup Encrypted Media Extensions (EME) for Widevine/FairPlay DRM
+   * Requires a valid license server URL from a DRM provider (e.g., PallyCon, EZDRM, BuyDRM)
+   */
+  private setupEME(licenseUrl: string, headers?: Record<string, string>): void {
+    const video = this.videoElement;
+
+    video.addEventListener("encrypted", async (event) => {
+      Logger.info(TAG, `EME: encrypted event — initDataType=${event.initDataType}`);
+
+      try {
+        const config: MediaKeySystemConfiguration[] = [{
+          initDataTypes: [event.initDataType],
+          videoCapabilities: [{ contentType: 'video/mp4; codecs="avc1.42E01E"' }],
+          audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+        }];
+
+        // Try Widevine first, then FairPlay
+        let keySystem = "com.widevine.alpha";
+        let access: MediaKeySystemAccess;
+        try {
+          access = await navigator.requestMediaKeySystemAccess(keySystem, config);
+        } catch {
+          keySystem = "com.apple.fps.1_0";
+          access = await navigator.requestMediaKeySystemAccess(keySystem, config);
+        }
+
+        Logger.info(TAG, `EME: Using ${keySystem}`);
+        const keys = await access.createMediaKeys();
+        await video.setMediaKeys(keys);
+
+        const session = keys.createSession();
+        session.addEventListener("message", async (e) => {
+          // Request license from server
+          const response = await fetch(licenseUrl, {
+            method: "POST",
+            body: e.message,
+            headers: {
+              "Content-Type": "application/octet-stream",
+              ...headers,
+            },
+          });
+
+          if (!response.ok) {
+            Logger.error(TAG, `EME: License request failed (HTTP ${response.status})`);
+            this.emit("error", new Error(`DRM license request failed (HTTP ${response.status})`));
+            return;
+          }
+
+          const license = await response.arrayBuffer();
+          await session.update(new Uint8Array(license));
+          Logger.info(TAG, "EME: License acquired, playback authorized");
+        });
+
+        await session.generateRequest(event.initDataType, event.initData!);
+      } catch (err) {
+        Logger.error(TAG, "EME: DRM setup failed", err);
+        this.emit("error", new Error(`DRM not supported or license server unreachable`));
+      }
+    });
+  }
+
+  getVideoElement(): HTMLVideoElement {
+    return this.videoElement;
   }
 
   getBufferEndTime(): number {
