@@ -868,9 +868,24 @@ export class MoviVideoDecoder {
     if (!this.decoder) return;
 
     try {
-      await this.decoder.flush();
+      // Timeout flush — WebCodecs flush() can hang on slow devices
+      await Promise.race([
+        this.decoder.flush(),
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("flush timeout")), 1000)
+        ),
+      ]);
     } catch (error) {
-      Logger.error(TAG, "Flush error", error);
+      Logger.warn(TAG, "Flush timeout or error, resetting decoder", error);
+      try {
+        this.decoder.reset();
+        // Reconfigure after reset
+        if (this.lastConfig) {
+          this.decoder.configure(this.lastConfig);
+        }
+      } catch (e) {
+        Logger.error(TAG, "Reset after flush timeout failed", e);
+      }
     }
   }
 

@@ -8521,6 +8521,7 @@ export class MoviElement extends HTMLElement {
 
     // Forward player events to element
     const stateChangeHandler = (state: PlayerState) => {
+      Logger.info(TAG, `stateChange: ${state}`);
       // Hide poster on state change to playing
       if (state === "playing" && this.posterElement) {
         this.posterElement.style.display = "none";
@@ -10111,10 +10112,11 @@ export class MoviElement extends HTMLElement {
 
     if (panel.style.display === "none") {
       panel.style.display = "flex";
-      // Auto-generate if strip is empty
+      // Auto-generate if strip is empty or previous attempt failed
       const strip = shadowRoot.querySelector(".movi-timeline-strip") as HTMLElement;
-      if (strip && strip.children.length === 0) {
-        // Small delay to ensure panel is rendered and player is ready
+      const status = shadowRoot.querySelector(".movi-timeline-status") as HTMLElement;
+      const failed = status?.textContent?.includes("Failed");
+      if (strip && (strip.children.length === 0 || failed)) {
         requestAnimationFrame(() => this.generateTimelineStrip(shadowRoot));
       }
     } else {
@@ -10274,7 +10276,9 @@ export class MoviElement extends HTMLElement {
         status.textContent = `${strip.children.length} / ${count}`;
       });
 
-      status.textContent = `${strip.children.length} thumbnails`;
+      status.textContent = strip.children.length > 0
+        ? `${strip.children.length} thumbnails`
+        : "Failed to generate — try again";
     }
 
   }
@@ -10374,25 +10378,30 @@ export class MoviElement extends HTMLElement {
 
   set currentTime(value: number) {
     if (this.player) {
-      // Only allow seeking if player is ready, playing, or paused
       const state = this.player.getState();
+      Logger.info(TAG, `currentTime setter: value=${value.toFixed(2)}, state=${state}, isSeeking=${this.isSeeking}`);
       if (
         state === "ready" ||
         state === "playing" ||
         state === "paused" ||
-        state === "ended"
+        state === "ended" ||
+        state === "seeking" ||
+        state === "buffering"
       ) {
         this.isSeeking = true;
         this.player
           .seek(value)
+          .then(() => {
+            Logger.info(TAG, `Seek resolved: value=${value.toFixed(2)}, newState=${this.player?.getState()}`);
+          })
           .catch((error) => {
-            Logger.error(TAG, "Seek error", error);
+            Logger.error(TAG, `Seek error: value=${value.toFixed(2)}`, error);
           })
           .finally(() => {
-            // Note: In rapid seeking (frame-by-frame), we don't clear isSeeking immediately
-            // if we want to avoid progress bar jumps, but we must allow next seek to proceed.
             this.isSeeking = false;
           });
+      } else {
+        Logger.warn(TAG, `Seek blocked — state=${state} not allowed`);
       }
     }
   }

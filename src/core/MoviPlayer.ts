@@ -1386,10 +1386,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
 
     const currentState = this.stateManager.getState();
+    Logger.info(TAG, `seek(${seconds.toFixed(2)}): state=${currentState}, waitingForVideoSync=${this.waitingForVideoSync}, demuxInFlight=${this.demuxInFlight}, seekSessionId=${this.seekSessionId}`);
 
     // Safety check - though PlayerState now permits it
     if (!this.stateManager.canSeek()) {
-      Logger.warn(TAG, "Cannot seek in current state");
+      Logger.warn(TAG, `seek blocked: canSeek=false, state=${currentState}`);
       return;
     }
 
@@ -1436,8 +1437,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       if (this.seekSessionId !== mySessionId) return; // Superceded
 
       // Flush decoders
+      Logger.info(TAG, `seek: flushing video decoder...`);
       await this.videoDecoder.flush();
+      Logger.info(TAG, `seek: flushing audio decoder...`);
       await this.audioDecoder.flush();
+      Logger.info(TAG, `seek: decoders flushed`);
 
       // Clear video frame queue to prevent old frames from being displayed
       if (this.videoRenderer) {
@@ -1450,7 +1454,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       if (this.seekSessionId !== mySessionId) return; // Superceded
 
       // Seek relative to start time (time 0 in UI = startTime in media)
+      Logger.info(TAG, `seek: demuxer.seek(${(seconds + this.startTime).toFixed(2)}) starting...`);
       await this.demuxer.seek(seconds + this.startTime);
+      Logger.info(TAG, `seek: demuxer.seek done`);
       this.clock.seek(seconds + this.startTime);
 
       // Reset EOF flag after seek - we're now at a new position
@@ -1478,6 +1484,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
       // Start processing loop to find and decode the target frame/packet.
       // notifySeekCompletion will be called once the first valid frame is received.
+      Logger.info(TAG, `seek: starting processLoop, waitingForVideoSync=${this.waitingForVideoSync}, state=${this.stateManager.getState()}`);
       this.processLoop();
 
       // Ensure the video renderer loop is running to actually draw frames as they arrive
@@ -1536,13 +1543,22 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       if (!this.thumbnailBindings) {
         if (this.previewInitPromise) {
           Logger.debug(TAG, "Waiting for existing preview initialization...");
-          await this.previewInitPromise;
+          try {
+            await this.previewInitPromise;
+          } catch {
+            // Init failed, clear promise so retry can work
+            this.previewInitPromise = null;
+          }
         }
         // If still no bindings (init failed or promise was cleared), retry
         if (!this.thumbnailBindings) {
           Logger.debug(TAG, "Initializing thumbnail pipeline (retry)...");
           this.previewInitPromise = this.initPreviewPipeline();
-          await this.previewInitPromise;
+          try {
+            await this.previewInitPromise;
+          } catch {
+            this.previewInitPromise = null;
+          }
         }
       }
 

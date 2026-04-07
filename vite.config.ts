@@ -46,7 +46,7 @@ export default defineConfig({
       plugins: [
         terser({
           compress: {
-            drop_console: false,
+            drop_console: true,
             drop_debugger: false,
             // pure_funcs: ['console.debug', 'console.trace'],
             passes: 5, // Increased passes for better compression (tested safe)
