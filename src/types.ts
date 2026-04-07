@@ -89,6 +89,22 @@ export interface SourceConfig {
   };
 }
 
+/** Audio source with language metadata for multi-language support */
+export interface AudioSourceEntry {
+  url: string;
+  type?: string;
+  lang: string;       // BCP 47 language code (e.g., "en", "hi", "ja")
+  label: string;      // Display name (e.g., "English", "Hindi")
+}
+
+/** External subtitle source (VTT/SRT) with language metadata */
+export interface SubtitleSourceEntry {
+  url: string;
+  lang: string;       // BCP 47 language code
+  label: string;      // Display name
+  format?: "vtt" | "srt"; // Auto-detected from URL extension if omitted
+}
+
 export interface CacheConfig {
   type: "lru";
   maxSizeMB: number;
@@ -99,6 +115,12 @@ export type DecoderType = "auto" | "software";
 
 export interface PlayerConfig {
   source: SourceConfig;
+  /** Separate audio source — single or multi-language */
+  audioSource?: SourceConfig;
+  /** Multiple audio tracks with language metadata */
+  audioTracks?: AudioSourceEntry[];
+  /** External subtitle tracks (VTT/SRT) with language metadata */
+  subtitleTracks?: SubtitleSourceEntry[];
   renderer?: RendererType;
   decoder?: DecoderType;
   cache?: CacheConfig;

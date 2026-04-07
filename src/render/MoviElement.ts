@@ -24,6 +24,21 @@ import { SettingsStorage } from "../utils/SettingsStorage";
 
 const TAG = "MoviElement";
 
+// OSD icon constants — shared across keyboard, button, and context menu handlers
+const OSD = {
+  loop: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>`,
+  stableAudio: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 15v-2M9 15v-4M12 15v-6M15 15v-4M18 15v-2"/></svg>`,
+  hdr: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>`,
+  speed: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/><line x1="19" y1="3" x2="19" y2="21"/></svg>`,
+  audio: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`,
+  subOn: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M13 15h4"/></svg>`,
+  subOff: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M13 15h4"/><line x1="3" y1="5" x2="21" y2="19" stroke-width="2.5"/></svg>`,
+  snapshot: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>`,
+  rotate: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>`,
+  muted: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`,
+  unmuted: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`,
+} as const;
+
 export class MoviElement extends HTMLElement {
   private canvas: HTMLCanvasElement;
   private video: HTMLVideoElement;
@@ -63,6 +78,9 @@ export class MoviElement extends HTMLElement {
 
   // Internal state
   private _src: string | File | null = null;
+  private _audioSrc: string | null = null; // Separate audio source URL
+  private _audioTracks: { src: string; type?: string; lang: string; label: string }[] = []; // Multi-language audio
+  private _subtitleTracks: { src: string; lang: string; label: string; format?: string }[] = []; // External subtitles
   private _autoplay: boolean = false;
   private _controls: boolean = false;
   private _loop: boolean = false;
@@ -1013,12 +1031,20 @@ export class MoviElement extends HTMLElement {
     hdrBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       this.hdr = !this.hdr;
+      this.showOSD(
+        OSD.hdr,
+        this.hdr ? "HDR On" : "HDR Off",
+      );
     });
 
     // Loop Toggle
     loopBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       this.loop = !this.loop;
+      this.showOSD(
+        OSD.loop,
+        this.loop ? "Loop On" : "Loop Off",
+      );
     });
 
     // Stable Audio Toggle
@@ -1029,6 +1055,10 @@ export class MoviElement extends HTMLElement {
         const current = this.player.getStableAudio();
         this.player.setStableAudio(!current);
         this.updateStableAudioUI(shadowRoot);
+        this.showOSD(
+          OSD.stableAudio,
+          !current ? "Stable Volume On" : "Stable Volume Off",
+        );
       }
     });
 
@@ -1616,7 +1646,10 @@ export class MoviElement extends HTMLElement {
         e.stopPropagation();
         const speed = parseFloat((item as HTMLElement).dataset.speed || "1");
         this.playbackRate = speed;
-
+        this.showOSD(
+          OSD.speed,
+          `Speed ${speed}x`,
+        );
         if (speedMenu) speedMenu.style.display = "none";
       });
     });
@@ -2609,6 +2642,12 @@ export class MoviElement extends HTMLElement {
           // M: Mute/Unmute
           e.preventDefault();
           this.muted = !this.muted;
+          this.showOSD(
+            this.muted
+              ? OSD.muted
+              : OSD.unmuted,
+            this.muted ? "Muted" : "Unmuted",
+          );
           break;
         case "s":
         case "S":
@@ -2616,7 +2655,7 @@ export class MoviElement extends HTMLElement {
           e.preventDefault();
           this.takeSnapshot();
           this.showOSD(
-            `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>`,
+            OSD.snapshot,
             "Snapshot",
           );
           break;
@@ -2689,33 +2728,50 @@ export class MoviElement extends HTMLElement {
           e.preventDefault();
           this.loop = !this.loop;
           this.showOSD(
-            `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>`,
+            OSD.loop,
             this.loop ? "Loop On" : "Loop Off",
           );
           break;
         case "v":
         case "V":
-          // V: Cycle subtitle track (VLC standard)
+          // V: Cycle subtitle track (VLC standard) — external then muxed
           e.preventDefault();
           if (this.player) {
-            const subs = this.player.getSubtitleTracks();
-            if (subs.length > 0) {
-              const active = this.player.trackManager.getActiveSubtitleTrack();
-              const activeIdx = active ? subs.findIndex(t => t.id === active.id) : -1;
-              const nextIdx = activeIdx + 1;
-              if (nextIdx >= subs.length) {
-                this.player.selectSubtitleTrack(null);
-                this.showOSD(
-                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M13 15h4"/><line x1="3" y1="5" x2="21" y2="19" stroke-width="2.5"/></svg>`,
-                  "Subtitles Off",
-                );
+            const extSubs = this.player.getSubtitleLangs();
+            const muxedSubs = this.player.getSubtitleTracks();
+            const subOsdOn = OSD.subOn;
+            const subOsdOff = OSD.subOff;
+
+            if (extSubs.length > 0) {
+              // Cycle through external subtitle tracks: off → lang1 → lang2 → ... → off
+              const activeIdx = extSubs.findIndex((t) => t.active);
+              if (activeIdx === -1) {
+                // Currently off → select first
+                this.player.selectSubtitleLang(extSubs[0].lang);
+                this.showOSD(subOsdOn, `${extSubs[0].label} (1/${extSubs.length})`);
+              } else if (activeIdx + 1 < extSubs.length) {
+                // Next track
+                const next = extSubs[activeIdx + 1];
+                this.player.selectSubtitleLang(next.lang);
+                this.showOSD(subOsdOn, `${next.label} (${activeIdx + 2}/${extSubs.length})`);
               } else {
-                const next = subs[nextIdx];
+                // Last → off
+                this.player.selectSubtitleLang(null);
+                this.showOSD(subOsdOff, "Subtitles Off");
+              }
+              this.updateSubtitleTrackMenu();
+            } else if (muxedSubs.length > 0) {
+              // Fallback: muxed subtitle tracks
+              const active = this.player.trackManager.getActiveSubtitleTrack();
+              const activeIdx = active ? muxedSubs.findIndex(t => t.id === active.id) : -1;
+              const nextIdx = activeIdx + 1;
+              if (nextIdx >= muxedSubs.length) {
+                this.player.selectSubtitleTrack(null);
+                this.showOSD(subOsdOff, "Subtitles Off");
+              } else {
+                const next = muxedSubs[nextIdx];
                 this.player.selectSubtitleTrack(next.id);
-                this.showOSD(
-                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M13 15h4"/></svg>`,
-                  `${next.language?.toUpperCase() || "Sub"} (${nextIdx + 1}/${subs.length})`,
-                );
+                this.showOSD(subOsdOn, `${next.language?.toUpperCase() || "Sub"} (${nextIdx + 1}/${muxedSubs.length})`);
               }
               this.updateSubtitleTrackMenu();
             }
@@ -2723,20 +2779,41 @@ export class MoviElement extends HTMLElement {
           break;
         case "b":
         case "B":
-          // B: Cycle audio track (VLC standard)
+          // B: Cycle audio track — muxed + external combined
           e.preventDefault();
           if (this.player) {
-            const audios = this.player.getAudioTracks();
-            if (audios.length > 1) {
-              const active = this.player.trackManager.getActiveAudioTrack();
-              const activeIdx = active ? audios.findIndex(t => t.id === active.id) : 0;
-              const nextIdx = (activeIdx + 1) % audios.length;
-              const next = audios[nextIdx];
-              this.player.selectAudioTrack(next.id);
-              this.showOSD(
-                `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`,
-                `${next.language?.toUpperCase() || "Audio"} (${nextIdx + 1}/${audios.length})`,
-              );
+            const bMuxed = this.player.getAudioTracks();
+            const bExternal = this.player.getAudioLangs();
+            const bIcon = OSD.audio;
+
+            // Build unified list: muxed first, then external
+            type AudioEntry = { type: "muxed"; id: number; label: string } | { type: "ext"; lang: string; label: string };
+            const allAudio: AudioEntry[] = [
+              ...bMuxed.map((t) => ({ type: "muxed" as const, id: t.id, label: t.label || t.language || `Audio ${t.id}` })),
+              ...bExternal.map((t) => ({ type: "ext" as const, lang: t.lang, label: t.label })),
+            ];
+
+            if (allAudio.length > 1) {
+              // Find current active index
+              const isNative = this.player.isNativeAudioActive();
+              let curIdx = -1;
+              if (isNative) {
+                const activeLang = bExternal.find((t) => t.active)?.lang;
+                curIdx = allAudio.findIndex((a) => a.type === "ext" && a.lang === activeLang);
+              } else {
+                const activeId = this.player.trackManager.getActiveAudioTrack()?.id;
+                curIdx = allAudio.findIndex((a) => a.type === "muxed" && a.id === activeId);
+              }
+              const nextIdx = (curIdx + 1) % allAudio.length;
+              const next = allAudio[nextIdx];
+
+              if (next.type === "ext") {
+                this.player.selectAudioLang(next.lang);
+              } else {
+                if (this.player.isNativeAudioActive()) this.player.useMuxedAudio();
+                this.player.selectAudioTrack(next.id);
+              }
+              this.showOSD(bIcon, `${next.label} (${nextIdx + 1}/${allAudio.length})`);
               this.updateAudioTrackMenu();
             }
           }
@@ -2750,7 +2827,7 @@ export class MoviElement extends HTMLElement {
             if (hdrItem && hdrItem.style.display !== "none") {
               this.hdr = !this.hdr;
               this.showOSD(
-                `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>`,
+                OSD.hdr,
                 this.hdr ? "HDR On" : "HDR Off",
               );
             }
@@ -2765,7 +2842,7 @@ export class MoviElement extends HTMLElement {
             this.player.setStableAudio(!current);
             this.updateStableAudioUI(this.shadowRoot!);
             this.showOSD(
-              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 15v-2M9 15v-4M12 15v-6M15 15v-4M18 15v-2"/></svg>`,
+              OSD.stableAudio,
               !current ? "Stable Volume On" : "Stable Volume Off",
             );
           }
@@ -2779,6 +2856,10 @@ export class MoviElement extends HTMLElement {
             const curIdx = speeds.findIndex(s => s >= this._playbackRate);
             const nextIdx = Math.min((curIdx === -1 ? 3 : curIdx) + 1, speeds.length - 1);
             this.playbackRate = speeds[nextIdx];
+            this.showOSD(
+              OSD.speed,
+              `Speed ${this._playbackRate}x`,
+            );
           }
           break;
         case "-":
@@ -2789,6 +2870,10 @@ export class MoviElement extends HTMLElement {
             const curIdx = speeds.findIndex(s => s >= this._playbackRate);
             const nextIdx = Math.max((curIdx === -1 ? 3 : curIdx) - 1, 0);
             this.playbackRate = speeds[nextIdx];
+            this.showOSD(
+              OSD.speed,
+              `Speed ${this._playbackRate}x`,
+            );
           }
           break;
         case "?":
@@ -3202,7 +3287,9 @@ export class MoviElement extends HTMLElement {
 
       const speed = item.dataset.speed;
       const audioTrackId = item.dataset.audioTrackId;
+      const audioLang = item.dataset.audioLang;
       const subtitleTrackId = item.dataset.subtitleTrackId;
+      const subtitleLang = item.dataset.subtitleLang;
 
       if (action === "play-pause") {
         if (this.player) {
@@ -3238,11 +3325,32 @@ export class MoviElement extends HTMLElement {
           contextMenu.scrollTop = 0;
           submenu.classList.add("movi-context-menu-submenu-visible");
         }
+      } else if (audioLang !== undefined) {
+        // Select native audio language track
+        if (this.player) {
+          const langTrack = this.player.getAudioLangs().find(t => t.lang === audioLang);
+          this.player.selectAudioLang(audioLang);
+          this.updateAudioTrackMenu();
+          this.showOSD(
+            OSD.audio,
+            langTrack?.label || audioLang,
+          );
+        }
+        hideContextMenu();
       } else if (audioTrackId !== undefined) {
-        // Select audio track
+        // Select muxed audio track
         const trackId = parseInt(audioTrackId);
         if (this.player) {
+          if (this.player.isNativeAudioActive()) {
+            this.player.useMuxedAudio();
+          }
           this.player.selectAudioTrack(trackId);
+          this.updateAudioTrackMenu();
+          const trk = this.player.getAudioTracks().find(t => t.id === trackId);
+          this.showOSD(
+            OSD.audio,
+            trk?.label || trk?.language || `Audio ${trackId}`,
+          );
         }
         hideContextMenu();
       } else if (action === "subtitle-track") {
@@ -3254,14 +3362,35 @@ export class MoviElement extends HTMLElement {
           contextMenu.scrollTop = 0;
           submenu.classList.add("movi-context-menu-submenu-visible");
         }
+      } else if (subtitleLang !== undefined) {
+        // Select external subtitle language
+        if (this.player) {
+          const subTrack = this.player.getSubtitleLangs().find(t => t.lang === subtitleLang);
+          this.player.selectSubtitleLang(subtitleLang);
+          this.updateSubtitleTrackMenu();
+          this.showOSD(
+            OSD.subOn,
+            subTrack?.label || subtitleLang,
+          );
+        }
+        hideContextMenu();
       } else if (subtitleTrackId !== undefined) {
-        // Select subtitle track
+        // Select muxed subtitle track
         const trackId = parseInt(subtitleTrackId);
         if (this.player) {
+          const subOsdIcon = OSD.subOn;
           if (trackId === -1) {
             this.player.selectSubtitleTrack(null);
+            this.player.selectSubtitleLang(null);
+            this.showOSD(
+              OSD.subOff,
+              "Subtitles Off",
+            );
           } else {
+            this.player.selectSubtitleLang(null);
             this.player.selectSubtitleTrack(trackId);
+            const trk = this.player.getSubtitleTracks().find(t => t.id === trackId);
+            this.showOSD(subOsdIcon, trk?.label || trk?.language || `Subtitle ${trackId}`);
           }
         }
         hideContextMenu();
@@ -3282,6 +3411,10 @@ export class MoviElement extends HTMLElement {
           });
         item.classList.add("movi-context-menu-active");
 
+        this.showOSD(
+          OSD.speed,
+          `Speed ${playbackSpeed}x`,
+        );
         hideContextMenu();
       } else if (item.dataset.fit) {
         const fitMode = item.dataset.fit as "contain" | "cover" | "fill" | "zoom";
@@ -3305,6 +3438,10 @@ export class MoviElement extends HTMLElement {
         hideContextMenu();
       } else if (action === "hdr-toggle") {
         this.hdr = !this.hdr;
+        this.showOSD(
+          OSD.hdr,
+          this.hdr ? "HDR On" : "HDR Off",
+        );
         hideContextMenu();
       } else if (action === "rotate-video") {
         if (this.player) {
@@ -3312,16 +3449,28 @@ export class MoviElement extends HTMLElement {
           const statusEl = shadowRoot.querySelector(".movi-rotate-status");
           if (statusEl) statusEl.textContent = `${deg}°`;
           this.syncThumbnailRotation(deg);
+          this.showOSD(
+            OSD.rotate,
+            `Rotate ${deg}°`,
+          );
         }
         hideContextMenu();
       } else if (action === "loop-toggle") {
         this.loop = !this.loop;
+        this.showOSD(
+          OSD.loop,
+          this.loop ? "Loop On" : "Loop Off",
+        );
         hideContextMenu();
       } else if (action === "stable-audio-toggle") {
         if (this.player) {
           const current = this.player.getStableAudio();
           this.player.setStableAudio(!current);
           this.updateStableAudioUI(shadowRoot);
+          this.showOSD(
+            OSD.stableAudio,
+            !current ? "Stable Volume On" : "Stable Volume Off",
+          );
         }
         hideContextMenu();
       } else if (action === "nerd-stats") {
@@ -3338,6 +3487,10 @@ export class MoviElement extends HTMLElement {
         hideContextMenu();
       } else if (action === "snapshot") {
         this.takeSnapshot();
+        this.showOSD(
+          OSD.snapshot,
+          "Snapshot",
+        );
         hideContextMenu();
       }
     });
@@ -3401,13 +3554,15 @@ export class MoviElement extends HTMLElement {
       ".movi-context-menu-submenu-audio",
     ) as HTMLElement;
 
-    if (audioTracks.length > 1 && audioDivider && audioItem && audioSubmenu) {
+    const nativeLangs = this.player.getAudioLangs();
+    const ctxIsNativeActive = this.player.isNativeAudioActive();
+    const totalAudioTracks = audioTracks.length + nativeLangs.length;
+
+    if (totalAudioTracks > 1 && audioDivider && audioItem && audioSubmenu) {
       audioDivider.style.display = "block";
       audioItem.style.display = "flex";
-      // Remove inline display:none so CSS visibility can work
       audioSubmenu.style.removeProperty("display");
 
-      // Populate audio track submenu
       let html = "";
       if (
         window.innerWidth <= 1024 ||
@@ -3421,31 +3576,36 @@ export class MoviElement extends HTMLElement {
         </div>`;
       }
 
-      html += audioTracks
-        .map((track) => {
-          const isActive = activeAudioTrack?.id === track.id;
-          const label = track.label || `Audio ${track.id}`;
-          const infoParts: string[] = [];
-
-          if (track.language) {
-            const langCode =
-              track.language.length >= 2
+      // Muxed audio tracks
+      if (audioTracks.length > 0) {
+        html += audioTracks
+          .map((track) => {
+            const isActive = !ctxIsNativeActive && activeAudioTrack?.id === track.id;
+            const label = track.label || `Audio ${track.id}`;
+            const infoParts: string[] = [];
+            if (track.language) {
+              const langCode = track.language.length >= 2
                 ? track.language.substring(0, 3).toUpperCase()
                 : track.language.toUpperCase();
-            infoParts.push(langCode);
-          }
+              infoParts.push(langCode);
+            }
+            if (track.channels) infoParts.push(`${track.channels}ch`);
+            const info = infoParts.length > 0 ? ` (${infoParts.join(" • ")})` : "";
+            const activeClass = isActive ? " movi-context-menu-active" : "";
+            return `<div class="movi-context-menu-item${activeClass}" data-audio-track-id="${track.id}">${label}${info}</div>`;
+          })
+          .join("");
+      }
 
-          if (track.channels) {
-            infoParts.push(`${track.channels}ch`);
-          }
-
-          const info =
-            infoParts.length > 0 ? ` (${infoParts.join(" • ")})` : "";
-          const activeClass = isActive ? " movi-context-menu-active" : "";
-
-          return `<div class="movi-context-menu-item${activeClass}" data-audio-track-id="${track.id}">${label}${info}</div>`;
-        })
-        .join("");
+      // External audio tracks
+      if (nativeLangs.length > 0) {
+        html += nativeLangs
+          .map((t) => {
+            const activeClass = t.active ? " movi-context-menu-active" : "";
+            return `<div class="movi-context-menu-item${activeClass}" data-audio-lang="${t.lang}">${t.label} (${t.lang.toUpperCase()})</div>`;
+          })
+          .join("");
+      }
 
       audioSubmenu.innerHTML = html;
 
@@ -3461,6 +3621,8 @@ export class MoviElement extends HTMLElement {
     const subtitleTracks = this.player.getSubtitleTracks();
     const activeSubtitleTrack =
       this.player.trackManager.getActiveSubtitleTrack();
+    const ctxExternalSubs = this.player.getSubtitleLangs();
+    const ctxAnyExternalSubActive = ctxExternalSubs.some((t) => t.active);
     const subtitleDivider = contextMenu.querySelector(
       ".movi-context-menu-divider-subtitle",
     ) as HTMLElement;
@@ -3472,17 +3634,16 @@ export class MoviElement extends HTMLElement {
     ) as HTMLElement;
 
     if (
-      subtitleTracks.length > 0 &&
+      (subtitleTracks.length > 0 || ctxExternalSubs.length > 0) &&
       subtitleDivider &&
       subtitleItem &&
       subtitleSubmenu
     ) {
       subtitleDivider.style.display = "block";
       subtitleItem.style.display = "flex";
-      // Remove inline display:none so CSS visibility can work
       subtitleSubmenu.style.removeProperty("display");
 
-      // Update Context Menu Icon (Toggle Filled/Outline)
+      // Update Context Menu Icon
       const contextMenuSubtitleIcon = subtitleItem.querySelector(
         "svg:not(.movi-context-menu-subtitle-filled)",
       ) as HTMLElement;
@@ -3490,20 +3651,16 @@ export class MoviElement extends HTMLElement {
         ".movi-context-menu-subtitle-filled",
       ) as HTMLElement;
 
-      if (activeSubtitleTrack) {
-        if (contextMenuSubtitleIcon)
-          contextMenuSubtitleIcon.style.display = "none";
-        if (contextMenuSubtitleFilledIcon)
-          contextMenuSubtitleFilledIcon.style.display = "block";
+      const ctxSubActive = activeSubtitleTrack !== null || ctxAnyExternalSubActive;
+      if (ctxSubActive) {
+        if (contextMenuSubtitleIcon) contextMenuSubtitleIcon.style.display = "none";
+        if (contextMenuSubtitleFilledIcon) contextMenuSubtitleFilledIcon.style.display = "block";
       } else {
-        if (contextMenuSubtitleIcon)
-          contextMenuSubtitleIcon.style.display = "block";
-        if (contextMenuSubtitleFilledIcon)
-          contextMenuSubtitleFilledIcon.style.display = "none";
+        if (contextMenuSubtitleIcon) contextMenuSubtitleIcon.style.display = "block";
+        if (contextMenuSubtitleFilledIcon) contextMenuSubtitleFilledIcon.style.display = "none";
       }
 
-      // Add "Off" option for subtitles
-      const offActive = !activeSubtitleTrack;
+      const ctxOffActive = !activeSubtitleTrack && !ctxAnyExternalSubActive;
       let html = "";
       if (
         window.innerWidth <= 1024 ||
@@ -3516,9 +3673,9 @@ export class MoviElement extends HTMLElement {
           <span class="movi-context-menu-label">Back</span>
         </div>`;
       }
-      html += `<div class="movi-context-menu-item${offActive ? " movi-context-menu-active" : ""}" data-subtitle-track-id="-1">Off</div>`;
+      html += `<div class="movi-context-menu-item${ctxOffActive ? " movi-context-menu-active" : ""}" data-subtitle-track-id="-1">Off</div>`;
 
-      // Populate subtitle track submenu
+      // Muxed subtitle tracks
       html += subtitleTracks
         .map((track) => {
           const isActive = activeSubtitleTrack?.id === track.id;
@@ -3541,9 +3698,16 @@ export class MoviElement extends HTMLElement {
         })
         .join("");
 
+      // External subtitle tracks
+      html += ctxExternalSubs
+        .map((t) => {
+          const activeClass = t.active ? " movi-context-menu-active" : "";
+          return `<div class="movi-context-menu-item${activeClass}" data-subtitle-lang="${t.lang}">${t.label} (${t.lang.toUpperCase()})</div>`;
+        })
+        .join("");
+
       subtitleSubmenu.innerHTML = html;
 
-      // Setup hover handlers for subtitle track submenu
       this.setupSubmenuHover(subtitleItem, subtitleSubmenu);
     } else {
       if (subtitleDivider) subtitleDivider.style.display = "none";
@@ -3939,6 +4103,12 @@ export class MoviElement extends HTMLElement {
 
       muteBtn.addEventListener("click", () => {
         this.muted = !this.muted;
+        this.showOSD(
+          this.muted
+            ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`
+            : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`,
+          this.muted ? "Muted" : "Unmuted",
+        );
       });
 
       // Progress bar seek
@@ -4062,52 +4232,47 @@ export class MoviElement extends HTMLElement {
     ) as HTMLElement;
     if (!audioTrackList || !audioTrackBtn || !audioTrackContainer) return;
 
+    const nativeLangs = this.player.getAudioLangs();
     const audioTracks = this.player.getAudioTracks();
     const activeTrack = this.player.trackManager.getActiveAudioTrack();
+    const isNativeActive = this.player.isNativeAudioActive();
+    const totalTracks = audioTracks.length + nativeLangs.length;
 
-    // Hide container if only one or no audio tracks
-    if (audioTracks.length <= 1) {
-      audioTrackContainer.style.display = "none";
-    } else {
-      audioTrackContainer.style.display = "flex";
-    }
-
-    // Hide volume control if no audio tracks (length === 0)
+    // Volume is always visible when any audio exists
     const volumeContainer = this.shadowRoot?.querySelector(
       ".movi-volume-container",
     ) as HTMLElement;
     if (volumeContainer) {
-      volumeContainer.style.display = audioTracks.length > 0 ? "flex" : "none";
+      volumeContainer.style.display = totalTracks > 0 ? "flex" : "none";
     }
 
-    // If we only hid the container because checks matched but actually have 0 tracks, ensure consistency
-    if (audioTracks.length === 0) {
+    // Show audio selector only if multiple tracks total
+    if (totalTracks <= 1) {
       audioTrackContainer.style.display = "none";
       return;
     }
 
-    // If not returned, we have > 0 tracks (so volume is visible) and > 1 track (so audio menu is visible)
+    audioTrackContainer.style.display = "flex";
     audioTrackBtn.style.display = "flex";
 
-    // Build menu
-    audioTrackList.innerHTML = audioTracks
+    // Build combined menu — muxed tracks first, then external
+    let menuHTML = "";
+
+    // Muxed audio tracks (from MKV/MP4 demuxer)
+    menuHTML += audioTracks
       .map((track) => {
-        const isActive = activeTrack?.id === track.id;
+        // Muxed track is active only when native audio is NOT active
+        const isActive = !isNativeActive && activeTrack?.id === track.id;
         const label = track.label || `Audio ${track.id}`;
         const infoParts: string[] = [];
 
-        // Add language code if available
         if (track.language) {
-          // Language might be in ISO 639-2 format (3 chars) or ISO 639-1 (2 chars)
-          // Convert to uppercase and show first 2-3 characters
           const langCode =
             track.language.length >= 2
               ? track.language.substring(0, 3).toUpperCase()
               : track.language.toUpperCase();
           infoParts.push(langCode);
         }
-
-        // Add channel count
         if (track.channels) {
           infoParts.push(`${track.channels}ch`);
         }
@@ -4115,14 +4280,25 @@ export class MoviElement extends HTMLElement {
         const info = infoParts.length > 0 ? infoParts.join(" • ") : "";
 
         return `
-        <div class="movi-audio-track-item ${isActive ? "movi-audio-track-active" : ""}" 
+        <div class="movi-audio-track-item ${isActive ? "movi-audio-track-active" : ""}"
              data-track-id="${track.id}">
           <span class="movi-audio-track-label">${label}</span>
           ${info ? `<span class="movi-audio-track-info">${info}</span>` : ""}
-        </div>
-      `;
+        </div>`;
       })
       .join("");
+
+    // External audio tracks (native <audio> element)
+    menuHTML += nativeLangs
+      .map((t) => `
+        <div class="movi-audio-track-item ${t.active ? "movi-audio-track-active" : ""}"
+             data-audio-lang="${t.lang}">
+          <span class="movi-audio-track-label">${t.label}</span>
+          <span class="movi-audio-track-info">${t.lang.toUpperCase()}</span>
+        </div>`)
+      .join("");
+
+    audioTrackList.innerHTML = menuHTML;
 
     // Add click handlers
     audioTrackList
@@ -4130,18 +4306,32 @@ export class MoviElement extends HTMLElement {
       .forEach((item) => {
         item.addEventListener("click", (e) => {
           e.stopPropagation();
-          const trackId = parseInt(
-            (item as HTMLElement).dataset.trackId || "0",
-          );
+          const el = item as HTMLElement;
+          const lang = el.dataset.audioLang;
+          const trackIdStr = el.dataset.trackId;
+
           if (this.player) {
-            this.player.selectAudioTrack(trackId);
-            // Close menu
+            const audioIcon = OSD.audio;
+            if (lang) {
+              // External audio track — switch to native <audio>
+              this.player.selectAudioLang(lang);
+              const t = this.player.getAudioLangs().find(a => a.lang === lang);
+              this.showOSD(audioIcon, t?.label || lang);
+            } else if (trackIdStr) {
+              // Muxed audio track — switch back to WASM if needed
+              if (this.player.isNativeAudioActive()) {
+                this.player.useMuxedAudio();
+              }
+              const tid = parseInt(trackIdStr);
+              this.player.selectAudioTrack(tid);
+              const trk = this.player.getAudioTracks().find(a => a.id === tid);
+              this.showOSD(audioIcon, trk?.label || trk?.language || `Audio ${tid}`);
+            }
+            this.updateAudioTrackMenu();
             const menu = this.shadowRoot?.querySelector(
               ".movi-audio-track-menu",
             ) as HTMLElement;
-            if (menu) {
-              menu.style.display = "none";
-            }
+            if (menu) menu.style.display = "none";
           }
         });
       });
@@ -4356,15 +4546,20 @@ export class MoviElement extends HTMLElement {
 
     const subtitleTracks = this.player.getSubtitleTracks();
     const activeTrack = this.player.trackManager.getActiveSubtitleTrack();
+    const externalSubs = this.player.getSubtitleLangs();
+    const hasExternalSubs = externalSubs.length > 0;
 
-    // Hide container if no subtitle tracks
-    if (subtitleTracks.length === 0) {
+    // Hide container if no subtitle tracks (muxed or external)
+    if (subtitleTracks.length === 0 && !hasExternalSubs) {
       subtitleTrackContainer.style.display = "none";
       return;
     }
 
     subtitleTrackContainer.style.display = "flex";
     subtitleTrackBtn.style.display = "flex";
+
+    const anyExternalActive = externalSubs.some((t) => t.active);
+    const offActive = activeTrack === null && !anyExternalActive;
 
     // Toggle icons based on active state
     const subtitleIcon = this.shadowRoot?.querySelector(
@@ -4374,7 +4569,8 @@ export class MoviElement extends HTMLElement {
       ".movi-icon-subtitle-filled",
     ) as HTMLElement;
 
-    if (activeTrack) {
+    const subtitleActive = activeTrack !== null || anyExternalActive;
+    if (subtitleActive) {
       if (subtitleIcon) subtitleIcon.style.display = "none";
       if (subtitleIconFilled) subtitleIconFilled.style.display = "block";
     } else {
@@ -4384,20 +4580,19 @@ export class MoviElement extends HTMLElement {
 
     // Build menu - start with "Off" option
     let menuHTML = `
-      <div class="movi-subtitle-track-item ${activeTrack === null ? "movi-subtitle-track-active" : ""}" 
+      <div class="movi-subtitle-track-item ${offActive ? "movi-subtitle-track-active" : ""}"
            data-track-id="null">
         <span class="movi-subtitle-track-label">Off</span>
       </div>
     `;
 
-    // Add subtitle tracks
+    // Add muxed subtitle tracks
     menuHTML += subtitleTracks
       .map((track) => {
         const isActive = activeTrack?.id === track.id;
         const label = track.label || `Subtitle ${track.id}`;
         const infoParts: string[] = [];
 
-        // Add language code if available
         if (track.language) {
           const langCode =
             track.language.length >= 2
@@ -4406,7 +4601,6 @@ export class MoviElement extends HTMLElement {
           infoParts.push(langCode);
         }
 
-        // Add subtitle type
         if (track.subtitleType) {
           infoParts.push(track.subtitleType === "image" ? "Image" : "Text");
         }
@@ -4414,13 +4608,24 @@ export class MoviElement extends HTMLElement {
         const info = infoParts.length > 0 ? infoParts.join(" • ") : "";
 
         return `
-        <div class="movi-subtitle-track-item ${isActive ? "movi-subtitle-track-active" : ""}" 
+        <div class="movi-subtitle-track-item ${isActive ? "movi-subtitle-track-active" : ""}"
              data-track-id="${track.id}">
           <span class="movi-subtitle-track-label">${label}</span>
           ${info ? `<span class="movi-subtitle-track-info">${info}</span>` : ""}
         </div>
       `;
       })
+      .join("");
+
+    // Add external subtitle tracks
+    menuHTML += externalSubs
+      .map((t) => `
+        <div class="movi-subtitle-track-item ${t.active ? "movi-subtitle-track-active" : ""}"
+             data-subtitle-lang="${t.lang}">
+          <span class="movi-subtitle-track-label">${t.label}</span>
+          <span class="movi-subtitle-track-info">${t.lang.toUpperCase()}</span>
+        </div>
+      `)
       .join("");
 
     subtitleTrackList.innerHTML = menuHTML;
@@ -4432,36 +4637,36 @@ export class MoviElement extends HTMLElement {
         item.addEventListener("click", (e) => {
           e.stopPropagation();
           const trackIdStr = (item as HTMLElement).dataset.trackId;
-          Logger.debug(TAG, `Subtitle track item clicked: ${trackIdStr}`);
+          const subtitleLang = (item as HTMLElement).dataset.subtitleLang;
+
           if (this.player) {
-            if (trackIdStr === "null") {
-              // Disable subtitles
-              Logger.debug(TAG, "Disabling subtitles");
-              this.player.selectSubtitleTrack(null).catch((error) => {
-                Logger.error(TAG, "Failed to disable subtitles", error);
-              });
+            const subIconOn = OSD.subOn;
+            const subIconOff = OSD.subOff;
+            if (subtitleLang !== undefined) {
+              // External subtitle track
+              const st = this.player.getSubtitleLangs().find(t => t.lang === subtitleLang);
+              this.player.selectSubtitleLang(subtitleLang);
+              this.updateSubtitleTrackMenu();
+              this.showOSD(subIconOn, st?.label || subtitleLang);
+            } else if (trackIdStr === "null") {
+              // Disable all subtitles (muxed + external)
+              this.player.selectSubtitleTrack(null).catch(() => {});
+              this.player.selectSubtitleLang(null);
+              this.updateSubtitleTrackMenu();
+              this.showOSD(subIconOff, "Subtitles Off");
             } else {
+              // Muxed subtitle track
               const trackId = parseInt(trackIdStr || "0");
-              Logger.debug(TAG, `Selecting subtitle track: ${trackId}`);
-              this.player
-                .selectSubtitleTrack(trackId)
-                .then((result) => {
-                  Logger.debug(
-                    TAG,
-                    `Subtitle track selection result: ${result}`,
-                  );
-                })
-                .catch((error) => {
-                  Logger.error(TAG, "Failed to select subtitle track", error);
-                });
+              this.player.selectSubtitleLang(null);
+              this.player.selectSubtitleTrack(trackId).catch(() => {});
+              const trk = this.player.getSubtitleTracks().find(t => t.id === trackId);
+              this.showOSD(subIconOn, trk?.label || trk?.language || `Subtitle ${trackId}`);
             }
             // Close menu
             const menu = this.shadowRoot?.querySelector(
               ".movi-subtitle-track-menu",
             ) as HTMLElement;
-            if (menu) {
-              menu.style.display = "none";
-            }
+            if (menu) menu.style.display = "none";
           }
         });
       });
@@ -7851,6 +8056,31 @@ export class MoviElement extends HTMLElement {
     this._resume = this.hasAttribute("resume");
     this._stableVolume = this.hasAttribute("stablevolume");
 
+    // If no src attribute, check for <source> child elements (Video.js-style)
+    if (!this._src && !this._encrypted) {
+      const sourceEls = this.querySelectorAll("source");
+      if (sourceEls.length > 0) {
+        const allSources = Array.from(sourceEls).map((el) => ({
+          src: el.getAttribute("src") || "",
+          type: el.getAttribute("type") || undefined,
+          kind: el.getAttribute("kind") || undefined,
+        })).filter((s) => s.src);
+
+        // Separate audio sources (kind="audio") from video sources
+        const audioSources = allSources.filter((s) => s.kind === "audio");
+        const videoSources = allSources.filter((s) => s.kind !== "audio");
+
+        if (videoSources.length > 0) {
+          const picked = this.pickSource(videoSources);
+          this._src = picked ? picked.src : videoSources[0].src;
+        }
+
+        if (audioSources.length > 0) {
+          this._audioSrc = audioSources[0].src;
+        }
+      }
+    }
+
     // Automatically initialize player if src is set or encrypted mode
     if (this._src || (this._encrypted && this._tokenUrl && this._videoUrl)) {
       this.initializePlayer();
@@ -8366,6 +8596,28 @@ export class MoviElement extends HTMLElement {
         enablePreviews: this._thumb,
         ...(this._fps > 0 && { frameRate: this._fps }),
       };
+
+      // Separate audio source — multi-language or single
+      if (this._audioTracks.length > 0) {
+        playerConfig.audioTracks = this._audioTracks.map((t) => ({
+          url: t.src,
+          type: t.type,
+          lang: t.lang,
+          label: t.label,
+        }));
+      } else if (this._audioSrc) {
+        playerConfig.audioSource = { type: "url", url: this._audioSrc } as SourceConfig;
+      }
+
+      // External subtitle tracks
+      if (this._subtitleTracks.length > 0) {
+        playerConfig.subtitleTracks = this._subtitleTracks.map((t) => ({
+          url: t.src,
+          lang: t.lang,
+          label: t.label,
+          format: (t.format as "vtt" | "srt" | undefined),
+        }));
+      }
 
       // DRM mode: use native video element for HLS (EME requires <video>)
       const isDrm = this.hasAttribute("drm");
@@ -9504,6 +9756,57 @@ export class MoviElement extends HTMLElement {
     return this._src;
   }
 
+  /**
+   * Separate audio source URL (for split video+audio files)
+   */
+  get audioSrc(): string | null {
+    return this._audioSrc;
+  }
+
+  set audioSrc(value: string | null) {
+    this._audioSrc = value;
+  }
+
+  /**
+   * Get available audio language tracks
+   */
+  getAudioLangs(): { lang: string; label: string; active: boolean }[] {
+    if (this.player) return this.player.getAudioLangs();
+    return this._audioTracks.map((t, i) => ({
+      lang: t.lang,
+      label: t.label,
+      active: i === 0,
+    }));
+  }
+
+  /**
+   * Switch audio to a different language
+   */
+  selectAudioLang(lang: string): boolean {
+    if (this.player) return this.player.selectAudioLang(lang);
+    return false;
+  }
+
+  /**
+   * Get available external subtitle tracks
+   */
+  getSubtitleLangs(): { lang: string; label: string; active: boolean }[] {
+    if (this.player) return this.player.getSubtitleLangs();
+    return this._subtitleTracks.map((t) => ({
+      lang: t.lang,
+      label: t.label,
+      active: false,
+    }));
+  }
+
+  /**
+   * Select an external subtitle track by language (null to disable)
+   */
+  async selectSubtitleLang(lang: string | null): Promise<boolean> {
+    if (this.player) return this.player.selectSubtitleLang(lang);
+    return false;
+  }
+
   set src(value: string | File | null) {
     // Reset title-related flags when src changes
     if (this._titleAutoLoaded) {
@@ -9566,6 +9869,141 @@ export class MoviElement extends HTMLElement {
    */
   setFile(file: File | null): void {
     this.src = file;
+  }
+
+  /**
+   * Video.js-style source API
+   *
+   * Usage:
+   *   // Single source as string
+   *   player.source('video.mp4');
+   *
+   *   // Single source as object
+   *   player.source({ src: 'video.mp4', type: 'video/mp4' });
+   *
+   *   // Multiple sources (first playable source wins)
+   *   player.source([
+   *     { src: 'video.mp4', type: 'video/mp4' },
+   *     { src: 'video.webm', type: 'video/webm' },
+   *   ]);
+   *
+   *   // Separate video + audio (DASH-style split)
+   *   player.source({
+   *     video: { src: 'video-only.mp4', type: 'video/mp4' },
+   *     audio: { src: 'audio.m4a', type: 'audio/mp4' },
+   *   });
+   *
+   *   // Multi-language audio
+   *   player.source({
+   *     video: { src: 'video.mp4', type: 'video/mp4' },
+   *     audio: [
+   *       { src: 'en.m4a', type: 'audio/mp4', lang: 'en', label: 'English' },
+   *       { src: 'hi.m4a', type: 'audio/mp4', lang: 'hi', label: 'Hindi' },
+   *     ],
+   *   });
+   *
+   *   // Get current source
+   *   const current = player.source();
+   */
+  source(
+    value?:
+      | string
+      | { src: string; type?: string }
+      | { src: string; type?: string }[]
+      | {
+          video: { src: string; type?: string };
+          audio?:
+            | { src: string; type?: string }
+            | { src: string; type?: string; lang: string; label: string }[];
+          subtitles?: { src: string; lang: string; label: string; format?: string }[];
+        }
+  ): { src: string | File | null; type: string; audioSrc?: string | null } | void {
+    // Getter
+    if (value === undefined) {
+      const currentSrc = this._src;
+      if (!currentSrc) return { src: null, type: "", audioSrc: this._audioSrc };
+      if (currentSrc instanceof File) return { src: currentSrc, type: currentSrc.type, audioSrc: this._audioSrc };
+      return { src: currentSrc, type: this.guessMediaType(currentSrc), audioSrc: this._audioSrc };
+    }
+
+    // Setter — string
+    if (typeof value === "string") {
+      this._audioSrc = null;
+      this.src = value;
+      return;
+    }
+
+    // Setter — array (pick first playable)
+    if (Array.isArray(value)) {
+      this._audioSrc = null;
+      const picked = this.pickSource(value);
+      if (picked) {
+        this.src = picked.src;
+      } else if (value.length > 0) {
+        this.src = value[0].src;
+      }
+      return;
+    }
+
+    // Setter — separate video + audio/subtitles { video, audio?, subtitles? }
+    if ("video" in value) {
+      if (value.audio) {
+        if (Array.isArray(value.audio)) {
+          this._audioTracks = value.audio;
+          this._audioSrc = value.audio[0]?.src || null;
+        } else {
+          this._audioTracks = [];
+          this._audioSrc = value.audio.src;
+        }
+      } else {
+        this._audioTracks = [];
+        this._audioSrc = null;
+      }
+      this._subtitleTracks = value.subtitles || [];
+      this.src = value.video.src;
+      return;
+    }
+
+    // Setter — single object { src, type }
+    this._audioSrc = null;
+    this.src = (value as { src: string }).src;
+  }
+
+  /**
+   * Pick the first source whose MIME type the browser can play.
+   * Falls back to null if none are supported.
+   */
+  private pickSource(
+    sources: { src: string; type?: string }[]
+  ): { src: string; type?: string } | null {
+    const testVideo = document.createElement("video");
+    for (const s of sources) {
+      if (!s.type) return s; // No type hint → try it
+      const can = testVideo.canPlayType(s.type);
+      if (can === "probably" || can === "maybe") return s;
+    }
+    return null;
+  }
+
+  /**
+   * Guess MIME type from a URL string extension.
+   */
+  private guessMediaType(url: string): string {
+    const ext = url.split("?")[0].split(".").pop()?.toLowerCase();
+    const map: Record<string, string> = {
+      mp4: "video/mp4",
+      webm: "video/webm",
+      ogg: "video/ogg",
+      ogv: "video/ogg",
+      m3u8: "application/x-mpegURL",
+      mpd: "application/dash+xml",
+      mkv: "video/x-matroska",
+      avi: "video/x-msvideo",
+      mov: "video/quicktime",
+      ts: "video/mp2t",
+      m4v: "video/mp4",
+    };
+    return (ext && map[ext]) || "";
   }
 
   /**

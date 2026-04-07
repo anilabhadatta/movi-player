@@ -8,6 +8,7 @@ old/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
 chrome-extension/screenshots/
+test-media/
 *.zip
 *.mp4
 *.webm

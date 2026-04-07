@@ -11,7 +11,10 @@ import type {
   MediaInfo,
   VideoTrack,
   AudioTrack,
+  AudioSourceEntry,
   SubtitleTrack,
+  SubtitleSourceEntry,
+  SubtitleCue,
 } from "../types";
 import { EventEmitter } from "../events/EventEmitter";
 import {
@@ -43,6 +46,17 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private source: SourceAdapter | null = null;
   private cache: LRUCache;
   private demuxer: Demuxer | null = null;
+
+  // Separate audio source — uses native <audio> element (zero WASM overhead)
+  private nativeAudioEl: HTMLAudioElement | null = null;
+  private _audioTracks: AudioSourceEntry[] = [];
+  private _activeAudioLang: string = "";
+
+  // External subtitle tracks (VTT/SRT)
+  private _subtitleTracks: SubtitleSourceEntry[] = [];
+  private _activeSubtitleLang: string = "";
+  private _externalSubCues: SubtitleCue[] = [];
+  private _externalSubTimer: number | null = null;
   public trackManager: TrackManager;
   private clock: Clock;
   private stateManager: PlayerStateManager;
@@ -417,6 +431,31 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         }
       }
 
+      // Separate audio source: use native <audio> element (zero WASM overhead)
+      // Supports single audioSource or multi-language audioTracks
+      let audioUrl: string | null = null;
+
+      if (this.config.audioTracks && this.config.audioTracks.length > 0) {
+        // Multi-language mode — store all tracks, pick first as default
+        this._audioTracks = [...this.config.audioTracks];
+        this._activeAudioLang = this._audioTracks[0].lang;
+        audioUrl = this._audioTracks[0].url;
+        Logger.info(TAG, `Multi-language audio: ${this._audioTracks.length} tracks, default=${this._activeAudioLang}`);
+      } else if (this.config.audioSource?.type === "url" && this.config.audioSource.url) {
+        // Single separate audio source
+        audioUrl = this.config.audioSource.url;
+      }
+
+      if (audioUrl) {
+        this.setupNativeAudio(audioUrl);
+      }
+
+      // Store external subtitle tracks
+      if (this.config.subtitleTracks && this.config.subtitleTracks.length > 0) {
+        this._subtitleTracks = [...this.config.subtitleTracks];
+        Logger.info(TAG, `External subtitles: ${this._subtitleTracks.length} tracks`);
+      }
+
       // Set tracks
       this.trackManager.setTracks(this.mediaInfo.tracks);
 
@@ -532,6 +571,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
 
     // Configure audio decoder (skip if disabled for debugging)
+    // Configure audio decoder (skip if disabled for debugging or native audio)
     const audioTrack = this.trackManager.getActiveAudioTrack();
     if (audioTrack && !this.disableAudio) {
       const extradata = this.demuxer.getExtradata(audioTrack.id) ?? undefined;
@@ -643,6 +683,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
         // Seek demuxer to start (initial media startTime)
         await this.demuxer.seek(this.startTime);
+        if (this.nativeAudioEl) this.nativeAudioEl.currentTime = this.startTime;
         this.clock.seek(this.startTime);
 
         // Reset EOF flag
@@ -707,6 +748,16 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.videoRenderer.startPresentationLoop();
     }
 
+    // Start native audio BEFORE clock so it becomes master immediately
+    if (this.nativeAudioEl) {
+      this.nativeAudioEl.playbackRate = this.clock.getPlaybackRate();
+      try {
+        await this.nativeAudioEl.play();
+      } catch {
+        Logger.warn(TAG, "Native audio play failed (autoplay blocked?)");
+      }
+    }
+
     this.clock.start();
 
     // Transition to playing state
@@ -765,6 +816,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     this.clock.pause();
     if (!this.disableAudio) {
       this.audioRenderer.pause();
+    }
+    if (this.nativeAudioEl) {
+      this.nativeAudioEl.pause();
     }
 
     // Stop video presentation loop
@@ -1135,6 +1189,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           }
         }
 
+        // When separate audio demuxer exists, primary demuxer only provides video/subtitle
         const packet = await this.demuxer.readPacket();
 
         // Check again after async readPacket - seek may have started during read
@@ -1218,15 +1273,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
             // Skip audio processing if disabled for debugging or muted
             if (!this.disableAudio && !this.muted) {
               // IMPORTANT: Skip audio packets before the seek target time
-              // This prevents A/V sync from being based on the keyframe time (e.g., 0s)
-              // instead of the actual seek target (e.g., 2s)
-              // CRITICAL: Check seekTargetTime !== -1 to support negative start times
               if (
                 this.seekTargetTime !== -1 &&
                 packet.timestamp < this.seekTargetTime
               ) {
-                // Skip this audio packet, it's before our target time
-                // Continue to next packet (audio will start when we reach target time)
                 continue;
               }
 
@@ -1239,10 +1289,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
                 continue;
               }
 
-              // Note: We don't clear seekTargetTime here anymore!
-              // With B-frame videos, video frames arrive asynchronously and may still need
-              // to be filtered after audio catches up. The seekTargetTime will be cleared
-              // after POST_SEEK_THROTTLE_MS when justSeeked becomes false, or on next seek.
               if (
                 this.seekTargetTime !== -1 &&
                 packet.timestamp >= this.seekTargetTime
@@ -1251,7 +1297,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
                   TAG,
                   `Audio reached seek target: ${packet.timestamp.toFixed(3)}s (target: ${this.seekTargetTime.toFixed(3)}s)`,
                 );
-                // If there is no video track, audio completion triggers state transition
                 if (!this.trackManager.getActiveVideoTrack()) {
                   this.notifySeekCompletion(packet.timestamp);
                 }
@@ -1271,13 +1316,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
               activeSubtitle.id === packet.streamIndex &&
               this.subtitleDecoder
             ) {
-              // Decode subtitle packet
-              // For SRT files, FFmpeg might not always extract duration correctly from timestamp lines
-              // Use packet duration if available, otherwise pass 0 and let C code use fallback
               let duration = packet.duration;
               if (!duration || duration <= 0) {
-                // FFmpeg didn't extract duration - C code will use fallback mechanism
-                // The fallback will use minimum duration or calculate from next packet
                 duration = 0;
                 Logger.debug(
                   TAG,
@@ -1298,23 +1338,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
                 .catch((error) => {
                   Logger.error(TAG, "Subtitle decode error", error);
                 });
-            } else {
-              if (
-                activeSubtitle &&
-                activeSubtitle.id === packet.streamIndex &&
-                !this.subtitleDecoder
-              ) {
-                Logger.warn(
-                  TAG,
-                  `Subtitle packet received but decoder not initialized for track ${packet.streamIndex}`,
-                );
-              }
             }
           }
         }
-
-        // Assuming packet.data is copied by bindings, we don't need to manually free JS side
-        // unless bindings exposed a pointer. bindings.ts returns `result.data` which is `new Uint8Array(copy)`.
       }
     } catch (e) {
       Logger.error(TAG, "Demux error", e);
@@ -1456,6 +1482,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       // Seek relative to start time (time 0 in UI = startTime in media)
       Logger.info(TAG, `seek: demuxer.seek(${(seconds + this.startTime).toFixed(2)}) starting...`);
       await this.demuxer.seek(seconds + this.startTime);
+      // Seek native audio element (separate audio source)
+      if (this.nativeAudioEl) {
+        this.nativeAudioEl.currentTime = seconds;
+      }
       Logger.info(TAG, `seek: demuxer.seek done`);
       this.clock.seek(seconds + this.startTime);
 
@@ -2458,6 +2488,244 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (this.videoRenderer) {
       this.videoRenderer.setPlaybackRate(rate);
     }
+    if (this.nativeAudioEl) {
+      this.nativeAudioEl.playbackRate = rate;
+    }
+  }
+
+  /**
+   * Setup native <audio> element for separate audio source.
+   * Shared by single audioSource and multi-language audioTracks.
+   */
+  private setupNativeAudio(url: string): void {
+    const wasPlaying = this.nativeAudioEl && !this.nativeAudioEl.paused;
+    const currentTime = this.nativeAudioEl?.currentTime ?? 0;
+
+    // Reuse or create element
+    if (!this.nativeAudioEl) {
+      this.nativeAudioEl = new Audio();
+    }
+    this.nativeAudioEl.src = url;
+    this.nativeAudioEl.preload = "auto";
+    this.nativeAudioEl.volume = this.muted ? 0 : this.audioRenderer.getVolume();
+    this.nativeAudioEl.muted = this.muted;
+    this.disableAudio = true;
+
+    // Wire up clock + video renderer to native audio
+    const audioEl = this.nativeAudioEl;
+    const self = this;
+    this.clock.setAudioProvider({
+      getAudioClock: () => audioEl.currentTime + self.startTime,
+      hasHealthyBuffer: () => audioEl.readyState >= 3,
+      isAudioPlaying: () => !audioEl.paused,
+    });
+    if (this.videoRenderer) {
+      this.videoRenderer.setAudioTimeProvider(
+        () => audioEl.currentTime + self.startTime,
+        () => audioEl.readyState >= 3,
+      );
+    }
+
+    // Restore position and playback state when switching tracks
+    if (currentTime > 0) {
+      audioEl.currentTime = currentTime;
+    }
+    if (wasPlaying) {
+      audioEl.play().catch(() => {});
+    }
+  }
+
+  /**
+   * Get available audio language tracks (multi-language mode)
+   */
+  getAudioLangs(): { lang: string; label: string; active: boolean }[] {
+    return this._audioTracks.map((t) => ({
+      lang: t.lang,
+      label: t.label,
+      active: t.lang === this._activeAudioLang,
+    }));
+  }
+
+  /**
+   * Switch audio to an external language track (native <audio> element).
+   * Disables WASM audio if it was active. Preserves position & playback.
+   */
+  selectAudioLang(lang: string): boolean {
+    const track = this._audioTracks.find((t) => t.lang === lang);
+    if (!track) {
+      Logger.warn(TAG, `Audio track not found for lang: ${lang}`);
+      return false;
+    }
+    if (lang === this._activeAudioLang && this.nativeAudioEl) return true;
+
+    // Mute WASM audio if it was active (don't destroy — keep decodable for switch-back)
+    if (!this.disableAudio) {
+      this.audioRenderer.mute();
+      this.disableAudio = true;
+    }
+
+    this._activeAudioLang = lang;
+    this.setupNativeAudio(track.url);
+    Logger.info(TAG, `Audio switched to external: ${track.label} (${track.lang})`);
+    this.emit("audioTrackChange" as any, { lang, label: track.label });
+    return true;
+  }
+
+  /**
+   * Switch back to muxed (WASM) audio, disabling native <audio> element.
+   * Called when user selects a demuxer audio track while external is active.
+   */
+  useMuxedAudio(): void {
+    if (!this.nativeAudioEl) return;
+
+    // Stop native audio
+    this.nativeAudioEl.pause();
+    this.nativeAudioEl.src = "";
+    this.nativeAudioEl = null;
+    this._activeAudioLang = "";
+
+    // Re-enable WASM audio
+    this.disableAudio = false;
+    this.muted = false;
+    this.audioRenderer.unmute().catch(() => {});
+
+    // Restore WASM audio as clock provider
+    this.clock.setAudioProvider(this.audioRenderer);
+    if (this.videoRenderer) {
+      this.videoRenderer.setAudioTimeProvider(
+        () => this.audioRenderer.getAudioClock(),
+        () => this.audioRenderer.hasHealthyBuffer(),
+      );
+    }
+
+    Logger.info(TAG, "Switched back to muxed (WASM) audio");
+  }
+
+  /** Check if native audio is currently active */
+  isNativeAudioActive(): boolean {
+    return this.nativeAudioEl !== null && this._activeAudioLang !== "";
+  }
+
+  /**
+   * Get available external subtitle tracks
+   */
+  getSubtitleLangs(): { lang: string; label: string; active: boolean }[] {
+    return this._subtitleTracks.map((t) => ({
+      lang: t.lang,
+      label: t.label,
+      active: t.lang === this._activeSubtitleLang,
+    }));
+  }
+
+  /**
+   * Select an external subtitle track by language.
+   * Fetches the VTT/SRT file, parses cues, and starts rendering.
+   * Pass empty string or null to disable.
+   */
+  async selectSubtitleLang(lang: string | null): Promise<boolean> {
+    // Disable current external subtitles
+    this.stopExternalSubtitles();
+
+    if (!lang) {
+      this._activeSubtitleLang = "";
+      if (this.videoRenderer) this.videoRenderer.clearSubtitles();
+      this.emit("subtitleTrackChange" as any, { lang: null, label: null });
+      return true;
+    }
+
+    const track = this._subtitleTracks.find((t) => t.lang === lang);
+    if (!track) {
+      Logger.warn(TAG, `Subtitle track not found for lang: ${lang}`);
+      return false;
+    }
+
+    try {
+      // Fetch subtitle file
+      const res = await fetch(track.url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+
+      // Detect format
+      const fmt = track.format || (track.url.includes(".srt") ? "srt" : "vtt");
+
+      // Parse into cues
+      this._externalSubCues = fmt === "srt"
+        ? this.parseSRT(text)
+        : this.parseVTT(text);
+
+      this._activeSubtitleLang = lang;
+
+      // Disable muxed subtitles if active
+      this.selectSubtitleTrack(null);
+
+      // Start cue timer
+      this.startExternalSubtitles();
+
+      Logger.info(TAG, `Subtitle loaded: ${track.label} (${this._externalSubCues.length} cues)`);
+      this.emit("subtitleTrackChange" as any, { lang, label: track.label });
+      return true;
+    } catch (e) {
+      Logger.error(TAG, `Failed to load subtitle: ${track.url}`, e);
+      return false;
+    }
+  }
+
+  /** Parse VTT text into SubtitleCue[] */
+  private parseVTT(text: string): SubtitleCue[] {
+    const cues: SubtitleCue[] = [];
+    const blocks = text.split(/\n\n+/);
+    for (const block of blocks) {
+      const lines = block.trim().split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        const match = lines[i].match(
+          /(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/
+        );
+        if (match) {
+          const start = +match[1] * 3600 + +match[2] * 60 + +match[3] + +match[4] / 1000;
+          const end = +match[5] * 3600 + +match[6] * 60 + +match[7] + +match[8] / 1000;
+          const cueText = lines.slice(i + 1).join("\n").trim();
+          if (cueText) cues.push({ start, end, text: cueText });
+          break;
+        }
+      }
+    }
+    return cues;
+  }
+
+  /** Parse SRT text into SubtitleCue[] */
+  private parseSRT(text: string): SubtitleCue[] {
+    // SRT has same timestamp format but with comma instead of dot — parseVTT handles both
+    return this.parseVTT(text);
+  }
+
+  /** Start rendering external subtitle cues based on playback time */
+  private startExternalSubtitles(): void {
+    this.stopExternalSubtitles();
+    let lastIdx = -1;
+    this._externalSubTimer = window.setInterval(() => {
+      if (!this.videoRenderer) return;
+      const time = this.clock.getTime();
+      // Find active cue
+      const idx = this._externalSubCues.findIndex(
+        (c) => time >= c.start && time <= c.end
+      );
+      if (idx !== lastIdx) {
+        lastIdx = idx;
+        if (idx >= 0) {
+          this.videoRenderer.setSubtitleCues([this._externalSubCues[idx]]);
+        } else {
+          this.videoRenderer.setSubtitleCues([]);
+        }
+      }
+    }, 100); // 10Hz check — enough for subtitle timing
+  }
+
+  /** Stop external subtitle rendering */
+  private stopExternalSubtitles(): void {
+    if (this._externalSubTimer !== null) {
+      clearInterval(this._externalSubTimer);
+      this._externalSubTimer = null;
+    }
   }
 
   /**
@@ -2478,6 +2746,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.hlsWrapper.setVolume(volume);
     }
     this.audioRenderer.setVolume(volume);
+    if (this.nativeAudioEl) {
+      this.nativeAudioEl.volume = volume;
+    }
   }
 
   /**
@@ -2511,6 +2782,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.audioRenderer.unmute().catch((err) => {
         Logger.error("MoviPlayer", "Failed to unmute", err);
       });
+    }
+    if (this.nativeAudioEl) {
+      this.nativeAudioEl.muted = muted;
     }
   }
 
@@ -3038,6 +3312,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.demuxer.close();
       this.demuxer = null;
     }
+
+    // Cleanup native audio element (separate audio source)
+    if (this.nativeAudioEl) {
+      this.nativeAudioEl.pause();
+      this.nativeAudioEl.src = "";
+      this.nativeAudioEl = null;
+    }
+
+    // Cleanup external subtitles
+    this.stopExternalSubtitles();
+    this._externalSubCues = [];
+    this._subtitleTracks = [];
 
     // Close source
     if (this.source) {
