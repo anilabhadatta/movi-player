@@ -455,6 +455,13 @@ export class MoviElement extends HTMLElement {
         <span class="movi-context-menu-shortcut">H</span>
       </div>
       <div class="movi-context-menu-divider movi-hdr-divider" style="display: none;"></div>
+      <div class="movi-context-menu-item movi-context-menu-pip" data-action="pip" style="display: none;">
+        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><rect x="12" y="9" width="8" height="6" rx="1"/>
+        </svg>
+        <span class="movi-context-menu-label">Picture in Picture</span>
+        <span class="movi-context-menu-shortcut">P</span>
+      </div>
       <div class="movi-context-menu-item" data-action="fullscreen">
         <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
@@ -738,6 +745,11 @@ export class MoviElement extends HTMLElement {
               </svg>
             </button>
             
+            <button class="movi-btn movi-pip-btn" aria-label="Picture in Picture" style="display:none">
+              <svg class="movi-icon-pip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2"/><rect x="12" y="9" width="8" height="6" rx="1" fill="currentColor" opacity="0.3"/>
+              </svg>
+            </button>
             <button class="movi-btn movi-fullscreen-btn" aria-label="Fullscreen">
               <svg class="movi-icon-fullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
@@ -846,6 +858,7 @@ export class MoviElement extends HTMLElement {
         <div class="movi-shortcuts-col">
           <div class="movi-shortcut-row"><kbd>Space</kbd><span>Play / Pause</span></div>
           <div class="movi-shortcut-row"><kbd>F</kbd><span>Fullscreen</span></div>
+          <div class="movi-shortcut-row"><kbd>P</kbd><span>Picture-in-Picture</span></div>
           <div class="movi-shortcut-row"><kbd>M</kbd><span>Mute / Unmute</span></div>
           <div class="movi-shortcut-row"><kbd>&uarr; / &darr;</kbd><span>Volume</span></div>
           <div class="movi-shortcut-row"><kbd>&larr; / &rarr;</kbd><span>Seek ±10s</span></div>
@@ -1632,6 +1645,19 @@ export class MoviElement extends HTMLElement {
     fullscreenBtn?.addEventListener("click", (e) => {
       e.stopPropagation(); // Prevent triggering overlay click
       this.toggleFullscreen();
+    });
+
+    // Picture-in-Picture
+    const pipBtn = shadowRoot.querySelector(".movi-pip-btn") as HTMLElement;
+    // Show PiP button + context menu item only if Document PiP API is available
+    if ("documentPictureInPicture" in window) {
+      if (pipBtn) pipBtn.style.display = "";
+      const pipCtxItem = shadowRoot.querySelector(".movi-context-menu-pip") as HTMLElement;
+      if (pipCtxItem) pipCtxItem.style.display = "";
+    }
+    pipBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.togglePiP();
     });
 
     // More Settings (Mobile Horizontal Expansion)
@@ -2531,6 +2557,12 @@ export class MoviElement extends HTMLElement {
           e.preventDefault();
           this.toggleFullscreen();
           break;
+        case "p":
+        case "P":
+          // P: Picture-in-Picture
+          e.preventDefault();
+          this.togglePiP();
+          break;
         case "i":
         case "I":
           // I: Toggle nerd stats
@@ -3229,6 +3261,9 @@ export class MoviElement extends HTMLElement {
       } else if (action === "timeline") {
         this.toggleTimeline();
         hideContextMenu();
+      } else if (action === "pip") {
+        this.togglePiP();
+        hideContextMenu();
       } else if (action === "fullscreen") {
         this.toggleFullscreen();
         hideContextMenu();
@@ -3633,6 +3668,281 @@ export class MoviElement extends HTMLElement {
       }
     } catch (error) {
       Logger.error(TAG, "Failed to toggle fullscreen", error);
+    }
+  }
+
+  private _pipWindow: Window | null = null;
+
+  private restorePiPCanvas(): void {
+    Logger.info(TAG, `restorePiPCanvas called — _pipWindow: ${!!this._pipWindow}, canvas: ${!!this.canvas}, shadowRoot: ${!!this.shadowRoot}`);
+    if (!this._pipWindow) {
+      Logger.info(TAG, "restorePiPCanvas: already restored, skipping");
+      return;
+    }
+    this._pipWindow = null;
+    if (this.player) this.player.isPiPActive = false;
+
+    const canvas = this.canvas;
+    const sr = this.shadowRoot;
+    if (!canvas || !sr) {
+      Logger.warn(TAG, `restorePiPCanvas: missing canvas=${!!canvas} shadowRoot=${!!sr}`);
+      return;
+    }
+
+    // Always move canvas back to shadowRoot as first child (original position)
+    if (canvas.parentNode !== sr) {
+      sr.insertBefore(canvas, sr.firstChild);
+      Logger.info(TAG, "restorePiPCanvas: moved canvas back to shadowRoot");
+    } else {
+      Logger.info(TAG, "restorePiPCanvas: canvas already in shadowRoot");
+    }
+
+    Logger.info(TAG, `restorePiPCanvas: canvas isConnected=${canvas.isConnected}`);
+
+    // Restore original size
+    requestAnimationFrame(() => {
+      this.updateCanvasSize();
+      Logger.info(TAG, `restorePiPCanvas: after resize — ${this.canvas?.width}x${this.canvas?.height}`);
+    });
+    Logger.info(TAG, "PiP closed, canvas restored");
+  }
+
+  private async togglePiP(): Promise<void> {
+    if (!this.player || !this.canvas) return;
+
+    const docPiP = (window as any).documentPictureInPicture;
+    if (!docPiP) return;
+
+    // If already in PiP, close it and restore immediately
+    if (this._pipWindow) {
+      Logger.info(TAG, "togglePiP: closing PiP, restoring canvas first");
+      const win = this._pipWindow;
+      this.restorePiPCanvas();
+      try { win.close(); } catch (_) {}
+      Logger.info(TAG, "togglePiP: PiP window closed");
+      return;
+    }
+
+    try {
+      // Get video dimensions for aspect ratio
+      const videoTrack = this.player.getVideoTracks()?.[0];
+      const vw = videoTrack?.width || 640;
+      const vh = videoTrack?.height || 360;
+      const aspect = vw / vh;
+      const pipWidth = Math.min(400, window.innerWidth * 0.35);
+      const pipHeight = Math.round(pipWidth / aspect);
+
+      const pipWindow: Window = await docPiP.requestWindow({
+        width: Math.round(pipWidth),
+        height: pipHeight,
+      });
+      this._pipWindow = pipWindow;
+
+      // Style the PiP window
+      const style = pipWindow.document.createElement("style");
+      style.textContent = `
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; width: 100%; height: 100%; position: relative; }
+        canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+        .pip-controls {
+          position: absolute; bottom: 0; left: 0; right: 0;
+          background: linear-gradient(transparent, rgba(0,0,0,0.85));
+          padding: 8px 10px 6px; display: flex; flex-direction: column; gap: 4px;
+          opacity: 0; transition: opacity 0.2s;
+        }
+        body:hover .pip-controls, body.show-controls .pip-controls { opacity: 1; }
+        .pip-progress-row { display: flex; flex-direction: column; gap: 4px; }
+        .pip-progress-bar {
+          width: 100%; height: 3px; background: rgba(255,255,255,0.2);
+          border-radius: 2px; cursor: pointer; position: relative;
+        }
+        .pip-progress-bar:hover { height: 5px; }
+        .pip-progress-fill {
+          height: 100%; background: #8B5CF6; border-radius: 2px;
+          width: 0%; pointer-events: none;
+        }
+        .pip-time { font: 500 10px/1 -apple-system, sans-serif; color: rgba(255,255,255,0.7); white-space: nowrap; }
+        .pip-time-row { display: flex; justify-content: space-between; padding: 0 2px; }
+        .pip-btn-row { display: flex; align-items: center; justify-content: center; gap: 16px; position: relative; }
+        .pip-btn {
+          background: none; border: none; cursor: pointer; padding: 4px;
+          color: #fff; opacity: 0.85; display: flex; align-items: center; justify-content: center;
+        }
+        .pip-btn:hover { opacity: 1; }
+        .pip-btn svg { width: 20px; height: 20px; }
+        .pip-btn.play-pause svg { width: 26px; height: 26px; }
+        .pip-btn.mute-toggle { position: absolute; left: 0; }
+        .pip-btn.mute-toggle svg { width: 18px; height: 18px; }
+        .pip-btn.back-to-tab { position: absolute; right: 0; }
+        .pip-btn.back-to-tab svg { width: 18px; height: 18px; }
+      `;
+      pipWindow.document.head.appendChild(style);
+
+      // Move canvas to PiP window
+      pipWindow.document.body.appendChild(this.canvas);
+      Logger.info(TAG, `PiP: canvas moved to PiP window, isConnected=${this.canvas.isConnected}`);
+
+      // Build PiP controls
+      const controls = pipWindow.document.createElement("div");
+      controls.className = "pip-controls";
+
+      // Progress row
+      const progressRow = pipWindow.document.createElement("div");
+      progressRow.className = "pip-progress-row";
+      const timeRow = pipWindow.document.createElement("div");
+      timeRow.className = "pip-time-row";
+      const timeCurrent = pipWindow.document.createElement("div");
+      timeCurrent.className = "pip-time";
+      timeCurrent.textContent = "00:00";
+      const timeDuration = pipWindow.document.createElement("div");
+      timeDuration.className = "pip-time";
+      timeDuration.textContent = "00:00";
+      timeRow.appendChild(timeCurrent);
+      timeRow.appendChild(timeDuration);
+      const progressBar = pipWindow.document.createElement("div");
+      progressBar.className = "pip-progress-bar";
+      const progressFill = pipWindow.document.createElement("div");
+      progressFill.className = "pip-progress-fill";
+      progressBar.appendChild(progressFill);
+      progressRow.appendChild(timeRow);
+      progressRow.appendChild(progressBar);
+
+      // Button row
+      const btnRow = pipWindow.document.createElement("div");
+      btnRow.className = "pip-btn-row";
+
+      const makeBtn = (cls: string, svg: string) => {
+        const btn = pipWindow.document.createElement("button");
+        btn.className = `pip-btn ${cls}`;
+        btn.innerHTML = svg;
+        return btn;
+      };
+
+      const seekBackBtn = makeBtn("seek-back", `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 3C7.81 3 4.01 6.54 3.58 11H1l3.5 4L8 11H5.59c.42-3.35 3.33-6 6.91-6 3.87 0 7 3.13 7 7s-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.96 8.96 0 0012.5 21c4.97 0 9-4.03 9-9s-4.03-9-9-9z"/><text x="12.5" y="15.5" text-anchor="middle" font-size="7.5" font-weight="700" font-family="-apple-system,sans-serif">10</text></svg>`);
+      const playPauseBtn = makeBtn("play-pause", this.player.getState() === "playing"
+        ? `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>`
+        : `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`);
+      const seekFwdBtn = makeBtn("seek-fwd", `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M11.5 3c4.69 0 8.49 3.54 8.92 8H23l-3.5 4L16 11h2.41c-.42-3.35-3.33-6-6.91-6-3.87 0-7 3.13-7 7s3.13 7 7 7c1.93 0 3.68-.79 4.94-2.06l1.42 1.42A8.96 8.96 0 0111.5 21c-4.97 0-9-4.03-9-9s4.03-9 9-9z"/><text x="11.5" y="15.5" text-anchor="middle" font-size="7.5" font-weight="700" font-family="-apple-system,sans-serif">10</text></svg>`);
+      const backToTabBtn = makeBtn("back-to-tab", `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`);
+      const isMuted = this._muted;
+      const muteBtn = makeBtn("mute-toggle", isMuted
+        ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`
+        : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`);
+
+      btnRow.appendChild(muteBtn);
+      btnRow.appendChild(seekBackBtn);
+      btnRow.appendChild(playPauseBtn);
+      btnRow.appendChild(seekFwdBtn);
+      btnRow.appendChild(backToTabBtn);
+
+      controls.appendChild(progressRow);
+      controls.appendChild(btnRow);
+      pipWindow.document.body.appendChild(controls);
+
+      // PiP control handlers
+      const updatePlayPauseIcon = () => {
+        if (!this.player) return;
+        const isPlaying = this.player.getState() === "playing";
+        playPauseBtn.innerHTML = isPlaying
+          ? `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>`
+          : `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`;
+      };
+
+      playPauseBtn.addEventListener("click", () => {
+        if (!this.player) return;
+        if (this.player.getState() === "playing") this.pause();
+        else this.play();
+      });
+
+      seekBackBtn.addEventListener("click", () => {
+        if (!this.player) return;
+        this.currentTime = Math.max(0, this.currentTime - 10);
+      });
+
+      seekFwdBtn.addEventListener("click", () => {
+        if (!this.player) return;
+        this.currentTime = Math.min(this.duration, this.currentTime + 10);
+      });
+
+      backToTabBtn.addEventListener("click", () => {
+        this.togglePiP();
+      });
+
+      muteBtn.addEventListener("click", () => {
+        this.muted = !this.muted;
+      });
+
+      // Progress bar seek
+      progressBar.addEventListener("click", (e: MouseEvent) => {
+        if (!this.player || !this.duration) return;
+        const rect = progressBar.getBoundingClientRect();
+        const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        this.currentTime = pct * this.duration;
+      });
+
+      // Update progress + time on interval
+      const pipUpdateInterval = setInterval(() => {
+        if (!this._pipWindow || !this.player) { clearInterval(pipUpdateInterval); return; }
+        const cur = this.currentTime;
+        const dur = this.duration || 0;
+        const pct = dur > 0 ? (cur / dur) * 100 : 0;
+        progressFill.style.width = `${pct}%`;
+        timeCurrent.textContent = this.formatTime(cur);
+        timeDuration.textContent = this.formatTime(dur);
+        updatePlayPauseIcon();
+        const muted = this._muted;
+        muteBtn.innerHTML = muted
+          ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`
+          : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`;
+      }, 250);
+
+      // Show controls briefly on open
+      pipWindow.document.body.classList.add("show-controls");
+      setTimeout(() => pipWindow.document.body.classList.remove("show-controls"), 2000);
+
+      // Keyboard shortcuts in PiP window
+      pipWindow.document.addEventListener("keydown", (e: KeyboardEvent) => {
+        if (!this.player) return;
+        if (e.key === " " || e.key === "k") {
+          e.preventDefault();
+          if (this.player.getState() === "playing") this.pause();
+          else this.play();
+        } else if (e.key === "ArrowLeft") {
+          this.currentTime = Math.max(0, this.currentTime - 10);
+        } else if (e.key === "ArrowRight") {
+          this.currentTime = Math.min(this.duration, this.currentTime + 10);
+        } else if (e.key === "m") {
+          muteBtn.click();
+        } else if (e.key === "Escape" || e.key === "p") {
+          this.togglePiP();
+        }
+      });
+
+      // Mark PiP active so background handler doesn't drop frames
+      this.player.isPiPActive = true;
+
+      // Resize canvas to fit PiP window
+      const resizeInPiP = () => {
+        if (this._pipWindow && this.player) {
+          this.player.resizeCanvas(pipWindow.innerWidth, pipWindow.innerHeight);
+        }
+      };
+      pipWindow.addEventListener("resize", resizeInPiP);
+      resizeInPiP();
+
+      // Handle PiP window close — move canvas back
+      const restore = (e: Event) => {
+        Logger.info(TAG, `PiP event: ${e.type} fired`);
+        clearInterval(pipUpdateInterval);
+        this.restorePiPCanvas();
+      };
+      pipWindow.addEventListener("pagehide", restore);
+      pipWindow.addEventListener("unload", restore);
+
+      Logger.info(TAG, `PiP opened: ${Math.round(pipWidth)}x${pipHeight}`);
+    } catch (error) {
+      Logger.error(TAG, "Failed to open PiP", error);
+      this._pipWindow = null;
     }
   }
 
@@ -8804,7 +9114,7 @@ export class MoviElement extends HTMLElement {
 
     // Controls to disable (everything except volume)
     const controlsToDisableSelector =
-      ".movi-play-pause, .movi-progress-container, .movi-audio-track-btn, .movi-subtitle-track-btn, .movi-hdr-btn, .movi-speed-btn, .movi-stable-audio-btn, .movi-aspect-ratio-btn, .movi-loop-btn, .movi-fullscreen-btn, .movi-more-btn, .movi-center-play-pause, .movi-seek-backward, .movi-seek-forward";
+      ".movi-play-pause, .movi-progress-container, .movi-audio-track-btn, .movi-subtitle-track-btn, .movi-hdr-btn, .movi-speed-btn, .movi-stable-audio-btn, .movi-aspect-ratio-btn, .movi-loop-btn, .movi-pip-btn, .movi-fullscreen-btn, .movi-more-btn, .movi-center-play-pause, .movi-seek-backward, .movi-seek-forward";
     const controlsToDisable = shadowRoot.querySelectorAll(
       controlsToDisableSelector,
     );

@@ -181,7 +181,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (this.videoDecoder) {
       this.videoDecoder.setOnFrame((frame) => {
         // Background mode: drop video frames silently (audio keeps playing)
-        if (document.hidden) {
+        // But keep frames if PiP is active (canvas is visible in PiP window)
+        if (document.hidden && !this.isPiPActive) {
           frame.close();
           return;
         }
@@ -876,7 +877,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       }
     } else {
       Logger.info(TAG, "Seek completed in paused state");
-      this.stateManager.setState("ready");
+      this.stateManager.setState("paused");
       // Don't start clock or audio
     }
 
@@ -1491,6 +1492,22 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       if (this.videoRenderer) {
         this.videoRenderer.startPresentationLoop();
       }
+
+      // Safety timeout: if seek doesn't complete in 3s, force completion
+      // This prevents loading state from hanging forever on slow devices
+      const seekTimeout = setTimeout(() => {
+        if (this.seekSessionId === mySessionId && this.waitingForVideoSync) {
+          Logger.warn(TAG, `Seek timeout after 3s, forcing completion at ${seconds}s`);
+          this.notifySeekCompletion(seconds + this.startTime);
+        }
+      }, 3000);
+
+      // Clear timeout if seek completes or is superseded
+      const clearSeekTimeout = () => {
+        clearTimeout(seekTimeout);
+        this.off("seeked", clearSeekTimeout);
+      };
+      this.on("seeked", clearSeekTimeout);
 
       Logger.info(TAG, `Seek initiated to ${seconds}s, waiting for sync...`);
     } catch (error) {
@@ -2696,6 +2713,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /**
    * Handle visibility change
    */
+  /** Set by MoviElement when Document PiP is active */
+  public isPiPActive: boolean = false;
+
   private handleVisibilityChange = async (): Promise<void> => {
     const isPlaying = this.stateManager.getState() === "playing" || this.stateManager.getState() === "buffering";
 
@@ -2712,8 +2732,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.stopBackgroundTimer();
 
       if (isPlaying) {
-        // Smooth resume: reset video renderer sync to prevent stutter
-        if (this.videoRenderer) {
+        // Only clear video queue if PiP is NOT active
+        // PiP window keeps rendering frames even when main tab is hidden
+        if (!this.isPiPActive && this.videoRenderer) {
           this.videoRenderer.clearQueue();
         }
 
@@ -2762,6 +2783,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         const state = this.stateManager.getState();
         if (state === "playing" || state === "buffering") {
           this.processLoop();
+          // In PiP mode, also drive video rendering since main window rAF is stopped
+          if (this.isPiPActive && this.videoRenderer) {
+            (this.videoRenderer as any).presentationLoop?.();
+          }
         }
       };
       this.backgroundWorker.postMessage("start");
@@ -2772,6 +2797,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         const state = this.stateManager.getState();
         if (state === "playing" || state === "buffering") {
           this.processLoop();
+          if (this.isPiPActive && this.videoRenderer) {
+            (this.videoRenderer as any).presentationLoop?.();
+          }
         }
       }, 16);
     }

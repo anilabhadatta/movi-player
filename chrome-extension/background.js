@@ -1,48 +1,24 @@
-// Context menu: "Open with Movi Player" on any link
+// Context menu: "Open with Movi Player" on all links
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "open-with-movi",
     title: "Open with Movi Player",
     contexts: ["link"],
-    targetUrlPatterns: [
-      "*://*/*.mp4*",
-      "*://*/*.mkv*",
-      "*://*/*.webm*",
-      "*://*/*.mov*",
-      "*://*/*.avi*",
-      "*://*/*.ts*",
-      "*://*/*.m3u8*",
-      "*://*/*.flv*",
-      "*://*/*.m4v*",
-      "*://*/*.ogv*",
-      "*://*/*.wmv*",
-    ],
-  });
-
-  // Also add for all links (user can try any URL)
-  chrome.contextMenus.create({
-    id: "try-with-movi",
-    title: "Try with Movi Player",
-    contexts: ["link"],
   });
 });
 
 // Handle context menu click
-chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "open-with-movi" || info.menuItemId === "try-with-movi") {
-    const videoUrl = info.linkUrl;
-    if (videoUrl) {
-      // Open player in new tab
-      const playerUrl = chrome.runtime.getURL(
-        `player.html?url=${encodeURIComponent(videoUrl)}`
-      );
-      chrome.tabs.create({ url: playerUrl });
-    }
+chrome.contextMenus.onClicked.addListener((info) => {
+  if (info.menuItemId === "open-with-movi" && info.linkUrl) {
+    const playerUrl = chrome.runtime.getURL(
+      `player.html?url=${encodeURIComponent(info.linkUrl)}`
+    );
+    chrome.tabs.create({ url: playerUrl });
   }
 });
 
 // Listen for messages from content script
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message) => {
   if (message.action === "openPlayer") {
     const playerUrl = chrome.runtime.getURL(
       `player.html?url=${encodeURIComponent(message.url)}`
