@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0-beta.3] - 2026-04-07
+
+### Added
+- **Document Picture-in-Picture**: Floating video window with play/pause, seek, mute, progress bar, time display, keyboard shortcuts, and back-to-tab button. Chromium 116+.
+- **DRM Support**: `drm` and `licenseurl` attributes for HLS streams with Widevine/FairPlay via EME API. Native `<video>` element used in DRM mode.
+- **HLS Nerd Stats**: Video codec, resolution, quality, frame rate, bitrate, buffer ahead, HLS level, bandwidth estimate, live latency, stream type, frames decoded/dropped.
+- **HLS Quality Menu**: Duplicate resolutions now show bitrate (e.g., "1080p · 5000 kbps"). Wider menu for longer labels.
+- **VLC-style Shortcuts**: `V` subtitles, `B` audio, `+/-` speed, `L` loop, `U` stable volume, `H` HDR, `P` PiP. Context menu shows shortcut labels.
+- **Aspect Ratio Controls**: `A` key cycles contain/cover/fill/zoom. Sub-menu with icons in context menu and bottom controls.
+- **Subtitle/Audio Track Cycling**: `V`/`B` keys cycle with OSD showing track number and language.
+- **Timeline Keyboard Navigation**: Arrow keys to navigate thumbnails/chapters, Enter to seek, Escape to close.
+- **Resume Dialog Keyboard**: Arrow keys to toggle Resume/Start Over, Enter to confirm, Escape to dismiss. Visual focus indicator.
+- **PiP in Context Menu**: Picture-in-Picture option with `P` shortcut.
+- **Network Recovery**: Stall detection with 500ms grace period, auto-resume on buffer data, offline/online distinction for CORS errors.
+
+### Changed
+- Extension context menu simplified to single "Open with Movi Player" on all links.
+- Extension removed `gesturefs` attribute for gesture support.
+- Smart title extraction: `.m3u8`/`.mpd` URLs use parent path segment instead of filename.
+- HLS error handling: 404/403 errors show instant error (no infinite retry). Max 3 network retries, 2 media retries.
+- "Try Software Decoding" button hidden for network errors.
+- Console logs dropped in production build (terser `drop_console`).
+- PiP button disabled initially like other controls.
+
+### Fixed
+- **Pause-seek loading stuck**: `VideoDecoder.flush()` hanging on slow devices — 1s timeout with reset+reconfigure fallback.
+- **EOF not triggering**: Relaxed condition to end when time reaches duration (0.5s tolerance) or all queues empty.
+- **PiP canvas restore**: Use `shadowRoot` directly instead of `parentElement` (ShadowRoot is Node, not Element).
+- **PiP frame freeze on tab switch**: `isPiPActive` guard on `document.hidden` frame dropping.
+- **Network disconnect**: `navigator.onLine` check before treating fetch errors as CORS.
+- **Seek loading**: `currentTime` setter allows seeking from `seeking`/`buffering` states. 3s seek timeout forces completion.
+- **Timeline first-open**: Retry thumbnail pipeline init if first attempt failed.
+- **Timeline position**: CSS-based controls-aware positioning (125px above controls).
+- **Timeline thumbnail rotation**: Use `naturalWidth/Height` for hidden elements. Metadata rotation considered for portrait detection.
+- **Seek thumbnail z-index**: Hidden when timeline is open to prevent overlap.
+- **EncryptedHttpSource**: Network resilience matching HttpSource (retry, offline recovery, speed idle reset).
+- **Closed frame warning spam**: Silenced at EOF (normal behavior).
+- **Nerd stats graph**: Fixed fullscreen positioning, CSS specificity for graph canvas.
+- **HLS resolution 0x0**: Read actual level from HLS.js instead of Auto track.
+
 ## [0.2.0-beta.2] - 2026-04-06
 
 ### Added

@@ -19,6 +19,8 @@ Play any video format directly in the browser. No transcoding, no server process
 - **Content protection** -- Built-in encrypted playback with AES-256-GCM, token auth, HMAC signing. No DRM license server needed.
 - **HDR rendering** -- Detects and renders BT.2020/PQ/HLG content on supported displays. Other players can't.
 - **Canvas-based** -- No `<video>` element exposed. Right-click save disabled. Screen recording gets watermarked.
+- **Picture-in-Picture** -- Document PiP with controls (play/pause, seek, mute, progress). Chromium 116+.
+- **DRM ready** -- Optional Widevine/FairPlay support via `drm` + `licenseurl` attributes for HLS streams.
 
 ### vs. Other Players
 
@@ -32,6 +34,8 @@ Play any video format directly in the browser. No transcoding, no server process
 | Built-in subtitle rendering | Yes | Plugin | No | No |
 | Multi-audio track switching | Yes | Plugin | Yes | No |
 | Chapters on progress bar | Yes | Plugin | No | No |
+| Picture-in-Picture | Document PiP | Basic | No | No |
+| DRM (Widevine/FairPlay) | Optional | Plugin | Yes | No |
 | Bundle size | 50-410KB | 500KB+ | 60KB | 25KB |
 
 ## Install
@@ -88,6 +92,19 @@ await player.play();
 AES-256-GCM encrypted, HMAC signed, 2s token expiry, IP + fingerprint binding.
 See [encrypted-server/](encrypted-server/) for the server example.
 
+### DRM (HLS + Widevine/FairPlay)
+
+```html
+<movi-player
+  src="https://example.com/encrypted.m3u8"
+  drm
+  licenseurl="https://license.pallycon.com/ri/licenseManager.do"
+  controls autoplay
+></movi-player>
+```
+
+Requires a DRM license server (PallyCon, EZDRM, BuyDRM, etc.). In DRM mode, native `<video>` element is used (canvas features like rotation/watermark are disabled).
+
 ### Demuxer Only (50KB)
 
 ![Demuxer](docs/images/demuxer.webp)
@@ -140,17 +157,23 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 **UI** -- Controls, context menu, keyboard shortcuts (`?` to view all), themes (dark/light), gestures, ambient mode.
 
-**Nerd Stats** -- Press `I` for codec, resolution, FPS, decoder type, buffer health, network graph.
+**Picture-in-Picture** -- Document PiP with play/pause, seek, mute, progress bar. Press `P`.
 
-**Timeline** -- Press `T` for thumbnail strip. Chapter-aware when video has chapters.
+**Aspect Ratio** -- Press `A` to cycle contain/cover/fill/zoom. Context menu sub-menu with icons.
+
+**Nerd Stats** -- Press `I` for codec, resolution, FPS, decoder type, buffer health, network graph. HLS-aware stats.
+
+**Timeline** -- Press `T` for thumbnail strip. Chapter-aware. Keyboard navigation (arrows + enter).
 
 **Chapters** -- Auto-detected from video metadata. Markers on progress bar, titles in seek tooltip.
 
 **Rotation** -- Press `R` to rotate 90. Metadata rotation auto-applied. Thumbnails sync.
 
-**Resume** -- `<movi-player resume>` saves position to localStorage, shows resume dialog on reload.
+**Resume** -- `<movi-player resume>` saves position to localStorage, shows resume dialog on reload. Keyboard navigable.
 
 **Encrypted** -- AES-256-GCM chunked encryption with HMAC-signed token auth. See encrypted-server/.
+
+**DRM** -- Optional Widevine/FairPlay for HLS streams via `drm` + `licenseurl` attributes. Uses native `<video>` + EME API.
 
 ## Element Attributes
 
@@ -178,6 +201,8 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
   tokenurl="/api/token"    <!-- Token endpoint (encrypted) -->
   videourl="/api/video"    <!-- Video endpoint (encrypted) -->
   videoid="movie.mp4"      <!-- Video ID (encrypted) -->
+  drm                      <!-- DRM mode for HLS (native video + EME) -->
+  licenseurl="https://..."  <!-- Widevine/FairPlay license server URL -->
 ></movi-player>
 ```
 
@@ -189,9 +214,17 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 | `F` | Fullscreen |
 | `M` | Mute |
 | `R` | Rotate 90 |
+| `A` | Cycle aspect ratio |
 | `I` | Stats for nerds |
 | `T` | Timeline |
 | `S` | Snapshot |
+| `P` | Picture-in-Picture |
+| `V` | Cycle subtitle track |
+| `B` | Cycle audio track |
+| `L` | Toggle loop |
+| `U` | Toggle stable volume |
+| `H` | Toggle HDR |
+| `+` / `-` | Speed up / down |
 | `?` | Shortcuts panel |
 | `0` / `Home` | Seek to start |
 | Arrows | Seek / Volume |
