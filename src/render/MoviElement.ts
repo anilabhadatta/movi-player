@@ -7076,13 +7076,14 @@ export class MoviElement extends HTMLElement {
         -webkit-backdrop-filter: blur(var(--movi-glass-blur));
         border: 1px solid var(--movi-glass-border);
         border-radius: 12px;
-        min-width: 140px;
+        min-width: 200px;
         max-height: 280px;
         overflow-y: auto;
         box-shadow: var(--movi-shadow-lg);
         z-index: 1001;
         pointer-events: auto !important;
         padding: 8px 0;
+        white-space: nowrap;
       }
       
       .movi-quality-item {
@@ -8924,12 +8925,16 @@ export class MoviElement extends HTMLElement {
   }
 
   private handleUnsupportedVideo(title?: string, message?: string): void {
-    const isDecoderError =
+    const msgLower = message?.toLowerCase() || "";
+    const isNetworkError = msgLower.includes("http 4") || msgLower.includes("http 5") ||
+      msgLower.includes("stream unavailable") || msgLower.includes("network error") ||
+      msgLower.includes("hls error");
+    const isDecoderError = !isNetworkError && (
       title === "Format Unsupported" ||
       title === "Codec Unsupported" ||
       title === "Playback Error" ||
-      message?.toLowerCase().includes("decoder") ||
-      message?.toLowerCase().includes("codec");
+      msgLower.includes("decoder") ||
+      msgLower.includes("codec"));
 
     // Silent fallback if sw="auto" is set
     if (

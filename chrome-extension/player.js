@@ -16,9 +16,18 @@ function loadFile(file) {
 }
 
 if (url) {
-  // URL mode
-  const name = decodeURIComponent(url.split("/").pop().split("?")[0]);
-  document.title = name + " — Movi Player";
+  // URL mode — extract meaningful title from URL
+  let name = decodeURIComponent(url.split("/").pop().split("?")[0]);
+  // Remove extension
+  name = name.replace(/\.[^.]+$/, "");
+  // If name is empty or generic (manifest files), use parent path segment
+  if (!name || /^(index|master|playlist)$/i.test(name)) {
+    try {
+      const segments = new URL(url).pathname.split("/").filter(s => s && !s.includes("."));
+      if (segments.length > 0) name = decodeURIComponent(segments[segments.length - 1]).replace(/[-_]/g, " ");
+    } catch {}
+  }
+  document.title = (name || "Video") + " — Movi Player";
   customElements.whenDefined("movi-player").then(() => {
     document.getElementById("player").src = url;
   });

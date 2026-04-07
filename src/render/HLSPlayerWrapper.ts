@@ -225,22 +225,48 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
         resolve();
       });
 
+      let networkRetries = 0;
+      let mediaRetries = 0;
+      const MAX_NETWORK_RETRIES = 3;
+      const MAX_MEDIA_RETRIES = 2;
+
       this.hls!.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
-          Logger.error(TAG, `HLS Fatal Error: ${data.details}`);
+          Logger.error(TAG, `HLS Fatal Error: ${data.details} (response: ${data.response?.code})`);
+
+          const emitFatal = (msg: string) => {
+            this.hls!.destroy();
+            const err = new Error(msg);
+            this.emit("error", err);
+            this.setState("error");
+            reject(err);
+          };
+
           switch (data.type) {
             case Hls.ErrorTypes.NETWORK_ERROR:
-              this.hls!.startLoad();
+              // Don't retry 404/403 — resource doesn't exist or is forbidden
+              const status = data.response?.code;
+              if (status === 404 || status === 403) {
+                emitFatal(`Stream unavailable (HTTP ${status})`);
+              } else if (networkRetries < MAX_NETWORK_RETRIES) {
+                networkRetries++;
+                Logger.info(TAG, `Network retry ${networkRetries}/${MAX_NETWORK_RETRIES}`);
+                this.hls!.startLoad();
+              } else {
+                emitFatal(`Network error: ${data.details}`);
+              }
               break;
             case Hls.ErrorTypes.MEDIA_ERROR:
-              this.hls!.recoverMediaError();
+              if (mediaRetries < MAX_MEDIA_RETRIES) {
+                mediaRetries++;
+                Logger.info(TAG, `Media recovery ${mediaRetries}/${MAX_MEDIA_RETRIES}`);
+                this.hls!.recoverMediaError();
+              } else {
+                emitFatal(`Media error: ${data.details}`);
+              }
               break;
             default:
-              this.hls!.destroy();
-              const err = new Error(`HLS Error: ${data.details}`);
-              this.emit("error", err);
-              this.setState("error");
-              reject(err);
+              emitFatal(`HLS Error: ${data.details}`);
               break;
           }
         } else {
@@ -291,14 +317,17 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
     };
     tracks.push(autoTrack);
 
-    const seenLabels = new Set<string>();
+    // Count how many levels share the same resolution
+    const heightCount = new Map<number, number>();
+    data.levels.forEach((level: any) => {
+      heightCount.set(level.height, (heightCount.get(level.height) || 0) + 1);
+    });
 
     data.levels.forEach((level: any, index: number) => {
-      const label = `${level.height}p`;
-
-      // Skip duplicates based on label (resolution)
-      if (seenLabels.has(label)) return;
-      seenLabels.add(label);
+      const hasDuplicates = (heightCount.get(level.height) || 0) > 1;
+      const label = hasDuplicates
+        ? `${level.height}p · ${(level.bitrate / 1000).toFixed(0)} kbps`
+        : `${level.height}p`;
 
       const videoTrack: VideoTrack = {
         id: index,
@@ -495,7 +524,9 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
         stats["HLS Level"] = this.hls.autoLevelEnabled
           ? `Auto (${activeLabel})`
           : activeLabel;
-        stats["Available Levels"] = levels.map(l => `${l.height}p`).join(", ");
+        const minH = Math.min(...levels.map(l => l.height));
+        const maxH = Math.max(...levels.map(l => l.height));
+        stats["Available Levels"] = `${levels.length} (${minH}p–${maxH}p)`;
       }
       if (this.hls.bandwidthEstimate) {
         stats["Bandwidth Estimate"] = `${(this.hls.bandwidthEstimate / 1000).toFixed(0)} kbps`;
