@@ -10632,11 +10632,19 @@ export class MoviElement extends HTMLElement {
 
         // Remove file extension from filename
         if (filename) {
-          const lastDotIndex = filename.lastIndexOf(".");
-          if (lastDotIndex > 0) {
-            // Only remove extension if dot is not at the start (hidden files)
-            this._title = filename.substring(0, lastDotIndex);
-          } else {
+          // Remove all extensions (e.g., "video.m3u8" → "video", ".m3u8" → "")
+          filename = filename.replace(/\.[^.\/]+$/, "");
+          // If filename is empty or non-descriptive, try parent path segment
+          if (!filename || filename === "index" || filename === "master" || filename === "playlist") {
+            try {
+              const url = new URL(this._src as string, window.location.href);
+              const segments = url.pathname.split("/").filter(s => s && !s.includes("."));
+              if (segments.length > 0) {
+                filename = decodeURIComponent(segments[segments.length - 1]).replace(/[-_]/g, " ");
+              }
+            } catch { /* ignore */ }
+          }
+          if (filename) {
             this._title = filename;
           }
         }

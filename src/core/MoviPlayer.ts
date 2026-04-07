@@ -2523,6 +2523,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
    * Get comprehensive player stats for "Stats for nerds" overlay
    */
   getStats(): Record<string, string | number | boolean> {
+    // HLS mode: delegate to HLS wrapper
+    if (this.hlsWrapper) {
+      return this.hlsWrapper.getStats();
+    }
+
     const mediaInfo = this.mediaInfo;
     const videoTrack = this.trackManager.getActiveVideoTrack() as VideoTrack | null;
     const audioTrack = this.trackManager.getActiveAudioTrack() as AudioTrack | null;
@@ -2649,6 +2654,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
    * Works for both network (HttpSource) and disk (FileSource)
    */
   getNetworkSpeed(): number {
+    // HLS mode: delegate to HLS wrapper
+    if (this.hlsWrapper) {
+      return this.hlsWrapper.getNetworkSpeed();
+    }
     if (this.source instanceof HttpSource) {
       return this.source.getNetworkStats().currentSpeed;
     }
@@ -2666,6 +2675,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
    * Check if source is a local file
    */
   isFileSource(): boolean {
+    if (this.hlsWrapper) return false;
     return this.source instanceof FileSource;
   }
 

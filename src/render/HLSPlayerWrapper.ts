@@ -21,6 +21,7 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
   private state: PlayerState = "idle";
   public trackManager: TrackManager;
   private frameCallbackId: number | null = null;
+  private _framesRendered: number = 0;
 
   constructor(config: PlayerConfig) {
     super();
@@ -168,6 +169,7 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
       const frame = new VideoFrame(this.videoElement);
       this.canvasRenderer.render(frame);
       frame.close();
+      this._framesRendered++;
     } catch (e) {
       Logger.warn(TAG, "Failed to create VideoFrame", e);
     }
@@ -429,6 +431,106 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
       else if (mode === "cover") this.videoElement.style.objectFit = "cover";
       else if (mode === "fill") this.videoElement.style.objectFit = "fill";
     }
+  }
+
+  getStats(): Record<string, string | number | boolean> {
+    const stats: Record<string, string | number | boolean> = {};
+
+    // Get actual playing level from HLS.js (handles Auto mode correctly)
+    const level = this.hls?.levels?.[this.hls.currentLevel];
+    const w = level?.width || this.videoElement.videoWidth || 0;
+    const h = level?.height || this.videoElement.videoHeight || 0;
+
+    // --- Video ---
+    if (w && h) {
+      stats["Video Codec"] = level?.videoCodec ?? "N/A";
+      stats["Resolution"] = `${w}x${h}`;
+      stats["Quality"] = h >= 2160 ? "4K" : h >= 1440 ? "2K" : h >= 1080 ? "1080p" : h >= 720 ? "720p" : h >= 480 ? "480p" : "SD";
+      if (level?.frameRate) stats["Frame Rate"] = `${level.frameRate} fps`;
+      stats["Video Bitrate"] = level?.bitrate
+        ? `${(level.bitrate / 1000).toFixed(0)} kbps`
+        : "N/A";
+    }
+    if (level?.audioCodec) {
+      stats["Audio Codec"] = level.audioCodec;
+    }
+
+    // --- Decoder ---
+    if (this.canvasRenderer) {
+      const rStats = this.canvasRenderer.getStats();
+      stats["Video Decoder"] = "Hardware (Native)";
+      stats["Renderer"] = "Canvas";
+      stats["Color Space"] = rStats.colorSpace || "N/A";
+    } else {
+      stats["Video Decoder"] = "Hardware (Native)";
+      stats["Renderer"] = "HTML5 Video";
+    }
+
+    // --- Playback ---
+    stats["Playback State"] = this.state;
+    stats["Playback Rate"] = `${this.videoElement.playbackRate}x`;
+
+    // --- Frames ---
+    const quality = (this.videoElement as any).getVideoPlaybackQuality?.();
+    if (quality) {
+      stats["Frames Decoded"] = quality.totalVideoFrames;
+      stats["Frames Dropped"] = quality.droppedVideoFrames;
+    }
+    if (this.canvasRenderer) {
+      stats["Frames Rendered"] = this._framesRendered;
+    }
+
+    // --- Buffer ---
+    if (this.videoElement.buffered.length > 0) {
+      const buffEnd = this.videoElement.buffered.end(this.videoElement.buffered.length - 1);
+      const ahead = buffEnd - this.videoElement.currentTime;
+      stats["Buffer Ahead"] = `${ahead.toFixed(1)}s`;
+    }
+
+    // --- HLS specific ---
+    if (this.hls) {
+      const levels = this.hls.levels;
+      if (levels && levels.length > 1) {
+        const activeLabel = level ? `${level.height}p` : "N/A";
+        stats["HLS Level"] = this.hls.autoLevelEnabled
+          ? `Auto (${activeLabel})`
+          : activeLabel;
+        stats["Available Levels"] = levels.map(l => `${l.height}p`).join(", ");
+      }
+      if (this.hls.bandwidthEstimate) {
+        stats["Bandwidth Estimate"] = `${(this.hls.bandwidthEstimate / 1000).toFixed(0)} kbps`;
+      }
+      // Latency (live streams)
+      const latency = this.hls.latency;
+      if (latency > 0) {
+        stats["Live Latency"] = `${latency.toFixed(1)}s`;
+      }
+      // Type
+      const details = levels?.[this.hls.currentLevel]?.details;
+      if (details) {
+        stats["Stream Type"] = details.live ? "Live" : "VOD";
+      }
+    }
+
+    // Memory usage (Chrome only)
+    const mem = (performance as any).memory;
+    if (mem) {
+      stats["Memory Used"] = `${(mem.usedJSHeapSize / 1048576).toFixed(0)} MB`;
+    }
+
+    return stats;
+  }
+
+  getNetworkSpeed(): number {
+    // Use HLS.js bandwidth estimate (bits/s → bytes/s)
+    if (this.hls?.bandwidthEstimate) {
+      return this.hls.bandwidthEstimate / 8;
+    }
+    return 0;
+  }
+
+  isFileSource(): boolean {
+    return false;
   }
 
   destroy(): void {
