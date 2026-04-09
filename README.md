@@ -20,6 +20,8 @@ Play any video format directly in the browser. No transcoding, no server process
 - **HDR rendering** -- Detects and renders BT.2020/PQ/HLG content on supported displays. Other players can't.
 - **Canvas-based** -- No `<video>` element exposed. Right-click save disabled. Screen recording gets watermarked.
 - **Picture-in-Picture** -- Document PiP with controls (play/pause, seek, mute, progress). Chromium 116+.
+- **Ambient mode** -- Dynamic letterbox glow that samples video colors in real-time. Press `G` or use context menu.
+- **Split sources** -- Separate video, audio, and subtitle file URLs via `videosrc`, `audiosrc`, `subtitlesrc` attributes.
 - **DRM ready** -- Optional Widevine/FairPlay support via `drm` + `licenseurl` attributes for HLS streams.
 
 ### vs. Other Players
@@ -151,7 +153,7 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 **Audio** -- AAC, MP3, Opus, FLAC, AC-3, E-AC-3. Multi-track switching. Stable volume (loudness normalization).
 
-**Subtitles** -- SRT, ASS, WebVTT, PGS, DVB. Multi-track with on-the-fly switching.
+**Subtitles** -- SRT, ASS, WebVTT, PGS (image-based), DVB. Multi-track with on-the-fly switching.
 
 **HDR** -- BT.2020/PQ/HLG detection + Display-P3 rendering on supported browsers.
 
@@ -203,6 +205,9 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
   videoid="movie.mp4"      <!-- Video ID (encrypted) -->
   drm                      <!-- DRM mode for HLS (native video + EME) -->
   licenseurl="https://..."  <!-- Widevine/FairPlay license server URL -->
+  videosrc="video.mp4"     <!-- Separate video source (split source) -->
+  audiosrc="audio.mp4"     <!-- Separate audio source (split source) -->
+  subtitlesrc="subs.srt"   <!-- Separate subtitle source (split source) -->
 ></movi-player>
 ```
 
@@ -223,6 +228,7 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 | `B` | Cycle audio track |
 | `L` | Toggle loop |
 | `U` | Toggle stable volume |
+| `G` | Toggle ambient mode |
 | `H` | Toggle HDR |
 | `+` / `-` | Speed up / down |
 | `?` | Shortcuts panel |

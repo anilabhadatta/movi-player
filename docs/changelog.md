@@ -5,114 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0-beta.3] - 2026-04-07
+## [0.2.0] - 2026-04-09
 
 ### Added
-- **Document Picture-in-Picture**: Floating video window with play/pause, seek, mute, progress bar, time display, keyboard shortcuts, and back-to-tab button. Chromium 116+.
-- **DRM Support**: `drm` and `licenseurl` attributes for HLS streams with Widevine/FairPlay via EME API. Native `<video>` element used in DRM mode.
-- **HLS Nerd Stats**: Video codec, resolution, quality, frame rate, bitrate, buffer ahead, HLS level, bandwidth estimate, live latency, stream type, frames decoded/dropped.
-- **HLS Quality Menu**: Duplicate resolutions now show bitrate (e.g., "1080p · 5000 kbps"). Wider menu for longer labels.
-- **VLC-style Shortcuts**: `V` subtitles, `B` audio, `+/-` speed, `L` loop, `U` stable volume, `H` HDR, `P` PiP. Context menu shows shortcut labels.
+- **Ambient Mode**: Dynamic letterbox glow that samples video colors in real-time. Smooth 60fps color transitions via WebGL clearColor. Toggle with `G` key or context menu. Works in fullscreen (letterbox) and normal mode (external wrapper). `ambientmode` attribute.
+- **Split Source Support**: Separate video, audio, and subtitle file URLs via `videosrc`, `audiosrc`, `subtitlesrc` attributes.
+- **PGS Image Subtitles**: Bitmap subtitle decoding with zlib decompression support.
+- **Network Disconnect Recovery**: Intelligent CORS vs transient network failure detection (3-strike threshold). Online-event-aware backoff for instant retry on reconnection. Auto re-seek on recovery. 30s timeout on offline wait.
+- **Document Picture-in-Picture**: Floating video window with play/pause, seek, mute, progress bar, time display, keyboard shortcuts, and back-to-tab button. Portrait video sizing. Rotation save/restore on PiP enter/exit.
+- **DRM Support**: `drm` and `licenseurl` attributes for HLS streams with Widevine/FairPlay via EME API.
+- **HLS Quality Menu**: Duplicate resolutions show bitrate (e.g., "1080p · 5000 kbps").
+- **HLS Nerd Stats**: Video codec, resolution, quality, frame rate, bitrate, buffer, HLS level, bandwidth, live latency, frames decoded/dropped.
+- **VLC-style Shortcuts**: `V` subtitles, `B` audio, `+/-` speed, `L` loop, `U` stable volume, `H` HDR, `P` PiP, `G` ambient, `A` aspect ratio.
 - **Aspect Ratio Controls**: `A` key cycles contain/cover/fill/zoom. Sub-menu with icons in context menu and bottom controls.
-- **Subtitle/Audio Track Cycling**: `V`/`B` keys cycle with OSD showing track number and language.
-- **Timeline Keyboard Navigation**: Arrow keys to navigate thumbnails/chapters, Enter to seek, Escape to close.
-- **Resume Dialog Keyboard**: Arrow keys to toggle Resume/Start Over, Enter to confirm, Escape to dismiss. Visual focus indicator.
-- **PiP in Context Menu**: Picture-in-Picture option with `P` shortcut.
-- **Network Recovery**: Stall detection with 500ms grace period, auto-resume on buffer data, offline/online distinction for CORS errors.
+- **Stable Volume**: DynamicsCompressorNode for loudness normalization. Opt-in via `stablevolume` attribute.
+- **Nerd Stats**: Press `I` for codec, resolution, FPS, decoder type, buffer health, color info, and live network/disk activity graph.
+- **Timeline**: Press `T` for auto-generated thumbnail strip with chapter support. Arrow key navigation, click-to-seek.
+- **Chapter Support**: Extract chapters from video metadata. Chapter markers on progress bar, chapter titles in seek tooltip.
+- **Video Rotation**: Press `R` to rotate 90°. Metadata rotation auto-applied. Disabled during PiP.
+- **Keyboard Shortcuts Panel**: Press `?` to view all shortcuts.
+- **Resume Playback**: `resume` attribute saves position to localStorage with resume/start-over dialog.
+- **Encrypted Playback**: AES-256-GCM chunked encryption with HMAC-SHA256 signed requests.
+- **Background Audio**: Video keeps playing audio when tab is in background via Web Worker timer fallback.
+- **Chrome Extension**: Popup with "Paste & Play" and "Play from Computer", context menu on video links, play button overlay on detected URLs.
+- **Privacy Policy**: Published at docs site for Chrome Web Store compliance.
 
 ### Changed
-- Extension context menu simplified to single "Open with Movi Player" on all links.
-- Extension removed `gesturefs` attribute for gesture support.
-- Smart title extraction: `.m3u8`/`.mpd` URLs use parent path segment instead of filename.
-- HLS error handling: 404/403 errors show instant error (no infinite retry). Max 3 network retries, 2 media retries.
-- "Try Software Decoding" button hidden for network errors.
-- Console logs dropped in production build (terser `drop_console`).
-- PiP button disabled initially like other controls.
+- Buffering state now stops presentation loop so frames accumulate for reliable recovery.
+- Buffering exit requires video frames ready (with 3s fallback for async decoder delays).
+- Pause during buffering allowed from all UI controls (click, keyboard, buttons, PiP, context menu).
+- `buffering → ended` state transition allowed for EOF during rebuffer.
+- Invalid packet size at EOF treated as EOF (not fatal error) for FFmpeg stale buffer data.
+- HDR icon changed to text badge style in OSD and context menu (matches bottom controls).
+- Extension description rewritten to remove excessive format keywords (Chrome Web Store compliance).
+- Console logs dropped in production build.
 
 ### Fixed
-- **Pause-seek loading stuck**: `VideoDecoder.flush()` hanging on slow devices — 1s timeout with reset+reconfigure fallback.
-- **EOF not triggering**: Relaxed condition to end when time reaches duration (0.5s tolerance) or all queues empty.
-- **PiP canvas restore**: Use `shadowRoot` directly instead of `parentElement` (ShadowRoot is Node, not Element).
-- **PiP frame freeze on tab switch**: `isPiPActive` guard on `document.hidden` frame dropping.
-- **Network disconnect**: `navigator.onLine` check before treating fetch errors as CORS.
-- **Seek loading**: `currentTime` setter allows seeking from `seeking`/`buffering` states. 3s seek timeout forces completion.
-- **Timeline first-open**: Retry thumbnail pipeline init if first attempt failed.
-- **Timeline position**: CSS-based controls-aware positioning (125px above controls).
-- **Timeline thumbnail rotation**: Use `naturalWidth/Height` for hidden elements. Metadata rotation considered for portrait detection.
-- **Seek thumbnail z-index**: Hidden when timeline is open to prevent overlap.
-- **EncryptedHttpSource**: Network resilience matching HttpSource (retry, offline recovery, speed idle reset).
-- **Closed frame warning spam**: Silenced at EOF (normal behavior).
-- **Nerd stats graph**: Fixed fullscreen positioning, CSS specificity for graph canvas.
-- **HLS resolution 0x0**: Read actual level from HLS.js instead of Auto track.
-
-## [0.2.0-beta.2] - 2026-04-06
-
-### Added
-- Background audio playback: video keeps playing audio when tab is in background. Uses setInterval fallback when requestAnimationFrame stops.
-
-### Fixed
-- Video frames silently dropped in background (prevents WebGL errors that would stop audio).
-- AudioContext resumed on tab hide to prevent suspension.
-- Background interval cleaned up on pause/destroy.
-- Network/disk activity graph: canvas auto-resize, roundRect compatibility fix, proper hide threshold.
-
-## [0.2.0-beta.1] - 2026-04-05
-
-### Added
-- Chrome Extension: popup with "Paste & Play" (clipboard) and "Play from Computer", context menu on video links, play button overlay on detected URLs, drag & drop player page.
-- Memory usage in nerd stats (Chrome only).
-- Portrait video detection for timeline thumbnails.
-
-### Changed
-- Context menu: "Stats for nerds" moved to bottom.
-- Extension popup: complete redesign with card layout, no input box.
-- Extension build script copies only element.js (6.5MB vs 40MB+).
-
-### Fixed
-- Nerd stats close button z-index (was behind graph on mobile).
-- Nerd stats graph canvas auto-resize to container width.
-- Nerd stats graph hidden when player height < 300px.
-- Mobile controls: compact buttons (34px), smaller icons, tighter layout.
-- Timeline/thumbnail rotation: negative margin trick for proper container fit.
-- Portrait thumbnails in timeline use width constraint instead of height.
-- Timeline position syncs with controls show/hide (smooth transition).
-- Subtitles stack above timeline when both visible.
-- Focus restored after closing timeline, resume dialog, nerd stats.
-- "Start Over" now seeks to 0:00.
-- Network/disk speed resets to 0 after 1s idle (fixes stale graph on pause).
-- Seek thumbnail rotation margin re-applied on each hover.
-
-## [0.2.0] - 2026-04-05
-
-### Added
-- **Stable Volume**: DynamicsCompressorNode for loudness normalization (YouTube-like). Opt-in via `stablevolume` attribute. Smooth gain transitions, AudioContext auto-recovery, gap filling on underrun.
-- **Nerd Stats**: Press `I` for comprehensive overlay — codec, resolution, FPS, decoder type, buffer health, color info, and live network/disk activity graph.
-- **Timeline**: Press `T` for auto-generated thumbnail strip. Chapter-aware when video has chapters. 20 thumbnails, click-to-seek.
-- **Chapter Support**: Extract chapters from video metadata (FFmpeg WASM). Chapter markers on progress bar, chapter titles in seek tooltip.
-- **Video Rotation**: Press `R` to rotate 90. Metadata rotation auto-applied. Thumbnails and seek previews sync with rotation.
-- **Keyboard Shortcuts Panel**: Press `?` to view all shortcuts in a two-column overlay.
-- **Resume Playback**: Opt-in via `resume` attribute. Saves position to localStorage, shows "Resume / Start Over" dialog on reload.
-- **Encrypted Playback**: AES-256-GCM chunked encryption with HMAC-SHA256 signed requests, one-time nonces, IP + fingerprint binding. Configurable via HTML attributes (`encrypted`, `tokenurl`, `videourl`, `videoid`) or `loadEncrypted()` API.
-- **Browser Fingerprint**: Canvas, WebGL, screen, timezone based fingerprint for token binding.
-- **Encrypted Server Example**: Node.js Express server with encrypt CLI, multi-video support, chunked on-demand decryption (~2MB RAM per request).
-- **Subtitle Shift**: Subtitles move up smoothly when controls are visible.
-- **Continuous Double-tap Seek**: YouTube-like mobile behavior with cumulative OSD.
-- **Auto-focus on Hover**: Keyboard shortcuts work without clicking the player.
-
-### Changed
-- Stable volume is now opt-in via `stablevolume` attribute (not enabled by default).
-- Loop and stable volume icons use filled/outline toggle pattern (like subtitle CC button).
-- Nerd stats includes quality label, pixel format, color range/primaries/transfer, language, subtitle info.
-- README rewritten — concise, no repetition, clear value proposition and comparison table.
-
-### Fixed
-- Subtitle track switch now seeks to current position to pick up subtitle packets.
-- Thumbnail 403 errors now retry with exponential backoff instead of fatal failure.
-- Audio starvation threshold increased to 2s, requires empty buffer before triggering.
-- Removed starvation-based rebuffering (caused false buffering during thumbnail generation).
-- Fullscreen Escape key closes overlays (context menu, shortcuts, stats) before exiting fullscreen.
-- 180 rotation now renders at full size (was shrinking due to resize logic).
-- EncryptedHttpSource buffer progress bar shows real-time download progress.
+- Hardware decoder error recovery with keyframe cache and software fallback.
+- Seek and play/pause during buffering state.
+- Network disconnect causing permanent CORS misclassification when `navigator.onLine` lags.
+- Stale stream loops from leaked online event listeners during backoff.
+- Multiple concurrent fetch loops after network recovery.
+- Clock advancing during buffering (presentation loop consuming frames).
+- PiP rotation clipping — rotation reset on PiP enter, restored on close.
+- PiP portrait video oversized — height-limited sizing for portrait aspect ratios.
+- Pause-seek loading stuck — `VideoDecoder.flush()` 1s timeout with reset+reconfigure fallback.
+- EOF not triggering — relaxed condition with 0.5s tolerance.
+- PiP canvas restore using `shadowRoot` directly.
+- PiP frame freeze on tab switch with `isPiPActive` guard.
+- EncryptedHttpSource network resilience matching HttpSource.
+- Nerd stats graph fullscreen positioning and CSS specificity.
 
 ## [0.1.5] - 2026-02-15
 
@@ -126,10 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Simplified error messages to be more concise and consistent
 - Replaced all hardcoded purple colors with CSS variables (--movi-primary) for full theme customization
 - Enhanced center play button with theme color by default
-- Center play button now displays with colored glow and border initially (not just on hover)
-- Improved visual prominence of play button when autoplay is disabled
 - Updated loading spinner with responsive sizing and theme-aware colors
-- All UI elements now use CSS variables for consistent theming
 
 ### Fixed
 - Improved playback stability with enhanced error handling and timeout management
@@ -137,28 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Distinguished 403/401/404 errors from CORS errors for better error reporting
 - CORS errors now propagate immediately instead of waiting for timeout
 - Title bar z-index now properly positioned below control menus in mobile view
-- Fixed menu accessibility issue where speed/subtitle menus appeared behind title
 - Center play button backdrop blur now enabled on mobile/touch devices
-- Center play button icon visibility fixed using visibility instead of display property
-- Center play button icon color now properly displays in both dark and light themes
-- Progress handle (seekbar tip) now uses theme color variables
 - Controls no longer auto-hide when menus are open on mobile
-- Loading spinner now theme-aware and visible on all backgrounds
-
-### Documentation
-- Added SoundTouch third-party license attribution
-
-## [0.1.5-beta.0] - 2026-02-11 (unreleased)
-
-### Changed
-- Enhanced center play button with purple theme color by default
-- Center play button now displays with purple glow and border initially (not just on hover)
-- Improved visual prominence of play button when autoplay is disabled
-- Updated both dark and light theme styles for consistent purple accent
-- Applied purple styling to mobile and desktop versions
-
-### Fixed
-- Mobile touch device hover states now properly display purple theme colors
 
 ## [0.1.4] - 2026-02-11
 
