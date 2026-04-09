@@ -1394,6 +1394,17 @@ export class CanvasRenderer {
   }
 
   /**
+   * Set manual rotation to a specific value (for save/restore in PiP)
+   */
+  setManualRotation(deg: number): void {
+    this.manualRotation = deg % 360;
+    this.rotation = (this.metadataRotation + this.manualRotation) % 360;
+    if (this.containerWidth > 0 && this.containerHeight > 0) {
+      this.resize(this.containerWidth, this.containerHeight, true);
+    }
+  }
+
+  /**
    * Set extra bottom padding for subtitles when controls are visible
    * 0 = use default padding, >0 = use this value instead
    */

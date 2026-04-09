@@ -2703,9 +2703,9 @@ export class MoviElement extends HTMLElement {
           break;
         case "r":
         case "R":
-          // R: Rotate video 90°
+          // R: Rotate video 90° (disabled during PiP)
           e.preventDefault();
-          if (this.player) {
+          if (this.player && !this._pipWindow) {
             const deg = this.player.rotateVideo();
             this.showOSD(
               `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`,
@@ -3479,7 +3479,7 @@ export class MoviElement extends HTMLElement {
         );
         hideContextMenu();
       } else if (action === "rotate-video") {
-        if (this.player) {
+        if (this.player && !this._pipWindow) {
           const deg = this.player.rotateVideo();
           const statusEl = shadowRoot.querySelector(".movi-rotate-status");
           if (statusEl) statusEl.textContent = `${deg}°`;
@@ -3781,6 +3781,12 @@ export class MoviElement extends HTMLElement {
         item.classList.remove("movi-context-menu-active");
       }
     });
+
+    // Disable rotate during PiP
+    const rotateItem = contextMenu.querySelector('.movi-context-menu-item[data-action="rotate-video"]');
+    if (rotateItem) {
+      rotateItem.classList.toggle("movi-context-menu-disabled", !!this._pipWindow);
+    }
   }
 
   private setupSubmenuHover(item: HTMLElement, submenu: HTMLElement): void {
@@ -4006,19 +4012,39 @@ export class MoviElement extends HTMLElement {
     }
 
     try {
-      // Get video dimensions for aspect ratio
       const videoTrack = this.player.getVideoTracks()?.[0];
       const vw = videoTrack?.width || 640;
       const vh = videoTrack?.height || 360;
+      const savedRotation = this.player.getVideoRotation();
+      // PiP always shows original (unrotated) video
       const aspect = vw / vh;
-      const pipWidth = Math.min(400, window.innerWidth * 0.35);
-      const pipHeight = Math.round(pipWidth / aspect);
+      const maxW = Math.min(400, window.innerWidth * 0.35);
+      const maxH = Math.min(500, window.innerHeight * 0.5);
+      let pipWidth: number, pipHeight: number;
+      if (aspect >= 1) {
+        pipWidth = maxW;
+        pipHeight = Math.round(maxW / aspect);
+      } else {
+        pipHeight = maxH;
+        pipWidth = Math.round(maxH * aspect);
+      }
+      // Reset rotation for PiP (restore on close)
+      if (savedRotation !== 0) {
+        this.player.setVideoRotation(0);
+      }
 
       const pipWindow: Window = await docPiP.requestWindow({
         width: Math.round(pipWidth),
-        height: pipHeight,
+        height: Math.round(pipHeight),
       });
       this._pipWindow = pipWindow;
+
+      // Chrome may ignore requestWindow size (remembers last PiP size), force resize
+      try {
+        const chromeW = pipWindow.outerWidth - pipWindow.innerWidth;
+        const chromeH = pipWindow.outerHeight - pipWindow.innerHeight;
+        pipWindow.resizeTo(Math.round(pipWidth) + chromeW, Math.round(pipHeight) + chromeH);
+      } catch {};
 
       // Style the PiP window
       const style = pipWindow.document.createElement("style");
@@ -4225,6 +4251,10 @@ export class MoviElement extends HTMLElement {
         Logger.info(TAG, `PiP event: ${e.type} fired`);
         clearInterval(pipUpdateInterval);
         this.restorePiPCanvas();
+        // Restore rotation
+        if (savedRotation !== 0 && this.player) {
+          requestAnimationFrame(() => this.player?.setVideoRotation(savedRotation));
+        }
       };
       pipWindow.addEventListener("pagehide", restore);
       pipWindow.addEventListener("unload", restore);
@@ -7272,6 +7302,11 @@ export class MoviElement extends HTMLElement {
         background-color: rgba(255, 255, 255, 0.12);
         transform: scale(0.98);
         transition: transform 0.1s ease;
+      }
+
+      .movi-context-menu-item.movi-context-menu-disabled {
+        opacity: 0.3;
+        pointer-events: none;
       }
 
       .movi-context-menu-item.movi-context-menu-active {

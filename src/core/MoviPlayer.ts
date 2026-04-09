@@ -2502,6 +2502,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     return this.videoRenderer?.getRotation() ?? 0;
   }
 
+  setVideoRotation(deg: number): void {
+    this.videoRenderer?.setManualRotation(deg);
+  }
+
   setFitMode(mode: "contain" | "cover" | "fill" | "zoom" | "control"): void {
     if (this.hlsWrapper) {
       this.hlsWrapper.setFitMode(mode);
