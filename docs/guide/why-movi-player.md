@@ -126,6 +126,35 @@ player.addEventListener("ended", () => console.log("done"));
 
 The element implements the same `play()` / `pause()` / `currentTime` / events surface as `<video>`, so most existing logic carries over with a `getElementById` instead of a `videojs()` factory call.
 
+#### Multiple sources / split source
+
+Movi Player accepts child `<source>` elements just like `<video>`, so the `<source>` fallback pattern keeps working:
+
+```html
+<movi-player controls>
+  <source src="movie.av1.mp4" type="video/mp4; codecs=av01.0.05M.08" />
+  <source src="movie.h264.mp4" type="video/mp4" />
+</movi-player>
+```
+
+In addition, Movi extends the syntax with `kind="audio"` so you can serve a video-only file alongside a separate audio track (DASH-style split source) — something native `<video>` and video.js can't do without manual MSE wiring:
+
+```html
+<movi-player controls>
+  <source src="video-only.mp4" type="video/mp4" />
+  <source src="audio-only.m4a" type="audio/mp4" kind="audio" />
+</movi-player>
+```
+
+The two streams are kept in sync automatically. The same is available via JS:
+
+```js
+player.source({
+  video: { src: "video-only.mp4", type: "video/mp4" },
+  audio: { src: "audio-only.m4a", type: "audio/mp4" },
+});
+```
+
 ### From hls.js
 
 **Before** — hls.js wires up MSE manually on a `<video>` element:
