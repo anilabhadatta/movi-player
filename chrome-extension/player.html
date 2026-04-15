@@ -110,6 +110,32 @@
     }
     .promo-links a:hover { color: #8B5CF6; }
     .promo-links a svg { width: 14px; height: 14px; }
+
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9998;
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 18px;
+      font-family: -apple-system, sans-serif;
+      color: #fff;
+    }
+    .loading-overlay.hidden { display: none; }
+    .loading-spinner {
+      width: 44px;
+      height: 44px;
+      border: 3px solid rgba(139, 92, 246, 0.2);
+      border-top-color: #8B5CF6;
+      border-radius: 50%;
+      animation: movi-spin 0.8s linear infinite;
+    }
+    @keyframes movi-spin { to { transform: rotate(360deg); } }
+    .loading-text { font-size: 13px; color: #888; letter-spacing: 0.3px; }
+    .loading-name { font-size: 12px; color: #444; max-width: 80%; text-align: center; word-break: break-all; }
   </style>
 </head>
 <body>
@@ -123,6 +149,12 @@
     ambientmode
     resume
   ></movi-player>
+
+  <div class="loading-overlay hidden" id="loadingOverlay">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Loading video</div>
+    <div class="loading-name" id="loadingName"></div>
+  </div>
 
   <div class="file-overlay hidden" id="fileOverlay">
     <div class="promo-links">

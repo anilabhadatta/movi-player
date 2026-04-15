@@ -18,7 +18,7 @@ Play any video format directly in the browser. No transcoding, no server process
 - **Drop-in replacement** -- `<movi-player src="video.mp4" controls>` works like `<video>` but plays everything.
 - **Content protection** -- Built-in encrypted playback with AES-256-GCM, token auth, HMAC signing. No DRM license server needed.
 - **HDR rendering** -- Detects and renders BT.2020/PQ/HLG content on supported displays. Other players can't.
-- **Canvas-based** -- No `<video>` element exposed. Right-click save disabled. Screen recording gets watermarked.
+- **Canvas-based** -- No `<video>` element exposed. Right-click save disabled.
 - **Picture-in-Picture** -- Document PiP with controls (play/pause, seek, mute, progress). Chromium 116+.
 - **Ambient mode** -- Dynamic letterbox glow that samples video colors in real-time. Press `G` or use context menu.
 - **Split sources** -- Separate video, audio, and subtitle file URLs via `videosrc`, `audiosrc`, `subtitlesrc` attributes.
@@ -105,7 +105,7 @@ See [encrypted-server/](encrypted-server/) for the server example.
 ></movi-player>
 ```
 
-Requires a DRM license server (PallyCon, EZDRM, BuyDRM, etc.). In DRM mode, native `<video>` element is used (canvas features like rotation/watermark are disabled).
+Requires a DRM license server (PallyCon, EZDRM, BuyDRM, etc.). In DRM mode, native `<video>` element is used (canvas features like rotation are disabled).
 
 ### Demuxer Only (50KB)
 
@@ -159,6 +159,8 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 **UI** -- Controls, context menu, keyboard shortcuts (`?` to view all), themes (dark/light), gestures, ambient mode.
 
+**Persistent Preferences** -- Volume, mute, playback rate, stable volume, ambient mode, and HDR toggles persist across reloads via OPFS. User choices override HTML attribute defaults.
+
 **Picture-in-Picture** -- Document PiP with play/pause, seek, mute, progress bar. Press `P`.
 
 **Aspect Ratio** -- Press `A` to cycle contain/cover/fill/zoom. Context menu sub-menu with icons.
@@ -181,59 +183,68 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 ```html
 <movi-player
-  src="video.mp4"          <!-- Video URL or set via JS: player.src = file -->
-  controls                 <!-- Show player controls -->
-  autoplay                 <!-- Auto-play on load -->
-  muted                    <!-- Start muted -->
-  loop                     <!-- Loop playback -->
-  poster="thumb.jpg"       <!-- Poster image -->
-  theme="dark"             <!-- dark | light -->
-  objectfit="contain"      <!-- contain | cover | fill | zoom | control -->
-  hdr                      <!-- Enable HDR rendering -->
-  ambientmode              <!-- Ambient background glow -->
-  thumb                    <!-- Enable seek thumbnails -->
-  fastseek                 <!-- Enable skip buttons and gestures -->
-  showtitle                <!-- Show video title -->
-  resume                   <!-- Resume from last position -->
-  stablevolume             <!-- Loudness normalization -->
-  startat="30"             <!-- Start at time (seconds) -->
-  gesturefs                <!-- Gestures only in fullscreen -->
-  nohotkeys                <!-- Disable keyboard shortcuts -->
-  encrypted                <!-- Encrypted playback mode -->
-  tokenurl="/api/token"    <!-- Token endpoint (encrypted) -->
-  videourl="/api/video"    <!-- Video endpoint (encrypted) -->
-  videoid="movie.mp4"      <!-- Video ID (encrypted) -->
-  drm                      <!-- DRM mode for HLS (native video + EME) -->
+  src="video.mp4"           <!-- Video URL or set via JS: player.src = file -->
+  controls                  <!-- Show player controls -->
+  autoplay                  <!-- Auto-play on load -->
+  muted                     <!-- Start muted -->
+  loop                      <!-- Loop playback -->
+  volume="0.8"              <!-- Initial volume 0..1 -->
+  playbackrate="1.25"       <!-- Initial playback speed -->
+  poster="thumb.jpg"        <!-- Poster image -->
+  theme="dark"              <!-- dark | light -->
+  themecolor="#ff5722"      <!-- Custom primary color (hex/rgb) -->
+  objectfit="contain"       <!-- contain | cover | fill | zoom | control -->
+  hdr                       <!-- Enable HDR rendering -->
+  ambientmode               <!-- Ambient background glow -->
+  ambientwrapper="wrapper"  <!-- External element id for ambient glow -->
+  thumb                     <!-- Enable seek thumbnails -->
+  fastseek                  <!-- Enable skip buttons and gestures -->
+  doubletap="true"          <!-- Double-tap to seek ±10s -->
+  title="My Video"          <!-- Video title (in-player overlay only) -->
+  showtitle                 <!-- Show title overlay at top -->
+  startat="30"              <!-- Start at time (seconds) -->
+  resume                    <!-- Resume from last position -->
+  stablevolume              <!-- Loudness normalization -->
+  buffersize="30"           <!-- Custom buffer size (seconds) -->
+  renderer="canvas"         <!-- canvas | mse -->
+  sw                        <!-- Force software decoding -->
+  fps="60"                  <!-- Override frame rate -->
+  gesturefs                 <!-- Gestures only in fullscreen -->
+  nohotkeys                 <!-- Disable keyboard shortcuts -->
+  encrypted                 <!-- Encrypted playback mode -->
+  tokenurl="/api/token"     <!-- Token endpoint (encrypted) -->
+  videourl="/api/video"     <!-- Video endpoint (encrypted) -->
+  videoid="movie.mp4"       <!-- Video ID (encrypted) -->
+  drm                       <!-- DRM mode for HLS (native video + EME) -->
   licenseurl="https://..."  <!-- Widevine/FairPlay license server URL -->
-  videosrc="video.mp4"     <!-- Separate video source (split source) -->
-  audiosrc="audio.mp4"     <!-- Separate audio source (split source) -->
-  subtitlesrc="subs.srt"   <!-- Separate subtitle source (split source) -->
 ></movi-player>
+```
+
+**Split sources** (separate video + audio files) use child `<source>` elements with `kind="audio"`:
+
+```html
+<movi-player controls>
+  <source src="video-only.mp4" type="video/mp4">
+  <source src="audio-only.m4a" type="audio/mp4" kind="audio">
+</movi-player>
 ```
 
 ## Keyboard Shortcuts
 
-| Key | Action |
-|---|---|
-| `Space` / `K` | Play / Pause |
-| `F` | Fullscreen |
-| `M` | Mute |
-| `R` | Rotate 90 |
-| `A` | Cycle aspect ratio |
-| `I` | Stats for nerds |
-| `T` | Timeline |
-| `S` | Snapshot |
-| `P` | Picture-in-Picture |
-| `V` | Cycle subtitle track |
-| `B` | Cycle audio track |
-| `L` | Toggle loop |
-| `U` | Toggle stable volume |
-| `G` | Toggle ambient mode |
-| `H` | Toggle HDR |
-| `+` / `-` | Speed up / down |
-| `?` | Shortcuts panel |
-| `0` / `Home` | Seek to start |
-| Arrows | Seek / Volume |
+Press `?` during playback to toggle the shortcuts panel (also available from the right-click context menu).
+
+| Key | Action | Key | Action |
+|---|---|---|---|
+| `Space` / `K` | Play / Pause | `B` | Cycle audio track |
+| `F` | Fullscreen | `L` | Toggle loop |
+| `M` | Mute | `U` | Toggle stable volume |
+| `R` | Rotate 90 | `G` | Toggle ambient mode |
+| `A` | Cycle aspect ratio | `H` | Toggle HDR |
+| `I` | Stats for nerds | `+` / `-` | Speed up / down |
+| `T` | Timeline | `?` | Shortcuts panel |
+| `S` | Snapshot | `0` / `Home` | Seek to start |
+| `P` | Picture-in-Picture | Arrows | Seek / Volume |
+| `V` | Cycle subtitle track | | |
 
 ## Server Requirements
 

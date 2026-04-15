@@ -92,6 +92,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private animationFrameId: number | null = null;
   private backgroundIntervalId: number | null = null;
   private backgroundWorker: Worker | null = null; // Worker-based timer for Safari
+  private isBackgrounded: boolean = false; // True when tab is hidden (background)
 
   // WakeLock to prevent screen sleep during playback
   private wakeLock: WakeLockSentinel | null = null;
@@ -100,6 +101,14 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private seekingToKeyframe: boolean = false;
   private seekingToKeyframeStartTime: number = 0;
   private static readonly KEYFRAME_SEEK_TIMEOUT = 5000; // 5 seconds timeout
+
+  // Prebuffer targets — accumulate this much before reporting "ready" so
+  // play() doesn't immediately stall on short videos where the demux burst
+  // outruns the HTTP stream.
+  private static readonly PREBUFFER_AUDIO_SECONDS = 0.5;
+  private static readonly PREBUFFER_VIDEO_FRAMES = 2;
+  private static readonly PREBUFFER_MAX_WALL_MS = 5000;
+  private static readonly PREBUFFER_MAX_PACKETS = 400;
 
   // Seek target time - skip packets before this time to ensure accurate seeking
   // When seeking, FFmpeg seeks to the nearest keyframe BEFORE the target time
@@ -472,6 +481,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       // Emit duration
       this.emit("durationChange", this.mediaInfo.duration);
 
+      // Prebuffer a small amount of media so play() doesn't immediately
+      // stall on short videos (see prebuffer() for details).
+      await this.prebuffer();
+
       this.stateManager.setState("ready");
       this.emit("loadEnd", undefined);
 
@@ -640,6 +653,114 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         );
       }
     }
+  }
+
+  /**
+   * Demux + decode a small amount of media before reporting "ready".
+   * On short videos the normal demux burst can drain the entire file faster
+   * than the HTTP source delivers bytes, causing the stall detector to trip
+   * the moment play() starts. Filling the renderer queues up-front avoids it.
+   */
+  private async prebuffer(): Promise<void> {
+    if (!this.demuxer) return;
+
+    const hasVideoTrack = !!this.trackManager.getActiveVideoTrack();
+    // If a separate <audio> element handles audio, the in-file audio track
+    // isn't fed to our audio decoder — skip its target so we don't hang.
+    const hasInFileAudio =
+      !!this.trackManager.getActiveAudioTrack() &&
+      !this.disableAudio &&
+      !this.nativeAudioEl;
+
+    if (!hasVideoTrack && !hasInFileAudio) return;
+
+    const startWall = performance.now();
+    let packetsRead = 0;
+    let eof = false;
+
+    const targetMet = (): boolean => {
+      const videoOk =
+        !hasVideoTrack ||
+        !this.videoRenderer ||
+        this.videoRenderer.getQueueSize() >= MoviPlayer.PREBUFFER_VIDEO_FRAMES;
+      const audioOk =
+        !hasInFileAudio ||
+        this.audioRenderer.getBufferedDuration() >=
+          MoviPlayer.PREBUFFER_AUDIO_SECONDS;
+      return videoOk && audioOk;
+    };
+
+    while (
+      !targetMet() &&
+      !eof &&
+      packetsRead < MoviPlayer.PREBUFFER_MAX_PACKETS
+    ) {
+      if (performance.now() - startWall > MoviPlayer.PREBUFFER_MAX_WALL_MS) {
+        Logger.warn(
+          TAG,
+          `Prebuffer wall-clock timeout after ${MoviPlayer.PREBUFFER_MAX_WALL_MS}ms`,
+        );
+        break;
+      }
+
+      let packet;
+      try {
+        packet = await this.demuxer.readPacket();
+      } catch (err) {
+        Logger.warn(TAG, "Prebuffer demux error, aborting prebuffer", err);
+        break;
+      }
+
+      if (!packet) {
+        eof = true;
+        break;
+      }
+
+      packetsRead++;
+
+      if (!this.trackManager.isActiveStream(packet.streamIndex)) continue;
+
+      const activeVideo = this.trackManager.getActiveVideoTrack();
+      const activeAudio = this.trackManager.getActiveAudioTrack();
+
+      if (
+        hasVideoTrack &&
+        activeVideo &&
+        activeVideo.id === packet.streamIndex
+      ) {
+        this.videoDecoder.decode(
+          packet.data,
+          packet.timestamp,
+          packet.keyframe,
+          packet.dts,
+        );
+      } else if (
+        hasInFileAudio &&
+        activeAudio &&
+        activeAudio.id === packet.streamIndex
+      ) {
+        this.audioDecoder.decode(
+          packet.data,
+          packet.timestamp,
+          packet.keyframe,
+        );
+      }
+
+      // Yield periodically so async decoder callbacks can land in the
+      // renderer queues we're polling against.
+      if (packetsRead % 8 === 0) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+    }
+
+    // Final yield to drain any in-flight decoder callbacks before we flip
+    // to "ready" — otherwise the queue check above can underreport.
+    await new Promise((r) => setTimeout(r, 0));
+
+    Logger.info(
+      TAG,
+      `Prebuffer complete: ${packetsRead} packets, audioBuf=${this.audioRenderer.getBufferedDuration().toFixed(2)}s, videoFrames=${this.videoRenderer?.getQueueSize() ?? 0}, eof=${eof}`,
+    );
   }
 
   /**
@@ -1038,7 +1159,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Stall detection: if playing but both video and audio buffers are critically low
     // Skip near end of video to avoid false stall at EOF
     const nearEnd = this.mediaInfo && this.clock.getTime() >= (this.mediaInfo.duration + this.startTime) - 3;
-    if (this.stateManager.getState() === "playing" && !this.eofReached && !this.waitingForVideoSync && !nearEnd) {
+    if (this.stateManager.getState() === "playing" && !this.eofReached && !this.waitingForVideoSync && !nearEnd && !this.isBackgrounded) {
       const videoEmpty = this.videoRenderer ? this.videoRenderer.getQueueSize() === 0 : false;
       const hasAudio = !!this.trackManager.getActiveAudioTrack() && !this.disableAudio;
       const audioLow = !hasAudio || this.audioRenderer.getBufferedDuration() < 0.05;
@@ -1132,11 +1253,15 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Renderer queue limits (in frames)
     const maxVideoBuffered = isSoftware ? 60 : isPostSeek ? 20 : 100;
 
+    // In background (not PiP), ignore video backpressure since video decode is skipped.
+    // Only check audio backpressure to keep audio flowing smoothly.
+    const skipVideoBackpressure = this.isBackgrounded && !this.isPiPActive;
+
     if (
-      this.videoDecoder.queueSize > maxVideoQueue ||
+      (!skipVideoBackpressure && this.videoDecoder.queueSize > maxVideoQueue) ||
       (!this.disableAudio && this.audioDecoder.queueSize > maxAudioQueue) ||
       (!this.disableAudio && audioBuffered > maxAudioBuffered) ||
-      videoBuffered > maxVideoBuffered
+      (!skipVideoBackpressure && videoBuffered > maxVideoBuffered)
     ) {
       if (
         this.waitingForVideoSync &&
@@ -1273,6 +1398,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           const activeAudio = this.trackManager.getActiveAudioTrack();
 
           if (activeVideo && activeVideo.id === packet.streamIndex) {
+            // In background (not PiP), skip video decoding entirely.
+            // This prevents frame queue buildup that blocks audio demuxing via backpressure.
+            // At 60fps, video queue fills in ~1.7s and starves audio.
+            if (this.isBackgrounded && !this.isPiPActive) {
+              continue;
+            }
+
             // After seek, skip non-keyframe video packets until we find a keyframe
             // This prevents decoder errors (decoder needs keyframe after flush)
             if (this.seekingToKeyframe) {
@@ -2415,6 +2547,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     return this.mediaInfo;
   }
 
+  getContentDispositionFilename(): string | null {
+    if (this.source instanceof HttpSource) {
+      return this.source.getContentDispositionFilename();
+    }
+    return null;
+  }
+
   /**
    * Get HLS video element (DRM mode) for direct DOM insertion
    */
@@ -2656,6 +2795,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /** Check if native audio is currently active */
   isNativeAudioActive(): boolean {
     return this.nativeAudioEl !== null && this._activeAudioLang !== "";
+  }
+
+  /** True whenever a native <audio> element is loaded (single split-source or multi-lang). */
+  hasNativeAudio(): boolean {
+    return this.nativeAudioEl !== null;
   }
 
   /**
@@ -3080,7 +3224,16 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
     if (document.visibilityState === "hidden" && isPlaying) {
       // Tab went to background — use Worker timer (Safari throttles setInterval to 1s+)
+      this.isBackgrounded = true;
       this.startBackgroundTimer();
+
+      // In background (not PiP), stop video presentation and clear queue
+      // to prevent frame accumulation that blocks audio demuxing via backpressure.
+      // At 60fps, the queue fills in ~1.7s and starves audio completely.
+      if (!this.isPiPActive && this.videoRenderer) {
+        this.videoRenderer.stopPresentationLoop();
+        this.videoRenderer.clearQueue();
+      }
 
       // Resume AudioContext if suspended
       if (this.audioRenderer) {
@@ -3088,25 +3241,28 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       }
     } else if (document.visibilityState === "visible") {
       // Tab visible again — stop background timer, RAF takes over
+      this.isBackgrounded = false;
       this.stopBackgroundTimer();
 
       if (isPlaying) {
-        // Only clear video queue if PiP is NOT active
-        // PiP window keeps rendering frames even when main tab is hidden
-        if (!this.isPiPActive && this.videoRenderer) {
-          this.videoRenderer.clearQueue();
-        }
-
-        // Re-sync clock to audio (audio was playing continuously)
-        this.clock.seek(this.clock.getTime());
-
         // Resume AudioContext if needed
         if (this.audioRenderer) {
           (this.audioRenderer as any).audioContext?.resume?.().catch(() => {});
         }
 
-        // Restart presentation loop
-        this.processLoop();
+        if (!this.isPiPActive) {
+          // Seek to current audio position for clean video recovery.
+          // In background, video decoding was skipped so demuxer is at audio position.
+          // A full seek re-positions demuxer, flushes decoders, and restarts cleanly.
+          const audioTime = this.clock.getTime();
+          Logger.debug(TAG, `Foreground recovery: seeking to ${audioTime.toFixed(2)}s`);
+          this.seek(audioTime).catch((err) => {
+            Logger.error(TAG, "Foreground recovery seek failed", err);
+          });
+        } else {
+          // PiP was active — just restart processLoop, video was rendering in PiP
+          this.processLoop();
+        }
 
         setTimeout(() => {
           if (this.stateManager.getState() === "playing") {

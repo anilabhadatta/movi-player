@@ -3,157 +3,230 @@
 <head>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #08080d;
+      --card: #11111a;
+      --card-hover: #161622;
+      --border: #1a1a26;
+      --border-hover: #8B5CF6;
+      --text: #fff;
+      --muted: #555;
+      --accent: #8B5CF6;
+      --accent-soft: rgba(139, 92, 246, 0.12);
+      --accent-glow: rgba(139, 92, 246, 0.25);
+    }
     body {
-      width: 300px;
-      background: #0b0b12;
-      color: #fff;
+      width: 320px;
+      background: var(--bg);
+      color: var(--text);
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      overflow: hidden;
     }
 
-    .top {
-      padding: 18px 20px 14px;
+    /* ─── Header ─────────────────────── */
+    .header {
+      padding: 22px 22px 14px;
       display: flex;
       align-items: center;
+      gap: 12px;
+      position: relative;
+    }
+    .header::after {
+      content: "";
+      position: absolute;
+      left: 22px; right: 22px; bottom: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--border), transparent);
+    }
+    .header img {
+      width: 32px;
+      height: 32px;
+      border-radius: 9px;
+      box-shadow: 0 4px 12px rgba(139, 92, 246, 0.25);
+    }
+    .header-text h1 {
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.2px;
+      line-height: 1;
+    }
+    .header-text span {
+      font-size: 10.5px;
+      color: var(--muted);
+      margin-top: 3px;
+      display: block;
+      letter-spacing: 0.2px;
+    }
+
+    /* ─── Tile grid ──────────────────── */
+    .tiles {
+      padding: 18px 18px 14px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
       gap: 10px;
     }
-    .top img { width: 28px; height: 28px; border-radius: 7px; }
-    .top-text { display: flex; flex-direction: column; }
-    .top-text h1 { font-size: 15px; font-weight: 700; line-height: 1; }
-    .top-text span { font-size: 10px; color: #555; margin-top: 2px; }
-
-    .cards {
-      padding: 0 14px 20px;
+    .tile {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px 14px 16px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
-    }
-
-    .card {
-      background: #13131c;
-      border: 1px solid #1e1e2a;
-      border-radius: 14px;
-      padding: 16px 40px 16px 16px;
-      cursor: pointer;
-      display: flex;
       align-items: center;
-      gap: 14px;
-      transition: all 0.15s;
+      gap: 10px;
+      cursor: pointer;
+      transition: all 0.18s ease;
       position: relative;
       overflow: hidden;
     }
-    .card:hover { border-color: #8B5CF6; }
-    .card:active { transform: scale(0.985); }
+    .tile::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at 50% 0%, var(--accent-soft), transparent 70%);
+      opacity: 0;
+      transition: opacity 0.25s;
+      pointer-events: none;
+    }
+    .tile:hover {
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 12px 32px -8px var(--accent-glow);
+    }
+    .tile:hover::before { opacity: 1; }
+    .tile:active { transform: translateY(0); }
 
-
-    .card-icon {
-      width: 42px;
-      height: 42px;
-      border-radius: 12px;
+    .tile-icon {
+      width: 46px;
+      height: 46px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, var(--accent-soft), rgba(139, 92, 246, 0.04));
       display: flex;
       align-items: center;
       justify-content: center;
+      color: var(--accent);
+      transition: all 0.2s;
+    }
+    .tile:hover .tile-icon {
+      background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(139, 92, 246, 0.08));
+      transform: scale(1.05);
+    }
+    .tile-icon svg { width: 22px; height: 22px; }
+
+    .tile-label {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: -0.1px;
+    }
+    .tile-sub {
+      font-size: 10px;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.4;
+    }
+    .tile-sub.error { color: #ef4444; }
+    .tile-sub.warn { color: #f59e0b; }
+
+    /* ─── Tip ───────────────────────── */
+    .tip {
+      margin: 4px 22px 14px;
+      padding: 10px 12px;
+      background: rgba(139, 92, 246, 0.05);
+      border: 1px solid rgba(139, 92, 246, 0.15);
+      border-radius: 10px;
+      font-size: 10.5px;
+      color: #888;
+      line-height: 1.5;
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+    .tip svg {
+      width: 12px;
+      height: 12px;
+      color: var(--accent);
       flex-shrink: 0;
+      margin-top: 1px;
     }
-    .card-icon svg { width: 20px; height: 20px; }
+    .tip b { color: #aaa; font-weight: 600; }
 
-    .card-icon-paste {
-      background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(139,92,246,0.05));
-      color: #A78BFA;
-    }
-    .card-icon-file {
-      background: linear-gradient(135deg, rgba(59,130,246,0.15), rgba(59,130,246,0.05));
-      color: #60A5FA;
-    }
-
-    .card-body { display: flex; flex-direction: column; gap: 2px; }
-    .card-title { font-size: 13.5px; font-weight: 600; }
-    .card-desc { font-size: 10.5px; color: #555; line-height: 1.3; }
-    .card-desc.error { color: #ef4444; }
-    .card-desc.warn { color: #f59e0b; }
-
-    .card-arrow {
-      position: absolute;
-      right: 18px;
-      color: #333;
-      transition: color 0.15s;
-    }
-    .card:hover .card-arrow { color: #8B5CF6; }
-
-    .bottom {
-      padding: 10px 20px 14px;
-      border-top: 1px solid #111119;
+    /* ─── Footer ─────────────────────── */
+    .footer {
+      padding: 12px 22px 16px;
+      border-top: 1px solid var(--border);
       display: flex;
       justify-content: space-between;
       align-items: center;
+      gap: 8px;
     }
-
-    .supported {
+    .formats {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
+      flex: 1;
     }
-    .supported span {
-      font-size: 8px;
+    .formats span {
+      font-size: 8.5px;
       font-weight: 700;
-      color: #2a2a3a;
-      letter-spacing: 0.3px;
+      color: #2c2c3a;
+      letter-spacing: 0.4px;
     }
-
     .links { display: flex; gap: 12px; }
     .links a {
-      color: #2a2a3a;
+      color: #2c2c3a;
       text-decoration: none;
       display: flex;
       transition: color 0.15s;
     }
-    .links a:hover { color: #8B5CF6; }
+    .links a:hover { color: var(--accent); }
     .links a svg { width: 14px; height: 14px; }
   </style>
 </head>
 <body>
-  <div class="top">
+  <div class="header">
     <img src="icons/icon48.png" alt="">
-    <div class="top-text">
+    <div class="header-text">
       <h1>Movi Player</h1>
       <span>Play any video format</span>
     </div>
   </div>
 
-  <div class="cards">
-    <div class="card" id="paste">
-      <div class="card-icon card-icon-paste">
+  <div class="tiles">
+    <div class="tile" id="file" title="Open a video file from your device">
+      <div class="tile-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 14.9A7 7 0 1 1 15.7 8h1.8a4.5 4.5 0 0 1 2.5 8.2"/>
+          <path d="M12 12v9"/>
+          <path d="m16 16-4-4-4 4"/>
+        </svg>
+      </div>
+      <div class="tile-label">Open File</div>
+      <div class="tile-sub">From your device</div>
+    </div>
+
+    <div class="tile" id="paste" title="Play a video link from clipboard">
+      <div class="tile-icon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
           <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
         </svg>
       </div>
-      <div class="card-body">
-        <span class="card-title">Paste & Play</span>
-        <span class="card-desc" id="paste-hint">Play a video link from clipboard</span>
-      </div>
-      <svg class="card-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M9 18l6-6-6-6"/></svg>
-    </div>
-
-    <div class="card" id="file">
-      <div class="card-icon card-icon-file">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-          <line x1="8" y1="21" x2="16" y2="21"/>
-          <line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
-      </div>
-      <div class="card-body">
-        <span class="card-title">Play from Computer</span>
-        <span class="card-desc">Open a video file from your device</span>
-      </div>
-      <svg class="card-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M9 18l6-6-6-6"/></svg>
+      <div class="tile-label">Paste Link</div>
+      <div class="tile-sub" id="paste-hint">From clipboard</div>
     </div>
   </div>
 
-  <div class="bottom">
-    <div class="supported">
-      <span>MP4</span><span>MKV</span><span>HEVC</span><span>AV1</span>
-      <span>HDR</span><span>4K</span><span>WebM</span>
+  <div class="tip">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="10"/>
+      <path d="M12 16v-4M12 8h.01"/>
+    </svg>
+    <span>Right-click any video link on the web and choose <b>Open with Movi Player</b></span>
+  </div>
+
+  <div class="footer">
+    <div class="formats">
+      <span>MP4</span><span>MKV</span><span>HEVC</span><span>AV1</span><span>HDR</span><span>4K</span><span>WebM</span>
     </div>
     <div class="links">
       <a href="https://github.com/MrUjjwalG/movi-player" target="_blank" title="GitHub">

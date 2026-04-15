@@ -30,3 +30,94 @@
 .movi-ext-play-btn svg {
   margin-left: 2px;
 }
+
+/* Direct-video viewer overlay (file:// and http direct video pages) */
+.movi-ext-direct-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.movi-ext-direct-overlay .movi-ext-card {
+  position: relative;
+  background: #0b0b12;
+  border: 1px solid #1e1e2a;
+  border-radius: 18px;
+  padding: 32px 36px;
+  width: 340px;
+  text-align: center;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  color: #fff;
+}
+
+.movi-ext-direct-overlay .movi-ext-icon {
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 16px;
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.25), rgba(139, 92, 246, 0.08));
+  color: #A78BFA;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.movi-ext-direct-overlay .movi-ext-title {
+  font-size: 18px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  color: #fff;
+}
+
+.movi-ext-direct-overlay .movi-ext-desc {
+  font-size: 12px;
+  color: #666;
+  line-height: 1.5;
+  margin-bottom: 22px;
+}
+
+.movi-ext-direct-overlay .movi-ext-btn {
+  background: #8B5CF6;
+  color: #fff;
+  border: none;
+  padding: 12px 28px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+  width: 100%;
+}
+.movi-ext-direct-overlay .movi-ext-btn:hover {
+  background: #7C3AED;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 24px rgba(139, 92, 246, 0.35);
+}
+
+.movi-ext-direct-overlay .movi-ext-dismiss {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  border: none;
+  color: #555;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 8px;
+  font-family: inherit;
+}
+.movi-ext-direct-overlay .movi-ext-dismiss:hover {
+  background: #13131c;
+  color: #fff;
+}

@@ -18,11 +18,15 @@ chrome.contextMenus.onClicked.addListener((info) => {
 });
 
 // Listen for messages from content script
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender) => {
   if (message.action === "openPlayer") {
     const playerUrl = chrome.runtime.getURL(
       `player.html?url=${encodeURIComponent(message.url)}`
     );
-    chrome.tabs.create({ url: playerUrl });
+    if (message.replaceTab && sender.tab?.id != null) {
+      chrome.tabs.update(sender.tab.id, { url: playerUrl });
+    } else {
+      chrome.tabs.create({ url: playerUrl });
+    }
   }
 });

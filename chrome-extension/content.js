@@ -1,12 +1,11 @@
 // Detect video URLs on page and add play button overlay
-const VIDEO_EXTENSIONS = /\.(mp4|mkv|webm|mov|avi|ts|m3u8|flv|m4v|ogv|wmv)(\?|$)/i;
+const VIDEO_EXTENSIONS = /\.(mp4|mkv|webm|mov|avi|ts|m3u8|flv|m4v|ogv|wmv|m2ts|mts|3gp|mpg|mpeg)(\?|$)/i;
 
 function isVideoUrl(url) {
   return VIDEO_EXTENSIONS.test(url);
 }
 
 function createPlayButton(link) {
-  // Don't add if already has one
   if (link.dataset.moviBtn) return;
   link.dataset.moviBtn = "true";
 
@@ -24,7 +23,6 @@ function createPlayButton(link) {
     });
   });
 
-  // Position relative to link
   const wrapper = link.parentElement;
   if (wrapper) {
     wrapper.style.position = wrapper.style.position || "relative";
@@ -43,11 +41,78 @@ function scanPage() {
   });
 }
 
-// Scan on load
-scanPage();
+// Detect Chrome's native direct-video viewer (file:// video, or http direct video URL).
+// Chrome renders a bare <video> element as the sole child of <body> for these pages.
+function isNativeVideoViewer() {
+  const video = document.querySelector("body > video");
+  if (!video) return false;
+  // Body should contain essentially only the video element (Chrome's native viewer layout)
+  const meaningfulChildren = Array.from(document.body.children).filter(
+    (el) => !el.classList?.contains("movi-ext-direct-overlay")
+  );
+  return meaningfulChildren.length === 1 && meaningfulChildren[0].tagName === "VIDEO";
+}
+
+function getVideoSourceUrl() {
+  const video = document.querySelector("body > video");
+  if (!video) return null;
+  return video.currentSrc || video.src || location.href;
+}
+
+let directOverlayDismissed = false;
+
+function injectDirectVideoOverlay() {
+  if (directOverlayDismissed) return;
+  if (document.getElementById("movi-ext-direct-overlay")) return;
+
+  const videoUrl = getVideoSourceUrl();
+  if (!videoUrl) return;
+
+  const video = document.querySelector("body > video");
+  // Pause the native video so two players don't overlap audio
+  try { video?.pause(); } catch {}
+
+  const overlay = document.createElement("div");
+  overlay.id = "movi-ext-direct-overlay";
+  overlay.className = "movi-ext-direct-overlay";
+  overlay.innerHTML = `
+    <div class="movi-ext-card">
+      <div class="movi-ext-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" width="40" height="40">
+          <polygon points="5 3 19 12 5 21 5 3" fill="currentColor"/>
+        </svg>
+      </div>
+      <div class="movi-ext-title">Open with Movi Player</div>
+      <div class="movi-ext-desc">Play this video with advanced codec support, subtitles, and more.</div>
+      <button class="movi-ext-btn" id="movi-ext-open">Play in Movi Player</button>
+      <button class="movi-ext-dismiss" id="movi-ext-dismiss" title="Dismiss">&times;</button>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  document.getElementById("movi-ext-open").addEventListener("click", () => {
+    chrome.runtime.sendMessage({ action: "openPlayer", url: videoUrl, replaceTab: true });
+  });
+  document.getElementById("movi-ext-dismiss").addEventListener("click", () => {
+    directOverlayDismissed = true;
+    overlay.remove();
+    try { video?.play(); } catch {}
+  });
+}
+
+// Initial scan
+if (isNativeVideoViewer()) {
+  injectDirectVideoOverlay();
+} else {
+  scanPage();
+}
 
 // Re-scan on DOM changes (SPA, dynamic content)
 const observer = new MutationObserver(() => {
-  scanPage();
+  if (isNativeVideoViewer()) {
+    injectDirectVideoOverlay();
+  } else {
+    scanPage();
+  }
 });
 observer.observe(document.body, { childList: true, subtree: true });

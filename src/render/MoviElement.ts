@@ -29,7 +29,7 @@ const OSD = {
   loop: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>`,
   stableAudio: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 15v-2M9 15v-4M12 15v-6M15 15v-4M18 15v-2"/></svg>`,
   hdr: `<span style="font-weight:700;font-size:14px;letter-spacing:1px;padding:4px 10px;border:2px solid currentColor;border-radius:6px;">HDR</span>`,
-  speed: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/><line x1="19" y1="3" x2="19" y2="21"/></svg>`,
+  speed: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.64 18.36a9 9 0 1 1 12.72 0"/><path d="m12 12 4-4"/></svg>`,
   audio: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>`,
   subOn: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M13 15h4"/></svg>`,
   subOff: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="14" x="3" y="5" rx="2"/><path d="M7 15h4M13 15h4"/><line x1="3" y1="5" x2="21" y2="19" stroke-width="2.5"/></svg>`,
@@ -109,7 +109,6 @@ export class MoviElement extends HTMLElement {
   private _doubleTap: boolean = true; // Enable/disable double tap to seek
   private _themeColor: string | null = null; // Custom theme color
   private _bufferSize: number = 0; // Custom buffer size in seconds
-  private _watermark: string | null = null; // Watermark image URL
   private _title: string | null = null; // Video title to display
   private _showTitle: boolean = false; // Show title at top if true
   private _resume: boolean = false; // Resume playback from last position (opt-in)
@@ -120,6 +119,7 @@ export class MoviElement extends HTMLElement {
   private _videoId: string = "";         // Video ID for encrypted playback
   private _resumeSaveInterval: number | null = null; // Interval to save position
   private _titleAutoLoaded: boolean = false; // Track if title was auto-loaded from metadata
+  private _stripTitleAttr: boolean = false; // Guard for suppressing native title tooltip
   private _lastDuration: number = 0; // Track duration changes for title auto-load
   private posterElement!: HTMLImageElement; // Poster image element
 
@@ -173,7 +173,6 @@ export class MoviElement extends HTMLElement {
       "doubletap",
       "themecolor",
       "buffersize",
-      "watermark",
       "title",
       "showtitle",
       "resume",
@@ -573,6 +572,14 @@ export class MoviElement extends HTMLElement {
         </svg>
         <span class="movi-context-menu-label">Stats for nerds</span>
         <span class="movi-context-menu-shortcut">I</span>
+      </div>
+      <div class="movi-context-menu-item" data-action="keyboard-shortcuts">
+        <svg class="movi-context-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="6" width="20" height="12" rx="2"></rect>
+          <path d="M6 10h0M10 10h0M14 10h0M18 10h0M6 14h12"></path>
+        </svg>
+        <span class="movi-context-menu-label">Keyboard Shortcuts</span>
+        <span class="movi-context-menu-shortcut">?</span>
       </div>
     `;
     shadowRoot.appendChild(contextMenu);
@@ -1066,12 +1073,10 @@ export class MoviElement extends HTMLElement {
     stableAudioBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       if (this.player) {
-        const current = this.player.getStableAudio();
-        this.player.setStableAudio(!current);
-        this.updateStableAudioUI(shadowRoot);
+        this.stableVolume = !this._stableVolume;
         this.showOSD(
           OSD.stableAudio,
-          !current ? "Stable Volume On" : "Stable Volume Off",
+          this._stableVolume ? "Stable Volume On" : "Stable Volume Off",
         );
       }
     });
@@ -2766,12 +2771,12 @@ export class MoviElement extends HTMLElement {
               if (activeIdx === -1) {
                 // Currently off → select first
                 this.player.selectSubtitleLang(extSubs[0].lang);
-                this.showOSD(subOsdOn, `${extSubs[0].label} (1/${extSubs.length})`);
+                this.showOSD(subOsdOn, `${extSubs[0].label} [${extSubs[0].lang.toUpperCase()}] (1/${extSubs.length})`);
               } else if (activeIdx + 1 < extSubs.length) {
                 // Next track
                 const next = extSubs[activeIdx + 1];
                 this.player.selectSubtitleLang(next.lang);
-                this.showOSD(subOsdOn, `${next.label} (${activeIdx + 2}/${extSubs.length})`);
+                this.showOSD(subOsdOn, `${next.label} [${next.lang.toUpperCase()}] (${activeIdx + 2}/${extSubs.length})`);
               } else {
                 // Last → off
                 this.player.selectSubtitleLang(null);
@@ -2789,7 +2794,10 @@ export class MoviElement extends HTMLElement {
               } else {
                 const next = muxedSubs[nextIdx];
                 this.player.selectSubtitleTrack(next.id);
-                this.showOSD(subOsdOn, `${next.language?.toUpperCase() || "Sub"} (${nextIdx + 1}/${muxedSubs.length})`);
+                const muxSubLang = next.language?.toUpperCase() || "";
+                const muxSubLabel = next.label || muxSubLang || "Sub";
+                const muxSubOsd = muxSubLang && muxSubLabel !== muxSubLang ? `${muxSubLabel} [${muxSubLang}]` : muxSubLabel;
+                this.showOSD(subOsdOn, `${muxSubOsd} (${nextIdx + 1}/${muxedSubs.length})`);
               }
               this.updateSubtitleTrackMenu();
             }
@@ -2805,10 +2813,10 @@ export class MoviElement extends HTMLElement {
             const bIcon = OSD.audio;
 
             // Build unified list: muxed first, then external
-            type AudioEntry = { type: "muxed"; id: number; label: string } | { type: "ext"; lang: string; label: string };
+            type AudioEntry = { type: "muxed"; id: number; label: string; langCode: string } | { type: "ext"; lang: string; label: string; langCode: string };
             const allAudio: AudioEntry[] = [
-              ...bMuxed.map((t) => ({ type: "muxed" as const, id: t.id, label: t.label || t.language || `Audio ${t.id}` })),
-              ...bExternal.map((t) => ({ type: "ext" as const, lang: t.lang, label: t.label })),
+              ...bMuxed.map((t) => ({ type: "muxed" as const, id: t.id, label: t.label || t.language || `Audio ${t.id}`, langCode: t.language?.toUpperCase() || "" })),
+              ...bExternal.map((t) => ({ type: "ext" as const, lang: t.lang, label: t.label, langCode: t.lang.toUpperCase() })),
             ];
 
             if (allAudio.length > 1) {
@@ -2831,7 +2839,8 @@ export class MoviElement extends HTMLElement {
                 if (this.player.isNativeAudioActive()) this.player.useMuxedAudio();
                 this.player.selectAudioTrack(next.id);
               }
-              this.showOSD(bIcon, `${next.label} (${nextIdx + 1}/${allAudio.length})`);
+              const audioOsdLabel = next.langCode ? `${next.label} [${next.langCode}]` : next.label;
+              this.showOSD(bIcon, `${audioOsdLabel} (${nextIdx + 1}/${allAudio.length})`);
               this.updateAudioTrackMenu();
             }
           }
@@ -2856,12 +2865,10 @@ export class MoviElement extends HTMLElement {
           // U: Toggle stable volume
           e.preventDefault();
           if (this.player) {
-            const current = this.player.getStableAudio();
-            this.player.setStableAudio(!current);
-            this.updateStableAudioUI(this.shadowRoot!);
+            this.stableVolume = !this._stableVolume;
             this.showOSD(
               OSD.stableAudio,
-              !current ? "Stable Volume On" : "Stable Volume Off",
+              this._stableVolume ? "Stable Volume On" : "Stable Volume Off",
             );
           }
           break;
@@ -2869,13 +2876,7 @@ export class MoviElement extends HTMLElement {
         case "G":
           // G: Toggle ambient mode
           e.preventDefault();
-          this._ambientMode = !this._ambientMode;
-          if (this._ambientMode) {
-            this.setAttribute("ambientmode", "");
-          } else {
-            this.removeAttribute("ambientmode");
-          }
-          this.updateAmbientMode();
+          this.ambientMode = !this._ambientMode;
           this.updateAmbientUI();
           this.showOSD(
             OSD.ambient,
@@ -3019,11 +3020,11 @@ export class MoviElement extends HTMLElement {
 
       // Show custom context menu
       const rect = this.getBoundingClientRect();
-      const isMobile =
-        window.innerWidth <= 1024 ||
-        window.matchMedia("(pointer: coarse)").matches;
+      // Touch-only: narrow desktop windows still get the hover-based menu,
+      // because slide-panel submenus require tap-to-open semantics.
+      const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
 
-      if (isMobile) {
+      if (isTouchDevice) {
         contextMenu.classList.add("movi-context-menu-mobile");
         contextMenu.style.left = "";
         contextMenu.style.top = "";
@@ -3059,6 +3060,10 @@ export class MoviElement extends HTMLElement {
           rectWidth: rect.width,
           rectHeight: rect.height,
         });
+
+        // Clamp menu height to the player so it scrolls when too tall
+        const maxMenuHeight = Math.max(120, rect.height - 20);
+        contextMenu.style.maxHeight = `${maxMenuHeight}px`;
 
         // Temporarily show menu to get its dimensions
         contextMenu.style.display = "block";
@@ -3135,11 +3140,9 @@ export class MoviElement extends HTMLElement {
       ) as HTMLElement;
       if (backdrop) backdrop.style.display = "none";
 
-      // On mobile, let transition finish before display none
-      const isMobile =
-        window.innerWidth <= 1024 ||
-        window.matchMedia("(pointer: coarse)").matches;
-      if (isMobile) {
+      // On touch devices, let slide-out transition finish before display none
+      const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+      if (isTouchDevice) {
         setTimeout(() => {
           if (!this._contextMenuVisible) contextMenu.style.display = "none";
         }, 400);
@@ -3425,7 +3428,10 @@ export class MoviElement extends HTMLElement {
             this.player.selectSubtitleLang(null);
             this.player.selectSubtitleTrack(trackId);
             const trk = this.player.getSubtitleTracks().find(t => t.id === trackId);
-            this.showOSD(subOsdIcon, trk?.label || trk?.language || `Subtitle ${trackId}`);
+            const ctxSubLang = trk?.language?.toUpperCase() || "";
+            const ctxSubLabel = trk?.label || ctxSubLang || `Subtitle ${trackId}`;
+            const ctxSubOsd = ctxSubLang && ctxSubLabel !== ctxSubLang ? `${ctxSubLabel} [${ctxSubLang}]` : ctxSubLabel;
+            this.showOSD(subOsdIcon, ctxSubOsd);
           }
         }
         hideContextMenu();
@@ -3499,23 +3505,15 @@ export class MoviElement extends HTMLElement {
         hideContextMenu();
       } else if (action === "stable-audio-toggle") {
         if (this.player) {
-          const current = this.player.getStableAudio();
-          this.player.setStableAudio(!current);
-          this.updateStableAudioUI(shadowRoot);
+          this.stableVolume = !this._stableVolume;
           this.showOSD(
             OSD.stableAudio,
-            !current ? "Stable Volume On" : "Stable Volume Off",
+            this._stableVolume ? "Stable Volume On" : "Stable Volume Off",
           );
         }
         hideContextMenu();
       } else if (action === "ambient-toggle") {
-        this._ambientMode = !this._ambientMode;
-        if (this._ambientMode) {
-          this.setAttribute("ambientmode", "");
-        } else {
-          this.removeAttribute("ambientmode");
-        }
-        this.updateAmbientMode();
+        this.ambientMode = !this._ambientMode;
         this.updateAmbientUI();
         this.showOSD(
           OSD.ambient,
@@ -3524,6 +3522,14 @@ export class MoviElement extends HTMLElement {
         hideContextMenu();
       } else if (action === "nerd-stats") {
         this.toggleNerdStats(shadowRoot);
+        hideContextMenu();
+      } else if (action === "keyboard-shortcuts") {
+        const panel = shadowRoot.querySelector(
+          ".movi-shortcuts-panel",
+        ) as HTMLElement;
+        if (panel) {
+          panel.style.display = panel.style.display === "none" ? "flex" : "none";
+        }
         hideContextMenu();
       } else if (action === "timeline") {
         this.toggleTimeline();
@@ -3907,12 +3913,10 @@ export class MoviElement extends HTMLElement {
       }, 150); // 150ms delay
     };
 
-    // Setup listeners - ONLY on desktop (hover doesn't make sense on mobile and causes double-tap issues)
-    const isMobile =
-      window.innerWidth <= 1024 ||
-      window.matchMedia("(pointer: coarse)").matches;
+    // Setup listeners - ONLY on hover-capable devices (touch uses tap-to-open)
+    const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
 
-    if (!isMobile) {
+    if (!isTouchDevice) {
       item.addEventListener("mouseenter", showSubmenu);
 
       item.addEventListener("mouseleave", (e) => {
@@ -4319,12 +4323,14 @@ export class MoviElement extends HTMLElement {
     const isNativeActive = this.player.isNativeAudioActive();
     const totalTracks = audioTracks.length + nativeLangs.length;
 
-    // Volume is always visible when any audio exists
+    // Volume is always visible when any audio exists (muxed, multi-lang native,
+    // or single split-source native <audio>).
+    const hasAudio = totalTracks > 0 || this.player.hasNativeAudio();
     const volumeContainer = this.shadowRoot?.querySelector(
       ".movi-volume-container",
     ) as HTMLElement;
     if (volumeContainer) {
-      volumeContainer.style.display = totalTracks > 0 ? "flex" : "none";
+      volumeContainer.style.display = hasAudio ? "flex" : "none";
     }
 
     // Show audio selector only if multiple tracks total
@@ -4397,7 +4403,8 @@ export class MoviElement extends HTMLElement {
               // External audio track — switch to native <audio>
               this.player.selectAudioLang(lang);
               const t = this.player.getAudioLangs().find(a => a.lang === lang);
-              this.showOSD(audioIcon, t?.label || lang);
+              const extAudioOsd = t ? `${t.label} [${lang.toUpperCase()}]` : lang.toUpperCase();
+              this.showOSD(audioIcon, extAudioOsd);
             } else if (trackIdStr) {
               // Muxed audio track — switch back to WASM if needed
               if (this.player.isNativeAudioActive()) {
@@ -4406,7 +4413,10 @@ export class MoviElement extends HTMLElement {
               const tid = parseInt(trackIdStr);
               this.player.selectAudioTrack(tid);
               const trk = this.player.getAudioTracks().find(a => a.id === tid);
-              this.showOSD(audioIcon, trk?.label || trk?.language || `Audio ${tid}`);
+              const muxAudioLang = trk?.language?.toUpperCase() || "";
+              const muxAudioLabel = trk?.label || muxAudioLang || `Audio ${tid}`;
+              const muxAudioOsd = muxAudioLang && muxAudioLabel !== muxAudioLang ? `${muxAudioLabel} [${muxAudioLang}]` : muxAudioLabel;
+              this.showOSD(audioIcon, muxAudioOsd);
             }
             this.updateAudioTrackMenu();
             const menu = this.shadowRoot?.querySelector(
@@ -4728,7 +4738,8 @@ export class MoviElement extends HTMLElement {
               const st = this.player.getSubtitleLangs().find(t => t.lang === subtitleLang);
               this.player.selectSubtitleLang(subtitleLang);
               this.updateSubtitleTrackMenu();
-              this.showOSD(subIconOn, st?.label || subtitleLang);
+              const extSubOsd = st ? `${st.label} [${subtitleLang.toUpperCase()}]` : subtitleLang.toUpperCase();
+              this.showOSD(subIconOn, extSubOsd);
             } else if (trackIdStr === "null") {
               // Disable all subtitles (muxed + external)
               this.player.selectSubtitleTrack(null).catch(() => {});
@@ -4741,7 +4752,10 @@ export class MoviElement extends HTMLElement {
               this.player.selectSubtitleLang(null);
               this.player.selectSubtitleTrack(trackId).catch(() => {});
               const trk = this.player.getSubtitleTracks().find(t => t.id === trackId);
-              this.showOSD(subIconOn, trk?.label || trk?.language || `Subtitle ${trackId}`);
+              const muxSubLangC = trk?.language?.toUpperCase() || "";
+              const muxSubLabelC = trk?.label || muxSubLangC || `Subtitle ${trackId}`;
+              const muxSubOsdC = muxSubLangC && muxSubLabelC !== muxSubLangC ? `${muxSubLabelC} [${muxSubLangC}]` : muxSubLabelC;
+              this.showOSD(subIconOn, muxSubOsdC);
             }
             // Close menu
             const menu = this.shadowRoot?.querySelector(
@@ -4977,8 +4991,9 @@ export class MoviElement extends HTMLElement {
       :host {
         /* Premium Color Palette */
         --movi-primary: #8B5CF6;
-        --movi-primary-light: #A78BFA;
-        --movi-primary-dark: #7C3AED;
+        /* Derived so themecolor attribute cascades to light/dark variants */
+        --movi-primary-light: color-mix(in srgb, var(--movi-primary) 70%, white);
+        --movi-primary-dark: color-mix(in srgb, var(--movi-primary) 70%, black);
         --movi-accent: #06B6D4;
         --movi-accent-light: #22D3EE;
         /* Use solid color instead of gradient */
@@ -7234,10 +7249,28 @@ export class MoviElement extends HTMLElement {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         font-size: 14px;
         color: var(--movi-controls-color);
-        overflow: visible;
+        overflow-y: auto;
+        overflow-x: hidden;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
         letter-spacing: 0.01em;
         transition: transform 0.2s ease, opacity 0.2s ease, visibility 0.2s;
         box-sizing: border-box;
+      }
+
+      .movi-context-menu::-webkit-scrollbar {
+        width: 6px;
+      }
+      .movi-context-menu::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .movi-context-menu::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 3px;
+      }
+      .movi-context-menu::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.35);
       }
 
       .movi-context-menu-backdrop {
@@ -7807,9 +7840,31 @@ export class MoviElement extends HTMLElement {
         color: white;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
         text-align: center;
-        padding: 40px;
+        padding: 40px 40px calc(var(--movi-controls-height) + 20px);
+        box-sizing: border-box;
         opacity: 0;
         animation: movi-fade-in 0.4s ease forwards;
+      }
+
+      /* Short / narrow players: shrink the placeholder so it fits above
+         the controls bar without clipping into it. */
+      @media (max-width: 640px) {
+        .movi-empty-state {
+          padding: 16px 16px calc(var(--movi-controls-height) + 12px);
+        }
+        .movi-empty-container {
+          gap: 8px !important;
+        }
+        .movi-empty-icon-wrapper {
+          width: 56px !important;
+          height: 56px !important;
+        }
+        .movi-empty-title {
+          font-size: 14px !important;
+        }
+        .movi-empty-message {
+          font-size: 11px !important;
+        }
       }
 
       .movi-empty-container {
@@ -7857,7 +7912,7 @@ export class MoviElement extends HTMLElement {
       }
 
       /* Mobile Responsiveness for Context Menu - Side Panel Mode */
-      @media (max-width: 1024px), (pointer: coarse) {
+      @media (pointer: coarse) {
         .movi-context-menu.movi-context-menu-mobile {
           position: absolute;
           top: 0 !important;
@@ -7947,6 +8002,45 @@ export class MoviElement extends HTMLElement {
         :host([theme="light"]) .movi-context-menu-submenu-audio,
         :host([theme="light"]) .movi-context-menu-submenu-subtitle {
           background: rgba(255, 255, 255, 0.98) !important;
+        }
+      }
+
+      /* Narrow viewports (≤ iPhone 12 Pro ≈ 390px) — prevent controls bar overflow
+         and stop the center play button from overlapping the controls bar on
+         short 16:9 players. */
+      @media (max-width: 480px) {
+        .movi-btn {
+          width: 30px !important;
+          height: 30px !important;
+          padding: 4px !important;
+        }
+        .movi-btn svg {
+          width: 16px !important;
+          height: 16px !important;
+        }
+        .movi-controls-left,
+        .movi-controls-right {
+          gap: 1px !important;
+        }
+        .movi-buttons-row {
+          gap: 2px !important;
+        }
+        .movi-controls-bar {
+          padding: 4px 6px 6px !important;
+        }
+        .movi-time {
+          font-size: 9px !important;
+        }
+
+        /* Center play button sized so it doesn't clip into controls bar
+           on narrow 16:9 players (~183px height). */
+        .movi-center-play-pause {
+          width: 52px !important;
+          height: 52px !important;
+        }
+        .movi-center-play-pause svg {
+          width: 26px !important;
+          height: 26px !important;
         }
       }
 
@@ -8084,9 +8178,6 @@ export class MoviElement extends HTMLElement {
       this.style.setProperty("--movi-primary", this._themeColor);
     }
 
-    this._watermark = this.getAttribute("watermark");
-    this.updateWatermark();
-
     // Update controls visibility based on initial attributes
     this.updateControlsVisibility();
 
@@ -8202,6 +8293,48 @@ export class MoviElement extends HTMLElement {
           changed = true;
         }
 
+        // User-toggled opt-in preferences ALWAYS win over the HTML default.
+        // Rationale: the attribute is an integrator-set default; once the user
+        // has toggled something via the UI their choice should stick across
+        // reloads, even if the page still declares the attribute.
+
+        // Apply stable volume preference
+        if (settings.stableVolume !== undefined) {
+          this._stableVolume = settings.stableVolume;
+          if (settings.stableVolume) {
+            this.setAttribute("stablevolume", "");
+          } else {
+            this.removeAttribute("stablevolume");
+          }
+          if (this.player) {
+            this.player.setStableAudio(this._stableVolume);
+            this.updateStableAudioUI();
+          }
+        }
+
+        // Apply ambient mode preference
+        if (settings.ambientMode !== undefined) {
+          this._ambientMode = settings.ambientMode;
+          if (settings.ambientMode) {
+            this.setAttribute("ambientmode", "");
+          } else {
+            this.removeAttribute("ambientmode");
+          }
+          this.updateAmbientMode();
+        }
+
+        // Apply HDR preference (defaults to true)
+        if (settings.hdr !== undefined) {
+          this._hdr = settings.hdr;
+          if (settings.hdr) {
+            this.setAttribute("hdr", "");
+          } else {
+            this.removeAttribute("hdr");
+          }
+          this.updateHDRUI();
+          if (this.player) this.player.setHDREnabled(this._hdr);
+        }
+
         if (changed) {
           this.updateVolumeIcon();
           // Update external attributes to reflect loaded state
@@ -8310,13 +8443,19 @@ export class MoviElement extends HTMLElement {
         this._bufferSize = newValue ? parseFloat(newValue) : 0;
         // Propagate to player if possible
         break;
-      case "watermark":
-        this._watermark = newValue;
-        this.updateWatermark();
-        break;
       case "title":
+        if (this._stripTitleAttr) {
+          this._stripTitleAttr = false;
+          break;
+        }
         this._title = newValue;
         this.updateTitle();
+        // Strip attribute from host so the browser's native tooltip
+        // doesn't appear on hover — title is shown via the overlay instead.
+        if (newValue !== null) {
+          this._stripTitleAttr = true;
+          this.removeAttribute("title");
+        }
         break;
       case "showtitle":
         this._showTitle = newValue !== null;
@@ -11016,6 +11155,25 @@ export class MoviElement extends HTMLElement {
       this.removeAttribute("ambientmode");
     }
     this.updateAmbientMode();
+    SettingsStorage.getInstance().save({ ambientMode: this._ambientMode });
+  }
+
+  get stableVolume(): boolean {
+    return this._stableVolume;
+  }
+
+  set stableVolume(value: boolean) {
+    this._stableVolume = !!value;
+    if (this._stableVolume) {
+      this.setAttribute("stablevolume", "");
+    } else {
+      this.removeAttribute("stablevolume");
+    }
+    if (this.player) {
+      this.player.setStableAudio(this._stableVolume);
+      this.updateStableAudioUI();
+    }
+    SettingsStorage.getInstance().save({ stableVolume: this._stableVolume });
   }
 
   get currentTime(): number {
@@ -11198,19 +11356,6 @@ export class MoviElement extends HTMLElement {
     this.setAttribute("buffersize", value.toString());
   }
 
-  get watermark(): string | null {
-    return this._watermark;
-  }
-  set watermark(value: string | null) {
-    this._watermark = value;
-    if (value) {
-      this.setAttribute("watermark", value);
-    } else {
-      this.removeAttribute("watermark");
-    }
-    this.updateWatermark();
-  }
-
   get title(): string {
     return this._title || "";
   }
@@ -11218,11 +11363,8 @@ export class MoviElement extends HTMLElement {
     this._title = value || null;
     // Reset auto-load flag when user explicitly sets title
     this._titleAutoLoaded = false;
-    if (value) {
-      this.setAttribute("title", value);
-    } else {
-      this.removeAttribute("title");
-    }
+    // Do NOT reflect to the host `title` attribute — it would trigger the
+    // browser's native tooltip on hover. The overlay reads `_title` directly.
     this.updateTitle();
   }
 
@@ -11237,41 +11379,6 @@ export class MoviElement extends HTMLElement {
       this.removeAttribute("showtitle");
     }
     this.updateTitle();
-  }
-
-  private updateWatermark() {
-    const shadowRoot = this.shadowRoot;
-    if (!shadowRoot) return;
-
-    let watermarkEl = shadowRoot.querySelector(
-      ".movi-watermark",
-    ) as HTMLImageElement;
-
-    if (!this._watermark) {
-      if (watermarkEl) watermarkEl.style.display = "none";
-      return;
-    }
-
-    if (!watermarkEl) {
-      watermarkEl = document.createElement("img");
-      watermarkEl.className = "movi-watermark";
-      // Basic styling for watermark
-      watermarkEl.style.position = "absolute";
-      watermarkEl.style.top = "20px";
-      watermarkEl.style.right = "20px";
-      watermarkEl.style.height = "30px"; // Default height
-      watermarkEl.style.opacity = "0.8";
-      watermarkEl.style.pointerEvents = "none";
-      watermarkEl.style.zIndex = "10";
-
-      const container = shadowRoot.querySelector(".movi-player-container");
-      if (container) {
-        container.appendChild(watermarkEl);
-      }
-    }
-
-    watermarkEl.src = this._watermark;
-    watermarkEl.style.display = "block";
   }
 
   private updateTitle() {
@@ -11294,34 +11401,36 @@ export class MoviElement extends HTMLElement {
       this.duration > 0
     ) {
       const mediaInfo = this.player.getMediaInfo();
-      if (mediaInfo?.metadata?.title) {
-        this._title = mediaInfo.metadata.title;
+      const metaTitle = mediaInfo?.metadata?.title;
+      if (metaTitle && !/download/i.test(metaTitle)) {
+        this._title = metaTitle;
         this._titleAutoLoaded = true;
       } else if (this._src) {
-        // Fallback to filename if no metadata title
         let filename = "";
-        if (this._src instanceof File) {
-          // For File objects, use the file name
+
+        // Priority 1: Content-Disposition filename from HTTP header
+        const dispositionName = this.player.getContentDispositionFilename();
+        if (dispositionName) {
+          filename = dispositionName;
+        } else if (this._src instanceof File) {
+          // Priority 2: File object name
           filename = this._src.name;
         } else if (typeof this._src === "string") {
-          // For URL strings, extract filename from path
+          // Priority 3: Extract filename from URL path
           try {
             const url = new URL(this._src, window.location.href);
             const pathname = url.pathname;
             filename = pathname.substring(pathname.lastIndexOf("/") + 1);
             if (filename) {
-              // Decode URI component and remove query params
               filename = decodeURIComponent(filename.split("?")[0]);
             }
           } catch {
-            // If URL parsing fails, just use the string as-is
             filename = this._src;
           }
         }
 
         // Remove file extension from filename
         if (filename) {
-          // Remove all extensions (e.g., "video.m3u8" → "video", ".m3u8" → "")
           filename = filename.replace(/\.[^.\/]+$/, "");
           // If filename is empty or non-descriptive, try parent path segment
           if (!filename || filename === "index" || filename === "master" || filename === "playlist") {
@@ -11334,7 +11443,7 @@ export class MoviElement extends HTMLElement {
             } catch { /* ignore */ }
           }
           if (filename) {
-            this._title = filename;
+            this._title = this.cleanVideoTitle(filename);
           }
         }
         this._titleAutoLoaded = true;
@@ -11354,6 +11463,31 @@ export class MoviElement extends HTMLElement {
       titleBar.style.display = "none";
       titleBar.classList.remove("movi-title-visible");
     }
+  }
+
+  /**
+   * Clean a video filename into a human-readable title (VLC-style).
+   * "The.Boys.S05E01.Fifteen.Inches.of.Sheer.Dynamite.2160p.AMZN.WEB-DL.Hindi.DDP5.1-English.DDP5.1.Atmos.DV.HDR.H.265-4kHdHub.Com"
+   * → "The Boys S05E01 Fifteen Inches of Sheer Dynamite"
+   */
+  private cleanVideoTitle(filename: string): string {
+    // Replace dots and underscores with spaces
+    let title = filename.replace(/[._]/g, " ");
+
+    // Remove common release group / site suffixes (e.g., "-4kHdHub Com", "-YIFY")
+    title = title.replace(/\s*-\s*\w+\s*$/, "");
+
+    // Truncate at quality/codec markers
+    const cutPatterns = /\b(2160p|1080p|720p|480p|4K|UHD|HD|HQ|WEB[ -]?DL|WEB[ -]?Rip|BluRay|BDRip|BRRip|HDRip|DVDRip|HDTV|AMZN|NF|DSNP|HMAX|ATVP|PCOK|PMTP|MA |DDP?\d|AAC|AC3|FLAC|Atmos|TrueHD|DTS|HEVC|H[ .]?26[45]|x26[45]|AV1|VP9|HDR|HDR10|DV|DoVi|Dolby|REMUX|PROPER|REPACK|iNTERNAL|EXTENDED|UNRATED|DC |10bit|8bit)\b/i;
+    const match = title.match(cutPatterns);
+    if (match && match.index && match.index > 5) {
+      title = title.substring(0, match.index);
+    }
+
+    // Clean up extra spaces and trailing hyphens/dashes
+    title = title.replace(/\s*[-–—]\s*$/, "").replace(/\s+/g, " ").trim();
+
+    return title || filename;
   }
 
   get duration(): number {
@@ -11434,6 +11568,8 @@ export class MoviElement extends HTMLElement {
     if (this.player) {
       this.player.setHDREnabled(this._hdr);
     }
+
+    SettingsStorage.getInstance().save({ hdr: this._hdr });
   }
 
   private updateHDRUI(): void {

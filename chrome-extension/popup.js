@@ -24,7 +24,7 @@ document.getElementById("paste").addEventListener("click", async () => {
 // Play from Computer
 document.getElementById("file").addEventListener("click", () => {
   chrome.tabs.create({
-    url: chrome.runtime.getURL("player.html?file"),
+    url: chrome.runtime.getURL("player.html"),
   });
   window.close();
 });
