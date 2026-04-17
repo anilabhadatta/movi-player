@@ -7,6 +7,7 @@ old/
 .claude/
 docs/.vitepress/cache/
 docs/.vitepress/dist/
+.wrangler/
 chrome-extension/screenshots/
 test-media/
 *.zip

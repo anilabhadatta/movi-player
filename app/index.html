@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MoviPlayer - Play Any Video in Your Browser</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23bd34fe'/%3E%3Cstop offset='100%25' stop-color='%2341d1ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='50' cy='50' r='45' fill='url(%23g)'/%3E%3Cpolygon points='40,30 40,70 75,50' fill='white'/%3E%3C/svg%3E" />
+    <meta name="description" content="Play MKV, HEVC, AV1, HDR videos directly in your browser. No install, no server. Just drop your file or paste a URL." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <style>
+      :root {
+        --primary-accent: #6c5dd3;
+        --secondary-accent: #00d4ff;
+        --font-family: "Inter", system-ui, -apple-system, sans-serif;
+      }
+
+      /* Dark Theme (Default) */
+      :root {
+        --bg-base: #0f0f12;
+        --text-primary: #ffffff;
+        --text-secondary: #a0a0b0;
+
+        --glass-bg: rgba(255, 255, 255, 0.05);
+        --glass-border: rgba(255, 255, 255, 0.1);
+
+        --input-bg: rgba(0, 0, 0, 0.3);
+        --input-focus-bg: rgba(0, 0, 0, 0.5);
+        --input-text: #ffffff;
+        --input-placeholder: rgba(255, 255, 255, 0.4);
+
+        --btn-secondary-bg: rgba(255, 255, 255, 0.08);
+        --btn-secondary-border: rgba(255, 255, 255, 0.05);
+        --btn-secondary-hover: rgba(255, 255, 255, 0.15);
+        --btn-secondary-text: #ffffff;
+
+        --gradient-1: rgba(108, 93, 211, 0.15);
+        --gradient-2: rgba(0, 212, 255, 0.1);
+
+        --icon-color: #ffffff;
+        --brand-gradient: linear-gradient(135deg, #ffffff 0%, #a0a0b0 100%);
+      }
+
+      /* Light Theme Override */
+      [data-theme="light"] {
+        --bg-base: #f4f5f7;
+        --text-primary: #11142d;
+        --text-secondary: #808191;
+
+        --glass-bg: rgba(255, 255, 255, 0.6);
+        --glass-border: rgba(0, 0, 0, 0.08);
+
+        --input-bg: rgba(255, 255, 255, 0.7);
+        --input-focus-bg: #ffffff;
+        --input-text: #11142d;
+        --input-placeholder: rgba(0, 0, 0, 0.4);
+
+        --btn-secondary-bg: rgba(0, 0, 0, 0.05);
+        --btn-secondary-border: transparent;
+        --btn-secondary-hover: rgba(0, 0, 0, 0.1);
+        --btn-secondary-text: #11142d;
+
+        --gradient-1: rgba(108, 93, 211, 0.08);
+        --gradient-2: rgba(0, 212, 255, 0.08);
+
+        --icon-color: #11142d;
+        --brand-gradient: linear-gradient(135deg, #6c5dd3 0%, #4a3bba 100%);
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        background-color: var(--bg-base);
+        background-image:
+          radial-gradient(
+            circle at 15% 50%,
+            var(--gradient-1) 0%,
+            transparent 25%
+          ),
+          radial-gradient(
+            circle at 85% 30%,
+            var(--gradient-2) 0%,
+            transparent 25%
+          );
+        color: var(--text-primary);
+        font-family: var(--font-family);
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        overflow-x: hidden;
+      }
+
+      /* Ambient Background Layer */
+      #ambient-wrapper {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+        pointer-events: none;
+        opacity: 0.6;
+        filter: blur(80px);
+        transition: opacity 1s ease;
+      }
+
+      .app-container {
+        position: relative;
+        z-index: 10;
+        width: 100%;
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 2rem;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        flex: 1;
+      }
+
+      /* Header */
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .brand {
+        font-size: 1.5rem;
+        font-weight: 700;
+        background: var(--brand-gradient);
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        letter-spacing: -0.5px;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      /* Glass Panel for Inputs */
+      .controls-panel {
+        border-radius: 16px;
+        display: flex;
+        gap: 1.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      .input-group {
+        flex: 1;
+        position: relative;
+        min-width: 300px;
+      }
+
+      .input-group input {
+        width: 100%;
+        background: var(--input-bg);
+        border: 1px solid var(--glass-border);
+        border-radius: 12px;
+        padding: 1rem 1.25rem;
+        color: var(--input-text);
+        font-family: inherit;
+        font-size: 0.95rem;
+        transition: all 0.3s ease;
+      }
+
+      .input-group input:focus {
+        outline: none;
+        border-color: var(--primary-accent);
+        background: var(--input-focus-bg);
+        box-shadow: 0 0 0 4px rgba(108, 93, 211, 0.1);
+      }
+
+      .input-group input::placeholder {
+        color: var(--input-placeholder);
+      }
+
+      .action-group {
+        display: flex;
+        gap: 1rem;
+        align-items: center;
+      }
+
+      .btn {
+        background: rgba(255, 255, 255, 0.1);
+        border: none;
+        color: #ffffff;
+        font-family: inherit;
+        font-weight: 600;
+        font-size: 0.9rem;
+        padding: 0 1.5rem;
+        height: 50px;
+        border-radius: 12px;
+        cursor: pointer;
+        transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+      }
+
+      .separator {
+        width: 1px;
+        height: 30px;
+        background: var(--glass-border);
+        margin: 0 0.5rem;
+      }
+
+      .btn-primary {
+        background: linear-gradient(135deg, var(--primary-accent), #4a3bba);
+        box-shadow: 0 8px 16px rgba(108, 93, 211, 0.3);
+      }
+
+      .btn-primary:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 12px 20px rgba(108, 93, 211, 0.4);
+      }
+
+      .btn-secondary {
+        background: var(--btn-secondary-bg);
+        border: 1px solid var(--btn-secondary-border);
+        color: var(--btn-secondary-text);
+      }
+
+      .btn-secondary:hover {
+        background: var(--btn-secondary-hover);
+        transform: translateY(-2px);
+      }
+
+      /* File Input Hidden */
+      input[type="file"] {
+        display: none;
+      }
+
+      /* Drop Zone Overlay */
+      .drop-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(108, 93, 211, 0.15);
+        backdrop-filter: blur(4px);
+        z-index: 999;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+
+      .drop-overlay.active {
+        display: flex;
+      }
+
+      .drop-overlay-content {
+        border: 3px dashed var(--primary-accent);
+        border-radius: 24px;
+        padding: 3rem 4rem;
+        text-align: center;
+        color: var(--text-primary);
+      }
+
+      .drop-overlay-content svg {
+        width: 48px;
+        height: 48px;
+        margin-bottom: 1rem;
+        stroke: var(--primary-accent);
+      }
+
+      .drop-overlay-content p {
+        font-size: 1.25rem;
+        font-weight: 600;
+      }
+
+      /* Player Container */
+      .player-stage {
+        position: relative;
+        width: 100%;
+        overflow: hidden;
+        background: #000;
+        aspect-ratio: 16/9;
+        display: flex;
+        justify-content: center;
+      }
+
+      movi-player {
+        width: 100%;
+        height: 100%;
+        display: block;
+        --movi-controls-bg: rgba(15, 15, 18, 0.85);
+        --movi-controls-color: #ffffff;
+        --movi-progress-color: var(--primary-accent);
+        --movi-btn-hover-bg: rgba(108, 93, 211, 0.2);
+        --movi-slider-track: rgba(255, 255, 255, 0.1);
+      }
+
+      /* Shimmer */
+      .shimmer-wrapper {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .shimmer {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          rgba(108, 93, 211, 0.05) 40%,
+          rgba(108, 93, 211, 0.1) 50%,
+          rgba(108, 93, 211, 0.05) 60%,
+          transparent 100%
+        );
+        background-size: 200% 100%;
+        animation: shimmer 2s infinite linear;
+      }
+
+      @keyframes shimmer {
+        0% { background-position: -200% 0; }
+        100% { background-position: 200% 0; }
+      }
+
+      /* Footer */
+      .footer {
+        text-align: center;
+        padding: 1.5rem;
+        color: var(--text-secondary);
+        font-size: 0.8rem;
+      }
+
+      .footer a {
+        color: var(--primary-accent);
+        text-decoration: none;
+      }
+
+      .footer a:hover {
+        text-decoration: underline;
+      }
+
+      /* Theme Toggle Button */
+      .theme-toggle-btn {
+        background: var(--glass-bg);
+        border: 1px solid var(--glass-border);
+        color: var(--icon-color);
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .theme-toggle-btn:hover {
+        background: var(--btn-secondary-hover);
+        transform: translateY(-2px);
+      }
+
+      .theme-icon {
+        width: 20px;
+        height: 20px;
+        stroke-width: 2px;
+      }
+
+      /* Header Links (GitHub, Chrome Extension) */
+      .header-link {
+        background: var(--glass-bg);
+        border: 1px solid var(--glass-border);
+        color: var(--icon-color);
+        width: 44px;
+        height: 44px;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        transition: all 0.2s ease;
+      }
+
+      .header-link:hover {
+        background: var(--btn-secondary-hover);
+        transform: translateY(-2px);
+      }
+
+      /* Responsive */
+      @media (max-width: 768px) {
+        .app-container {
+          padding: 1rem;
+          gap: 1rem;
+        }
+
+        header {
+          flex-direction: column;
+          gap: 0.75rem;
+          text-align: center;
+        }
+
+        .controls-panel {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 1rem;
+        }
+
+        .input-group {
+          min-width: unset;
+        }
+
+        .action-group {
+          flex-direction: column;
+          align-items: stretch;
+          gap: 0.75rem;
+        }
+
+        .separator {
+          display: none;
+        }
+
+        .btn {
+          width: 100%;
+          height: 48px;
+        }
+
+        .brand {
+          font-size: 1.25rem;
+        }
+      }
+
+      @media (max-width: 480px) {
+        .app-container {
+          padding: 0.75rem;
+        }
+
+        .status-bar {
+          font-size: 0.75rem;
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- Ambient Glow container -->
+    <div id="ambient-wrapper"></div>
+
+    <!-- Drop Zone Overlay -->
+    <div class="drop-overlay" id="drop-overlay">
+      <div class="drop-overlay-content">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+        <p>Drop video file to play</p>
+      </div>
+    </div>
+
+    <div class="app-container">
+      <header>
+        <div class="brand">MoviPlayer</div>
+        <div class="header-actions">
+          <a href="https://chromewebstore.google.com/detail/movi-player/ckleeigcopjnpehkjokijokjegknfgej" target="_blank" rel="noopener" class="header-link" aria-label="Chrome Extension" title="Get Chrome Extension">
+            <svg width="20" height="20" viewBox="0 0 512 512" fill="currentColor"><path d="M188.8,255.93A67.2,67.2,0,1,0,256,188.75,67.38,67.38,0,0,0,188.8,255.93Z"/><path d="M476.75,217.79s0,0,0,.05a206.63,206.63,0,0,0-7-28.84h-.11a202.16,202.16,0,0,1,7.07,29h0a203.5,203.5,0,0,0-7.07-29H314.24c19.05,17,31.36,40.17,31.36,67.05a86.55,86.55,0,0,1-12.31,44.73L231,478.45a2.44,2.44,0,0,1,0,.27V479h0v-.26A224,224,0,0,0,256,480c6.84,0,13.61-.39,20.3-1a222.91,222.91,0,0,0,29.78-4.74C405.68,451.52,480,362.4,480,255.94A225.25,225.25,0,0,0,476.75,217.79Z"/><path d="M256,345.5c-33.6,0-61.6-17.91-77.29-44.79L76,123.05l-.14-.24A224,224,0,0,0,207.4,474.55l0-.05,77.69-134.6A84.13,84.13,0,0,1,256,345.5Z"/><path d="M91.29,104.57l77.35,133.25A89.19,89.19,0,0,1,256,166H461.17a246.51,246.51,0,0,0-25.78-43.94l.12.08A245.26,245.26,0,0,1,461.17,166h.17a245.91,245.91,0,0,0-25.66-44,2.63,2.63,0,0,1-.35-.26A223.93,223.93,0,0,0,91.14,104.34l.14.24Z"/></svg>
+          </a>
+          <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener" class="header-link" aria-label="GitHub" title="View on GitHub">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          </a>
+          <button id="theme-toggle" class="theme-toggle-btn" aria-label="Switch Theme"></button>
+        </div>
+      </header>
+
+      <section class="controls-panel">
+        <div class="input-group">
+          <input
+            type="text"
+            id="url-input"
+            placeholder="Paste video URL here..."
+            aria-label="Video URL"
+          />
+        </div>
+        <div class="action-group">
+          <button class="btn btn-primary" id="load-btn">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            Play URL
+          </button>
+          <button class="btn btn-secondary" id="embed-btn" title="Copy embed code" style="display:none;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="16 18 22 12 16 6"></polyline>
+              <polyline points="8 6 2 12 8 18"></polyline>
+            </svg>
+            Embed
+          </button>
+          <div class="separator"></div>
+          <label class="btn btn-secondary">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            Upload File
+            <input type="file" id="file-input" accept="video/*,.mkv,.ts,.avi,.flv,.wmv,.mov" />
+          </label>
+        </div>
+      </section>
+
+      <section class="player-stage">
+        <movi-player
+          id="movi-player"
+          renderer="canvas"
+          controls
+          objectfit="control"
+          gesturefs
+          thumb
+          fastseek
+          showtitle
+          ambientmode
+          ambientwrapper="ambient-wrapper"
+          resume
+          stablevolume
+        >
+          <div class="shimmer-wrapper">
+            <div class="shimmer"></div>
+          </div>
+        </movi-player>
+      </section>
+
+    </div>
+
+    <footer class="footer">
+      <p>Powered by <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener">movi-player</a> &mdash; Play MKV, HEVC, AV1, HDR in the browser</p>
+      <p style="margin-top: 0.5rem; font-size: 0.7rem; opacity: 0.6;">All content is provided by users. We do not host or store any media. Users are solely responsible for the content they play. By using this service, you agree that you have the right to access the media you provide.</p>
+    </footer>
+
+    <!-- Movi Player from CDN -->
+    <script type="module">
+      import "/dist/element.js?v=__BUILD_VERSION__";
+
+      const urlInput = document.getElementById("url-input");
+      const loadBtn = document.getElementById("load-btn");
+      const fileInput = document.getElementById("file-input");
+      const player = document.getElementById("movi-player");
+      const dropOverlay = document.getElementById("drop-overlay");
+      const embedBtn = document.getElementById("embed-btn");
+      let currentVideoUrl = "";
+      const defaultTitle = document.title;
+
+      const updateTitle = (name) => {
+        document.title = name ? `${name} - MoviPlayer` : defaultTitle;
+      };
+
+      // --- URL Loading (via proxy for CORS bypass) ---
+      const proxyUrl = (url) => `/proxy?url=${encodeURIComponent(url)}`;
+
+      const loadUrl = () => {
+        const url = urlInput.value.trim();
+        if (!url) {
+          urlInput.focus();
+          return;
+        }
+        if (player) {
+          currentVideoUrl = url;
+          player.src = proxyUrl(url);
+          embedBtn.style.display = "inline-flex";
+        }
+      };
+
+      loadBtn.addEventListener("click", loadUrl);
+      urlInput.addEventListener("keypress", (e) => {
+        if (e.key === "Enter") loadUrl();
+      });
+
+      // --- File Upload ---
+      fileInput.addEventListener("change", (e) => {
+        const file = e.target.files[0];
+        if (file && player) {
+          if (player.setFile) {
+            player.setFile(file);
+          } else {
+            player.src = file;
+          }
+          urlInput.value = "";
+        }
+      });
+
+      // --- Drag & Drop ---
+      let dragCounter = 0;
+
+      document.addEventListener("dragenter", (e) => {
+        e.preventDefault();
+        dragCounter++;
+        dropOverlay.classList.add("active");
+      });
+
+      document.addEventListener("dragleave", (e) => {
+        e.preventDefault();
+        dragCounter--;
+        if (dragCounter === 0) dropOverlay.classList.remove("active");
+      });
+
+      document.addEventListener("dragover", (e) => {
+        e.preventDefault();
+      });
+
+      document.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dragCounter = 0;
+        dropOverlay.classList.remove("active");
+
+        const file = e.dataTransfer.files[0];
+        if (file && player) {
+          if (player.setFile) {
+            player.setFile(file);
+          } else {
+            player.src = file;
+          }
+          urlInput.value = "";
+        }
+      });
+
+      // --- Embed copy ---
+      embedBtn.addEventListener("click", () => {
+        if (!currentVideoUrl) return;
+        const embedCode = `<iframe src="https://moviplayer.com/embed?url=${encodeURIComponent(currentVideoUrl)}&autoplay" width="800" height="450" frameborder="0" allowfullscreen allow="autoplay"></iframe>`;
+        navigator.clipboard.writeText(embedCode).then(() => {
+          const orig = embedBtn.innerHTML;
+          embedBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!`;
+          setTimeout(() => { embedBtn.innerHTML = orig; }, 2000);
+        });
+      });
+
+      // --- Sync document title with player title ---
+      player.addEventListener("titlechange", (e) => {
+        updateTitle(e.detail.title);
+      });
+
+      // --- Auto-play from URL params ---
+      const params = new URLSearchParams(window.location.search);
+      const videoUrl = params.get("url");
+      if (videoUrl && player) {
+        currentVideoUrl = videoUrl;
+        urlInput.value = videoUrl;
+        player.src = proxyUrl(videoUrl);
+        embedBtn.style.display = "inline-flex";
+      }
+
+      // --- Theme Logic ---
+      const themeToggle = document.getElementById("theme-toggle");
+
+      const icons = {
+        auto: `<svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>`,
+        light: `<svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`,
+        dark: `<svg class="theme-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`,
+      };
+
+      const modes = ["auto", "light", "dark"];
+      let currentMode = localStorage.getItem("theme-preference") || "auto";
+
+      const applyTheme = (mode) => {
+        let effectiveTheme = mode;
+        if (mode === "auto") {
+          effectiveTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        }
+
+        if (effectiveTheme === "light") {
+          document.documentElement.setAttribute("data-theme", "light");
+        } else {
+          document.documentElement.removeAttribute("data-theme");
+        }
+
+        themeToggle.innerHTML = icons[mode];
+        themeToggle.setAttribute("title", `Theme: ${mode.charAt(0).toUpperCase() + mode.slice(1)}`);
+
+        if (player) {
+          player.setAttribute("theme", effectiveTheme);
+        }
+      };
+
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+        if (currentMode === "auto") applyTheme("auto");
+      });
+
+      themeToggle.addEventListener("click", () => {
+        currentMode = modes[(modes.indexOf(currentMode) + 1) % modes.length];
+        localStorage.setItem("theme-preference", currentMode);
+        applyTheme(currentMode);
+      });
+
+      applyTheme(currentMode);
+    </script>
+  </body>
+</html>

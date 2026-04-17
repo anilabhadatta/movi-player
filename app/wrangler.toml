@@ -1,0 +1,15 @@
+name = "movi-app"
+main = "worker.js"
+compatibility_date = "2024-12-01"
+
+routes = [
+  { pattern = "moviplayer.com", custom_domain = true }
+]
+
+[[r2_buckets]]
+binding = "ASSETS"
+bucket_name = "movi-assets"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
