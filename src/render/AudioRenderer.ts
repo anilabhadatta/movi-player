@@ -849,6 +849,13 @@ export class AudioRenderer {
     return Math.max(0, this.scheduledTime - this.audioContext.currentTime);
   }
 
+  /**
+   * Get the furthest media time (seconds) already scheduled in Web Audio.
+   */
+  getMaxScheduledMediaTime(): number {
+    return this.maxScheduledMediaTime;
+  }
+
   // ─── Stable Audio Methods ────────────────────────────────────────────
 
   /**

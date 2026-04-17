@@ -779,10 +779,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
     const currentState = this.stateManager.getState();
 
-    // During buffering, just mark intent to resume when ready
-    if (currentState === "buffering") {
+    // During buffering or seeking, mark intent to resume when ready
+    if (currentState === "buffering" || currentState === "seeking") {
       this.wasPlayingBeforeRebuffer = true;
-      Logger.info(TAG, "Play requested during buffering — will resume when ready");
+      Logger.info(TAG, `Play requested during ${currentState} — will resume when ready`);
       return;
     }
 
@@ -1073,8 +1073,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
 
     // Transition to final state
-    if (this.wasPlayingBeforeSeek) {
+    if (this.wasPlayingBeforeSeek || this.wasPlayingBeforeRebuffer) {
       Logger.info(TAG, "Resuming playback after seek");
+      this.wasPlayingBeforeRebuffer = false;
       this.stateManager.setState("playing");
       this.clock.start();
       if (!this.disableAudio && !this.audioRenderer.isAudioPlaying()) {
@@ -3316,14 +3317,56 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         }
 
         if (!this.isPiPActive) {
-          // Seek to current audio position for clean video recovery.
-          // In background, video decoding was skipped so demuxer is at audio position.
-          // A full seek re-positions demuxer, flushes decoders, and restarts cleanly.
+          // Video-only recovery via demuxer seek — audio stays completely untouched.
+          // In background, video decoding was skipped so video decoder has stale state.
+          // We seek the demuxer to the nearest keyframe near current audio position,
+          // flush only the video decoder, and set seekTargetTime to skip any
+          // re-demuxed audio packets that were already played.
           const audioTime = this.clock.getTime();
-          Logger.debug(TAG, `Foreground recovery: seeking to ${audioTime.toFixed(2)}s`);
-          this.seek(audioTime).catch((err) => {
-            Logger.error(TAG, "Foreground recovery seek failed", err);
-          });
+          Logger.debug(TAG, `Foreground recovery: video-only seek to ${audioTime.toFixed(2)}s`);
+
+          // Cancel any in-flight processLoop to avoid demux conflicts during seek
+          if (this.animationFrameId !== null) {
+            cancelAnimationFrame(this.animationFrameId);
+            this.animationFrameId = null;
+          }
+          const mySessionId = ++this.seekSessionId;
+
+          try {
+            // Flush video decoder only — audio decoder and renderer untouched
+            if (this.videoDecoder) {
+              await this.videoDecoder.flush();
+            }
+            if (this.videoRenderer) {
+              this.videoRenderer.clearQueue();
+            }
+
+            if (this.seekSessionId !== mySessionId) return; // Superseded
+
+            // Seek demuxer to nearest keyframe before current audio position
+            if (this.demuxer) {
+              await this.demuxer.seek(audioTime + this.startTime);
+            }
+
+            if (this.seekSessionId !== mySessionId) return; // Superseded
+
+            // Skip pre-target packets: use audio buffer end (not clock time) so
+            // already-scheduled audio isn't re-decoded — prevents fast-forward sound.
+            const audioBufferEnd = this.audioRenderer.getMaxScheduledMediaTime();
+            this.seekTargetTime = Math.max(audioTime + this.startTime, audioBufferEnd);
+            this.seekingToKeyframe = true;
+            this.seekingToKeyframeStartTime = performance.now();
+
+            // Restart video pipeline
+            if (this.videoRenderer) {
+              this.videoRenderer.startPresentationLoop();
+            }
+            this.processLoop();
+          } catch (err) {
+            Logger.error(TAG, "Foreground recovery failed", err);
+            // Fall back to processLoop restart so playback doesn't stall
+            this.processLoop();
+          }
         } else {
           // PiP was active — just restart processLoop, video was rendering in PiP
           this.processLoop();
