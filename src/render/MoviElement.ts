@@ -8489,8 +8489,18 @@ export class MoviElement extends HTMLElement {
       case "videoid":
         this._videoId = newValue || "";
         break;
-      case "src":
-        // Only handle string src attributes, File objects are handled via setter
+      case "src": {
+        // When switching from a File source to a URL, clear the File reference
+        // so the URL path can proceed. Without this, the File instanceof check
+        // blocks the URL from loading.
+        if (this._src instanceof File && newValue) {
+          if (this.player) {
+            this.player.destroy();
+            this.player = null;
+          }
+          this._src = null;
+        }
+
         if (!(this._src instanceof File)) {
           const oldSrc = this._src;
           this._src = newValue || null;
@@ -8510,6 +8520,7 @@ export class MoviElement extends HTMLElement {
           }
         }
         break;
+      }
       case "autoplay":
         this._autoplay = newValue !== null;
         break;
@@ -9202,6 +9213,10 @@ export class MoviElement extends HTMLElement {
       this.player.destroy();
       this.player = null;
     }
+
+    // Reset unsupported state on source change so new source can load
+    this._isUnsupported = false;
+    if (this.brokenIndicator) this.brokenIndicator.style.display = "none";
 
     // Show empty state if no src after player cleanup
     if (!this._src && this.emptyStateIndicator) {
@@ -10098,6 +10113,10 @@ export class MoviElement extends HTMLElement {
       const statusEl = this.shadowRoot.querySelector(".movi-rotate-status");
       if (statusEl) statusEl.textContent = "0°";
     }
+
+    // Reset unsupported state on any source change so new source can load
+    this._isUnsupported = false;
+    if (this.brokenIndicator) this.brokenIndicator.style.display = "none";
 
     this.dispatchEvent(new CustomEvent("loadstart", { detail: { src: value instanceof File ? value.name : value } }));
 
