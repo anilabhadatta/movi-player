@@ -88,6 +88,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private wasPlayingBeforeRebuffer: boolean = false; // Track if we were playing before entering rebuffering state
   private _stallStartTime: number = 0; // When stall was first detected
   private _bufferingEntryTime: number = 0; // When we entered buffering state
+  private _playStartTime: number = 0; // When play() was called — grace period for stall detection
   private _decoderStuckSince: number = 0; // When video decoder was first detected stuck
 
   // Playback Loop
@@ -616,6 +617,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           TAG,
           `Audio decoder configured: ${audioTrack.codec} ${audioTrack.sampleRate}Hz ${audioTrack.channels}ch`,
         );
+        // Pre-initialize AudioContext during load (created suspended, no audio plays).
+        // Moves ~500ms creation cost from play() to load() for instant playback start.
+        // init() no longer resumes — play() handles resume on user gesture.
+        if (!this.disableAudio) {
+          this.audioRenderer.init().catch(() => {});
+        }
       } else {
         Logger.warn(TAG, "Failed to configure audio decoder");
       }
@@ -865,14 +872,29 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
     // If resuming from paused state, seek to current time to ensure demuxer is at correct position
 
-    // Request WakeLock to prevent screen sleep
-    await this.requestWakeLock();
+    // Fire-and-forget WakeLock (no need to block play for screen sleep prevention)
+    this.requestWakeLock();
 
-    // Resume AudioContext if needed (skip if disabled for debugging)
-    if (!this.disableAudio) {
-      await this.audioRenderer.play();
+    // First play after poster seek: re-seek demuxer to start time.
+    // Poster seek's processLoop reads the demuxer ahead (~1s) while decoding the
+    // first video frame. Without this, audio starts at 1s+ instead of 0.
+    // Run demuxer seek and audio init in parallel to minimize startup latency.
+    if (this._playStartTime === 0 && this.demuxer) {
+      const demuxerSeek = this.demuxer.seek(this.startTime);
+      const audioInit = !this.disableAudio
+        ? this.audioRenderer.play()
+        : Promise.resolve();
+      await Promise.all([demuxerSeek, audioInit]);
+      this.clock.seek(this.startTime);
+      this.pendingAudioPackets = [];
+      this.eofReached = false;
     } else {
-      Logger.debug(TAG, "Audio playback skipped (disabled for debugging)");
+      // Resume from pause — just resume AudioContext
+      if (!this.disableAudio) {
+        await this.audioRenderer.play();
+      } else {
+        Logger.debug(TAG, "Audio playback skipped (disabled for debugging)");
+      }
     }
 
     // Start video presentation loop for smooth 60Hz playback
@@ -891,6 +913,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
 
     this.clock.start();
+    this._playStartTime = performance.now();
 
     // Transition to playing state
     // At this point, state should be 'ready', 'paused', or 'seeking' (never 'ended' as it's handled above)
@@ -1177,7 +1200,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     const currentFps = (this.mediaInfo as any)?.videoFrameRate ?? 30;
     const isSlowHighFps = currentRate < 0.99 && currentFps >= 50;
     const stallTimeout = isSlowHighFps ? 2000 : 500;
-    if (this.stateManager.getState() === "playing" && !this.eofReached && !this.waitingForVideoSync && !nearEnd && !this.isBackgrounded) {
+    // Grace period after play() starts: allow decode pipeline to fill before stall detection.
+    // Without this, clicking play on a poster triggers a false stall → buffering → loading spinner.
+    const playGraceMs = 3000;
+    const inPlayGrace = this._playStartTime > 0 && (performance.now() - this._playStartTime) < playGraceMs;
+    if (this.stateManager.getState() === "playing" && !this.eofReached && !this.waitingForVideoSync && !nearEnd && !this.isBackgrounded && !inPlayGrace) {
       const videoEmpty = this.videoRenderer ? this.videoRenderer.getQueueSize() === 0 : false;
       const hasAudio = !!this.trackManager.getActiveAudioTrack() && !this.disableAudio;
       const audioLow = !hasAudio || this.audioRenderer.getBufferedDuration() < 0.05;
@@ -1211,7 +1238,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Audio desync detection: if audio falls significantly behind video at 1x.
     // Clock syncs to audio so clock vs audio is always ~0. Compare audio against
     // maxScheduledMediaTime vs actual playback position to detect real desync.
-    if (this.stateManager.getState() === "playing" && !this.disableAudio && Math.abs(this.clock.getPlaybackRate() - 1.0) < 0.01) {
+    if (this.stateManager.getState() === "playing" && !this.disableAudio && !inPlayGrace && Math.abs(this.clock.getPlaybackRate() - 1.0) < 0.01) {
       const audioTime = this.audioRenderer.getAudioClock();
       const videoTime = this.videoRenderer
         ? (this.videoRenderer as any).currentTime ?? -1

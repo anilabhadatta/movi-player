@@ -8978,9 +8978,8 @@ export class MoviElement extends HTMLElement {
         // the user shouldn't see a spinner just to render the first frame.
         if (this._startAt === 0 && this.player) {
           this.isPosterSeek = true;
-          this.player.seek(0).catch(() => {}).finally(() => {
-            this.isPosterSeek = false;
-          });
+          // isPosterSeek stays true until state leaves "seeking" (cleared in stateChangeHandler)
+          this.player.seek(0).catch(() => {});
         }
       }
 
@@ -9103,6 +9102,10 @@ export class MoviElement extends HTMLElement {
     // Forward player events to element
     const stateChangeHandler = (state: PlayerState) => {
       Logger.info(TAG, `stateChange: ${state}`);
+      // Clear isPosterSeek when state leaves "seeking" (poster seek completed)
+      if (state !== "seeking" && this.isPosterSeek) {
+        this.isPosterSeek = false;
+      }
       // Hide poster on state change to playing
       if (state === "playing" && this.posterElement) {
         this.posterElement.style.display = "none";

@@ -91,11 +91,9 @@ export class AudioRenderer {
       // Apply muted state if set before initialization
       this.gainNode.gain.value = this._muted ? 0 : this.volume;
 
-      // Resume if suspended (only if not muted to avoid autoplay policy errors)
-      // When muted, we'll resume on first user interaction (unmute/play)
-      if (this.audioContext.state === "suspended" && !this._muted) {
-        await this.audioContext.resume();
-      }
+      // Don't resume here — play() handles resume when user clicks play.
+      // Pre-init creates AudioContext during load for fast startup;
+      // resuming here would cause poster-seek audio to leak.
 
       // Stable audio: monitor AudioContext state for auto-recovery
       if (this._stableAudio) {
