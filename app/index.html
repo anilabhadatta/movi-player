@@ -4,68 +4,75 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>MoviPlayer - Play Any Video in Your Browser</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%23bd34fe'/%3E%3Cstop offset='100%25' stop-color='%2341d1ff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='50' cy='50' r='45' fill='url(%23g)'/%3E%3Cpolygon points='40,30 40,70 75,50' fill='white'/%3E%3C/svg%3E" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%236c5dd3'/%3E%3Cstop offset='100%25' stop-color='%234a3bba'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='50' cy='50' r='45' fill='url(%23g)'/%3E%3Cpolygon points='40,30 40,70 75,50' fill='white'/%3E%3C/svg%3E" />
     <meta name="description" content="Play MKV, HEVC, AV1, HDR videos directly in your browser. No install, no server. Just drop your file or paste a URL." />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <style>
       :root {
-        --primary-accent: #6c5dd3;
-        --secondary-accent: #00d4ff;
+        --accent: #6c5dd3;
+        --accent-hover: #7b6de0;
+        --accent-glow: rgba(108, 93, 211, 0.4);
         --font-family: "Inter", system-ui, -apple-system, sans-serif;
       }
 
       /* Dark Theme (Default) */
       :root {
         --bg-base: #0f0f12;
+        --bg-elevated: #1a1a2e;
+        --bg-card: #1c1c1c;
+        --bg-surface: rgba(255, 255, 255, 0.04);
         --text-primary: #ffffff;
-        --text-secondary: #a0a0b0;
-
-        --glass-bg: rgba(255, 255, 255, 0.05);
-        --glass-border: rgba(255, 255, 255, 0.1);
-
-        --input-bg: rgba(0, 0, 0, 0.3);
-        --input-focus-bg: rgba(0, 0, 0, 0.5);
+        --text-secondary: #8c8c8c;
+        --text-muted: #5a5a5a;
+        --border-subtle: rgba(255, 255, 255, 0.08);
+        --border-hover: rgba(255, 255, 255, 0.15);
+        --input-bg: rgba(22, 22, 22, 0.8);
+        --input-focus-bg: rgba(30, 30, 30, 0.95);
+        --input-border: rgba(255, 255, 255, 0.1);
         --input-text: #ffffff;
-        --input-placeholder: rgba(255, 255, 255, 0.4);
-
-        --btn-secondary-bg: rgba(255, 255, 255, 0.08);
-        --btn-secondary-border: rgba(255, 255, 255, 0.05);
-        --btn-secondary-hover: rgba(255, 255, 255, 0.15);
-        --btn-secondary-text: #ffffff;
-
-        --gradient-1: rgba(108, 93, 211, 0.15);
-        --gradient-2: rgba(0, 212, 255, 0.1);
-
+        --input-placeholder: rgba(255, 255, 255, 0.3);
+        --btn-ghost-bg: rgba(255, 255, 255, 0.06);
+        --btn-ghost-hover: rgba(255, 255, 255, 0.12);
+        --btn-ghost-text: #e5e5e5;
+        --overlay-bg: rgba(0, 0, 0, 0.7);
         --icon-color: #ffffff;
-        --brand-gradient: linear-gradient(135deg, #ffffff 0%, #a0a0b0 100%);
+        --gradient-hero: linear-gradient(180deg, rgba(15, 15, 18, 0) 0%, rgba(15, 15, 18, 0.6) 50%, #0f0f12 100%);
+        --shadow-heavy: 0 20px 60px rgba(0, 0, 0, 0.5);
+        --feature-bg: rgba(255, 255, 255, 0.03);
+        --feature-border: rgba(255, 255, 255, 0.06);
+        --badge-bg: rgba(108, 93, 211, 0.15);
+        --badge-text: #8b7fe8;
       }
 
       /* Light Theme Override */
       [data-theme="light"] {
-        --bg-base: #f4f5f7;
-        --text-primary: #11142d;
-        --text-secondary: #808191;
-
-        --glass-bg: rgba(255, 255, 255, 0.6);
-        --glass-border: rgba(0, 0, 0, 0.08);
-
-        --input-bg: rgba(255, 255, 255, 0.7);
+        --bg-base: #f5f5f5;
+        --bg-elevated: #ffffff;
+        --bg-card: #ffffff;
+        --bg-surface: rgba(0, 0, 0, 0.02);
+        --text-primary: #141414;
+        --text-secondary: #757575;
+        --text-muted: #9e9e9e;
+        --border-subtle: rgba(0, 0, 0, 0.08);
+        --border-hover: rgba(0, 0, 0, 0.15);
+        --input-bg: #ffffff;
         --input-focus-bg: #ffffff;
-        --input-text: #11142d;
-        --input-placeholder: rgba(0, 0, 0, 0.4);
-
-        --btn-secondary-bg: rgba(0, 0, 0, 0.05);
-        --btn-secondary-border: transparent;
-        --btn-secondary-hover: rgba(0, 0, 0, 0.1);
-        --btn-secondary-text: #11142d;
-
-        --gradient-1: rgba(108, 93, 211, 0.08);
-        --gradient-2: rgba(0, 212, 255, 0.08);
-
-        --icon-color: #11142d;
-        --brand-gradient: linear-gradient(135deg, #6c5dd3 0%, #4a3bba 100%);
+        --input-border: rgba(0, 0, 0, 0.12);
+        --input-text: #141414;
+        --input-placeholder: rgba(0, 0, 0, 0.35);
+        --btn-ghost-bg: rgba(0, 0, 0, 0.04);
+        --btn-ghost-hover: rgba(0, 0, 0, 0.08);
+        --btn-ghost-text: #333333;
+        --overlay-bg: rgba(255, 255, 255, 0.8);
+        --icon-color: #141414;
+        --gradient-hero: linear-gradient(180deg, rgba(245, 245, 245, 0) 0%, rgba(245, 245, 245, 0.6) 50%, #f5f5f5 100%);
+        --shadow-heavy: 0 20px 60px rgba(0, 0, 0, 0.12);
+        --feature-bg: rgba(0, 0, 0, 0.02);
+        --feature-border: rgba(0, 0, 0, 0.06);
+        --badge-bg: rgba(108, 93, 211, 0.1);
+        --badge-text: #6c5dd3;
       }
 
       * {
@@ -74,213 +81,356 @@
         box-sizing: border-box;
       }
 
+      html {
+        scroll-behavior: smooth;
+      }
+
       body {
         background-color: var(--bg-base);
-        background-image:
-          radial-gradient(
-            circle at 15% 50%,
-            var(--gradient-1) 0%,
-            transparent 25%
-          ),
-          radial-gradient(
-            circle at 85% 30%,
-            var(--gradient-2) 0%,
-            transparent 25%
-          );
         color: var(--text-primary);
         font-family: var(--font-family);
         min-height: 100vh;
-        display: flex;
-        flex-direction: column;
         overflow-x: hidden;
+        -webkit-font-smoothing: antialiased;
       }
 
-      /* Ambient Background Layer */
-      #ambient-wrapper {
+      /* ===== NAVBAR ===== */
+      .navbar {
         position: fixed;
         top: 0;
         left: 0;
-        width: 100%;
-        height: 100%;
-        z-index: 0;
-        pointer-events: none;
-        opacity: 0.6;
-        filter: blur(80px);
-        transition: opacity 1s ease;
-      }
-
-      .app-container {
-        position: relative;
-        z-index: 10;
-        width: 100%;
-        max-width: 1400px;
-        margin: 0 auto;
-        padding: 2rem;
+        right: 0;
+        z-index: 100;
+        padding: 0 4%;
+        height: 68px;
         display: flex;
-        flex-direction: column;
-        gap: 1rem;
-        flex: 1;
-      }
-
-      /* Header */
-      header {
-        display: flex;
-        justify-content: space-between;
         align-items: center;
+        justify-content: space-between;
+        background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
+        transition: background 0.3s ease;
+      }
+
+      .navbar.scrolled {
+        background: var(--bg-base);
+        box-shadow: 0 1px 0 var(--border-subtle);
+      }
+
+      [data-theme="light"] .navbar {
+        background: linear-gradient(180deg, rgba(245,245,245,0.9) 0%, transparent 100%);
+      }
+
+      [data-theme="light"] .navbar.scrolled {
+        background: var(--bg-base);
+      }
+
+      .nav-left {
+        display: flex;
+        align-items: center;
+        gap: 2rem;
       }
 
       .brand {
         font-size: 1.5rem;
         font-weight: 700;
-        background: var(--brand-gradient);
+        background: linear-gradient(135deg, #ffffff 0%, #a0a0b0 100%);
         background-clip: text;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         letter-spacing: -0.5px;
+        cursor: default;
+        user-select: none;
       }
 
-      .header-actions {
+      [data-theme="light"] .brand {
+        background: linear-gradient(135deg, #6c5dd3 0%, #4a3bba 100%);
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+
+      .nav-links {
         display: flex;
+        gap: 1.5rem;
+        list-style: none;
+      }
+
+      .nav-links a {
+        color: var(--text-secondary);
+        text-decoration: none;
+        font-size: 0.875rem;
+        font-weight: 500;
+        transition: color 0.2s;
+      }
+
+      .nav-links a:hover,
+      .nav-links a.active {
+        color: var(--text-primary);
+      }
+
+      .nav-right {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .nav-icon-btn {
+        background: transparent;
+        border: none;
+        color: var(--icon-color);
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+
+      .nav-icon-btn:hover {
+        background: var(--btn-ghost-hover);
+      }
+
+      .nav-icon-link {
+        color: var(--icon-color);
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-decoration: none;
+        transition: background 0.2s;
+      }
+
+      .nav-icon-link:hover {
+        background: var(--btn-ghost-hover);
+      }
+
+      /* ===== HERO SECTION ===== */
+      .hero {
+        position: relative;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        padding: 0 4%;
+        padding-top: calc(68px + 2.5rem);
+        padding-bottom: 10rem;
+        overflow: hidden;
+        text-align: center;
+      }
+
+      .hero-bg {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+      }
+
+      .hero-bg::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(ellipse 80% 50% at 50% 20%, rgba(108, 93, 211, 0.08) 0%, transparent 60%),
+          radial-gradient(ellipse 60% 40% at 80% 60%, rgba(108, 93, 211, 0.04) 0%, transparent 50%);
+      }
+
+      .hero-bg::after {
+        content: "";
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 40%;
+        background: var(--gradient-hero);
+      }
+
+      .hero-content {
+        position: relative;
+        z-index: 2;
+        width: 100%;
+        max-width: 700px;
+        display: flex;
+        flex-direction: column;
         align-items: center;
         gap: 0.75rem;
       }
 
-      /* Glass Panel for Inputs */
-      .controls-panel {
-        border-radius: 16px;
+      .hero h1 {
+        font-size: clamp(1.75rem, 3.5vw, 2.5rem);
+        font-weight: 800;
+        line-height: 1.1;
+        letter-spacing: -0.5px;
+      }
+
+      .hero h1 .highlight {
+        background: linear-gradient(135deg, var(--accent), #00d4ff);
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+
+      .hero-formats {
         display: flex;
-        gap: 1.5rem;
-        align-items: center;
+        gap: 0.5rem;
         flex-wrap: wrap;
+        justify-content: center;
       }
 
-      .input-group {
-        flex: 1;
-        position: relative;
-        min-width: 300px;
+      .format-chip {
+        background: var(--badge-bg);
+        color: var(--badge-text);
+        padding: 0.25rem 0.7rem;
+        border-radius: 6px;
+        font-size: 0.7rem;
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        border: 1px solid rgba(108, 93, 211, 0.15);
       }
 
-      .input-group input {
+      .hero-desc {
+        font-size: 0.875rem;
+        color: var(--text-secondary);
+        line-height: 1.5;
+      }
+
+      .hero-actions {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        justify-content: center;
         width: 100%;
+      }
+
+      /* URL Input Bar - Netflix style search */
+      .url-bar {
+        display: flex;
+        align-items: center;
         background: var(--input-bg);
-        border: 1px solid var(--glass-border);
-        border-radius: 12px;
-        padding: 1rem 1.25rem;
+        border: 1px solid var(--input-border);
+        border-radius: 8px;
+        overflow: hidden;
+        transition: all 0.3s ease;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .url-bar:focus-within {
+        border-color: var(--accent);
+        background: var(--input-focus-bg);
+        box-shadow: 0 0 0 3px var(--accent-glow);
+      }
+
+      .url-bar input {
+        flex: 1;
+        background: transparent;
+        border: none;
+        padding: 0.875rem 1rem;
         color: var(--input-text);
         font-family: inherit;
-        font-size: 0.95rem;
-        transition: all 0.3s ease;
-      }
-
-      .input-group input:focus {
+        font-size: 0.9rem;
         outline: none;
-        border-color: var(--primary-accent);
-        background: var(--input-focus-bg);
-        box-shadow: 0 0 0 4px rgba(108, 93, 211, 0.1);
       }
 
-      .input-group input::placeholder {
+      .url-bar input::placeholder {
         color: var(--input-placeholder);
       }
 
-      .action-group {
-        display: flex;
-        gap: 1rem;
-        align-items: center;
-      }
-
-      .btn {
-        background: rgba(255, 255, 255, 0.1);
+      .url-bar-btn {
+        background: var(--accent);
         border: none;
-        color: #ffffff;
+        color: #fff;
+        padding: 0 1.25rem;
+        height: 100%;
+        min-height: 48px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
         font-family: inherit;
         font-weight: 600;
-        font-size: 0.9rem;
-        padding: 0 1.5rem;
-        height: 50px;
-        border-radius: 12px;
-        cursor: pointer;
-        transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+        font-size: 0.875rem;
+        transition: background 0.2s;
+        white-space: nowrap;
+      }
+
+      .url-bar-btn:hover {
+        background: var(--accent-hover);
+      }
+
+      /* Primary CTA button */
+      .btn-cta {
         display: inline-flex;
         align-items: center;
-        justify-content: center;
         gap: 0.5rem;
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        font-family: inherit;
+        font-weight: 700;
+        font-size: 1rem;
+        padding: 0.875rem 2rem;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.2s;
+        white-space: nowrap;
       }
 
-      .separator {
-        width: 1px;
-        height: 30px;
-        background: var(--glass-border);
-        margin: 0 0.5rem;
+      .btn-cta:hover {
+        background: var(--accent-hover);
+        transform: translateY(-1px);
+        box-shadow: 0 8px 25px var(--accent-glow);
       }
 
-      .btn-primary {
-        background: linear-gradient(135deg, var(--primary-accent), #4a3bba);
-        box-shadow: 0 8px 16px rgba(108, 93, 211, 0.3);
-      }
-
-      .btn-primary:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 12px 20px rgba(108, 93, 211, 0.4);
-      }
-
-      .btn-secondary {
-        background: var(--btn-secondary-bg);
-        border: 1px solid var(--btn-secondary-border);
-        color: var(--btn-secondary-text);
-      }
-
-      .btn-secondary:hover {
-        background: var(--btn-secondary-hover);
-        transform: translateY(-2px);
-      }
-
-      /* File Input Hidden */
-      input[type="file"] {
-        display: none;
-      }
-
-      /* Drop Zone Overlay */
-      .drop-overlay {
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(108, 93, 211, 0.15);
-        backdrop-filter: blur(4px);
-        z-index: 999;
-        display: none;
+      .btn-ghost {
+        display: inline-flex;
         align-items: center;
-        justify-content: center;
-        pointer-events: none;
-      }
-
-      .drop-overlay.active {
-        display: flex;
-      }
-
-      .drop-overlay-content {
-        border: 3px dashed var(--primary-accent);
-        border-radius: 24px;
-        padding: 3rem 4rem;
-        text-align: center;
-        color: var(--text-primary);
-      }
-
-      .drop-overlay-content svg {
-        width: 48px;
-        height: 48px;
-        margin-bottom: 1rem;
-        stroke: var(--primary-accent);
-      }
-
-      .drop-overlay-content p {
-        font-size: 1.25rem;
+        gap: 0.5rem;
+        background: var(--btn-ghost-bg);
+        color: var(--btn-ghost-text);
+        border: 1px solid var(--border-subtle);
+        font-family: inherit;
         font-weight: 600;
+        font-size: 0.95rem;
+        padding: 0.875rem 1.75rem;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.2s;
+        white-space: nowrap;
       }
 
-      /* Player Container */
+      .btn-ghost:hover {
+        background: var(--btn-ghost-hover);
+        border-color: var(--border-hover);
+      }
+
+      .btn-embed {
+        display: none;
+      }
+
+      .btn-embed.visible {
+        display: inline-flex;
+      }
+
+      /* ===== PLAYER SECTION ===== */
+      .player-section {
+        position: relative;
+        z-index: 2;
+        padding: 0 4%;
+        margin-top: -7rem;
+      }
+
+      .player-wrapper {
+        position: relative;
+        max-width: 1200px;
+        margin: 0 auto;
+        border-radius: 16px;
+        overflow: hidden;
+        box-shadow: var(--shadow-heavy);
+        background: #000;
+        border: 1px solid var(--border-subtle);
+      }
+
       .player-stage {
         position: relative;
         width: 100%;
@@ -295,41 +445,37 @@
         width: 100%;
         height: 100%;
         display: block;
-        --movi-controls-bg: rgba(15, 15, 18, 0.85);
+        --movi-controls-bg: rgba(0, 0, 0, 0.85);
         --movi-controls-color: #ffffff;
-        --movi-progress-color: var(--primary-accent);
+        --movi-progress-color: var(--accent);
         --movi-btn-hover-bg: rgba(108, 93, 211, 0.2);
-        --movi-slider-track: rgba(255, 255, 255, 0.1);
+        --movi-slider-track: rgba(255, 255, 255, 0.15);
       }
 
-      /* Shimmer */
       .shimmer-wrapper {
         width: 100%;
         height: 100%;
         display: flex;
         align-items: center;
         justify-content: center;
-        background: #000;
+        background: #0a0a0a;
         position: relative;
         overflow: hidden;
       }
 
       .shimmer {
         position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
+        inset: 0;
         background: linear-gradient(
           90deg,
           transparent 0%,
-          rgba(108, 93, 211, 0.05) 40%,
-          rgba(108, 93, 211, 0.1) 50%,
-          rgba(108, 93, 211, 0.05) 60%,
+          rgba(108, 93, 211, 0.03) 40%,
+          rgba(108, 93, 211, 0.06) 50%,
+          rgba(108, 93, 211, 0.03) 60%,
           transparent 100%
         );
         background-size: 200% 100%;
-        animation: shimmer 2s infinite linear;
+        animation: shimmer 2.5s infinite linear;
       }
 
       @keyframes shimmer {
@@ -337,119 +483,238 @@
         100% { background-position: 200% 0; }
       }
 
-      /* Footer */
-      .footer {
-        text-align: center;
+      /* Ambient Background Layer */
+      #ambient-wrapper {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 0;
+        pointer-events: none;
+        opacity: 0.5;
+        filter: blur(100px);
+        transition: opacity 1s ease;
+      }
+
+      /* ===== FEATURES SECTION ===== */
+      .features-section {
+        position: relative;
+        z-index: 2;
+        padding: 5rem 4% 3rem;
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .features-section h2 {
+        font-size: 1.5rem;
+        font-weight: 700;
+        margin-bottom: 2rem;
+        letter-spacing: -0.5px;
+      }
+
+      .features-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 1rem;
+      }
+
+      .feature-card {
+        background: var(--feature-bg);
+        border: 1px solid var(--feature-border);
+        border-radius: 12px;
         padding: 1.5rem;
+        transition: all 0.3s ease;
+      }
+
+      .feature-card:hover {
+        border-color: var(--border-hover);
+        transform: translateY(-2px);
+      }
+
+      .feature-icon {
+        width: 40px;
+        height: 40px;
+        border-radius: 10px;
+        background: var(--badge-bg);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin-bottom: 1rem;
+      }
+
+      .feature-icon svg {
+        width: 20px;
+        height: 20px;
+        stroke: var(--accent);
+      }
+
+      .feature-card h3 {
+        font-size: 0.95rem;
+        font-weight: 600;
+        margin-bottom: 0.4rem;
+      }
+
+      .feature-card p {
+        font-size: 0.825rem;
         color: var(--text-secondary);
+        line-height: 1.5;
+      }
+
+      /* ===== DROP OVERLAY ===== */
+      .drop-overlay {
+        position: fixed;
+        inset: 0;
+        background: var(--overlay-bg);
+        backdrop-filter: blur(8px);
+        z-index: 999;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+      }
+
+      .drop-overlay.active {
+        display: flex;
+      }
+
+      .drop-overlay-content {
+        border: 2px dashed var(--accent);
+        border-radius: 20px;
+        padding: 3rem 4rem;
+        text-align: center;
+        background: var(--bg-card);
+      }
+
+      .drop-overlay-content svg {
+        width: 48px;
+        height: 48px;
+        margin-bottom: 1rem;
+        stroke: var(--accent);
+      }
+
+      .drop-overlay-content p {
+        font-size: 1.25rem;
+        font-weight: 700;
+      }
+
+      .drop-overlay-content span {
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        display: block;
+        margin-top: 0.5rem;
+      }
+
+      /* ===== FOOTER ===== */
+      .footer {
+        position: relative;
+        z-index: 2;
+        text-align: center;
+        padding: 2rem 4%;
+        border-top: 1px solid var(--border-subtle);
+        margin-top: 2rem;
+      }
+
+      .footer p {
+        color: var(--text-muted);
         font-size: 0.8rem;
       }
 
       .footer a {
-        color: var(--primary-accent);
+        color: var(--text-secondary);
         text-decoration: none;
+        transition: color 0.2s;
       }
 
       .footer a:hover {
-        text-decoration: underline;
+        color: var(--accent);
       }
 
-      /* Theme Toggle Button */
-      .theme-toggle-btn {
-        background: var(--glass-bg);
-        border: 1px solid var(--glass-border);
-        color: var(--icon-color);
-        width: 44px;
-        height: 44px;
-        border-radius: 12px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        transition: all 0.2s ease;
+      .footer .disclaimer {
+        margin-top: 0.75rem;
+        font-size: 0.7rem;
+        opacity: 0.6;
       }
 
-      .theme-toggle-btn:hover {
-        background: var(--btn-secondary-hover);
-        transform: translateY(-2px);
+      /* File input hidden */
+      input[type="file"] {
+        display: none;
       }
 
       .theme-icon {
-        width: 20px;
-        height: 20px;
+        width: 18px;
+        height: 18px;
         stroke-width: 2px;
       }
 
-      /* Header Links (GitHub, Chrome Extension) */
-      .header-link {
-        background: var(--glass-bg);
-        border: 1px solid var(--glass-border);
-        color: var(--icon-color);
-        width: 44px;
-        height: 44px;
-        border-radius: 12px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-decoration: none;
-        transition: all 0.2s ease;
-      }
-
-      .header-link:hover {
-        background: var(--btn-secondary-hover);
-        transform: translateY(-2px);
-      }
-
-      /* Responsive */
+      /* ===== RESPONSIVE ===== */
       @media (max-width: 768px) {
-        .app-container {
-          padding: 1rem;
-          gap: 1rem;
+        .navbar {
+          padding: 0 1.25rem;
+          height: 56px;
         }
 
-        header {
-          flex-direction: column;
-          gap: 0.75rem;
-          text-align: center;
-        }
-
-        .controls-panel {
-          flex-direction: column;
-          align-items: stretch;
-          gap: 1rem;
-        }
-
-        .input-group {
-          min-width: unset;
-        }
-
-        .action-group {
-          flex-direction: column;
-          align-items: stretch;
-          gap: 0.75rem;
-        }
-
-        .separator {
+        .nav-links {
           display: none;
         }
 
-        .btn {
-          width: 100%;
-          height: 48px;
+        .hero {
+          padding-top: calc(56px + 1.5rem);
+          padding-bottom: 10rem;
+        }
+
+        .hero h1 {
+          font-size: 2rem;
+        }
+
+        .hero-desc {
+          font-size: 0.95rem;
+        }
+
+        .hero-actions {
+          flex-direction: column;
+          align-items: stretch;
+        }
+
+        .url-bar {
+          max-width: 100%;
+          min-width: unset;
+        }
+
+        .player-section {
+          padding: 0 1rem;
+          margin-top: -10rem;
+        }
+
+        .player-wrapper {
+          border-radius: 10px;
+        }
+
+        .features-section {
+          padding: 3rem 1.25rem 2rem;
+        }
+
+        .features-grid {
+          grid-template-columns: 1fr;
         }
 
         .brand {
-          font-size: 1.25rem;
+          font-size: 1.3rem;
         }
       }
 
       @media (max-width: 480px) {
-        .app-container {
-          padding: 0.75rem;
+        .hero {
+          padding-bottom: 10rem;
         }
 
-        .status-bar {
-          font-size: 0.75rem;
+        .hero h1 {
+          font-size: 1.75rem;
+        }
+
+        .btn-cta, .btn-ghost {
+          width: 100%;
+          justify-content: center;
         }
       }
     </style>
@@ -467,86 +732,145 @@
           <polyline points="17 8 12 3 7 8"></polyline>
           <line x1="12" y1="3" x2="12" y2="15"></line>
         </svg>
-        <p>Drop video file to play</p>
+        <p>Drop to Play</p>
+        <span>Release to start playing your video</span>
       </div>
     </div>
 
-    <div class="app-container">
-      <header>
+    <!-- ===== NAVBAR ===== -->
+    <nav class="navbar" id="navbar">
+      <div class="nav-left">
         <div class="brand">MoviPlayer</div>
-        <div class="header-actions">
-          <a href="https://chromewebstore.google.com/detail/movi-player/ckleeigcopjnpehkjokijokjegknfgej" target="_blank" rel="noopener" class="header-link" aria-label="Chrome Extension" title="Get Chrome Extension">
-            <svg width="20" height="20" viewBox="0 0 512 512" fill="currentColor"><path d="M188.8,255.93A67.2,67.2,0,1,0,256,188.75,67.38,67.38,0,0,0,188.8,255.93Z"/><path d="M476.75,217.79s0,0,0,.05a206.63,206.63,0,0,0-7-28.84h-.11a202.16,202.16,0,0,1,7.07,29h0a203.5,203.5,0,0,0-7.07-29H314.24c19.05,17,31.36,40.17,31.36,67.05a86.55,86.55,0,0,1-12.31,44.73L231,478.45a2.44,2.44,0,0,1,0,.27V479h0v-.26A224,224,0,0,0,256,480c6.84,0,13.61-.39,20.3-1a222.91,222.91,0,0,0,29.78-4.74C405.68,451.52,480,362.4,480,255.94A225.25,225.25,0,0,0,476.75,217.79Z"/><path d="M256,345.5c-33.6,0-61.6-17.91-77.29-44.79L76,123.05l-.14-.24A224,224,0,0,0,207.4,474.55l0-.05,77.69-134.6A84.13,84.13,0,0,1,256,345.5Z"/><path d="M91.29,104.57l77.35,133.25A89.19,89.19,0,0,1,256,166H461.17a246.51,246.51,0,0,0-25.78-43.94l.12.08A245.26,245.26,0,0,1,461.17,166h.17a245.91,245.91,0,0,0-25.66-44,2.63,2.63,0,0,1-.35-.26A223.93,223.93,0,0,0,91.14,104.34l.14.24Z"/></svg>
-          </a>
-          <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener" class="header-link" aria-label="GitHub" title="View on GitHub">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
-          </a>
-          <button id="theme-toggle" class="theme-toggle-btn" aria-label="Switch Theme"></button>
-        </div>
-      </header>
+        <ul class="nav-links">
+          <li><a href="#" class="active">Player</a></li>
+          <li><a href="https://github.com/mrujjwalg/movi-player#readme" target="_blank" rel="noopener">Docs</a></li>
+        </ul>
+      </div>
+      <div class="nav-right">
+        <a href="https://chromewebstore.google.com/detail/movi-player/ckleeigcopjnpehkjokijokjegknfgej" target="_blank" rel="noopener" class="nav-icon-link" aria-label="Chrome Extension" title="Get Chrome Extension">
+          <svg width="18" height="18" viewBox="0 0 512 512" fill="currentColor"><path d="M188.8,255.93A67.2,67.2,0,1,0,256,188.75,67.38,67.38,0,0,0,188.8,255.93Z"/><path d="M476.75,217.79s0,0,0,.05a206.63,206.63,0,0,0-7-28.84h-.11a202.16,202.16,0,0,1,7.07,29h0a203.5,203.5,0,0,0-7.07-29H314.24c19.05,17,31.36,40.17,31.36,67.05a86.55,86.55,0,0,1-12.31,44.73L231,478.45a2.44,2.44,0,0,1,0,.27V479h0v-.26A224,224,0,0,0,256,480c6.84,0,13.61-.39,20.3-1a222.91,222.91,0,0,0,29.78-4.74C405.68,451.52,480,362.4,480,255.94A225.25,225.25,0,0,0,476.75,217.79Z"/><path d="M256,345.5c-33.6,0-61.6-17.91-77.29-44.79L76,123.05l-.14-.24A224,224,0,0,0,207.4,474.55l0-.05,77.69-134.6A84.13,84.13,0,0,1,256,345.5Z"/><path d="M91.29,104.57l77.35,133.25A89.19,89.19,0,0,1,256,166H461.17a246.51,246.51,0,0,0-25.78-43.94l.12.08A245.26,245.26,0,0,1,461.17,166h.17a245.91,245.91,0,0,0-25.66-44,2.63,2.63,0,0,1-.35-.26A223.93,223.93,0,0,0,91.14,104.34l.14.24Z"/></svg>
+        </a>
+        <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener" class="nav-icon-link" aria-label="GitHub" title="View on GitHub">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        </a>
+        <button id="theme-toggle" class="nav-icon-btn" aria-label="Switch Theme"></button>
+      </div>
+    </nav>
 
-      <section class="controls-panel">
-        <div class="input-group">
-          <input
-            type="text"
-            id="url-input"
-            placeholder="Paste video URL here..."
-            aria-label="Video URL"
-          />
+    <!-- ===== HERO ===== -->
+    <section class="hero">
+      <div class="hero-bg"></div>
+      <div class="hero-content">
+        <h1>Play <span class="highlight">Any Video</span> in Your Browser</h1>
+        <div class="hero-formats">
+          <span class="format-chip">MKV</span>
+          <span class="format-chip">HEVC</span>
+          <span class="format-chip">AV1</span>
+          <span class="format-chip">HDR</span>
+          <span class="format-chip">VP9</span>
+          <span class="format-chip">AVI</span>
         </div>
-        <div class="action-group">
-          <button class="btn btn-primary" id="load-btn">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+        <p class="hero-desc">No installs. No servers. Just drop a file or paste a link.</p>
+        <div class="hero-actions">
+          <label class="btn-ghost">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
             </svg>
-            Play URL
-          </button>
-          <button class="btn btn-secondary" id="embed-btn" title="Copy embed code" style="display:none;">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            Open File
+            <input type="file" id="file-input" accept="video/*,.mkv,.ts,.avi,.flv,.wmv,.mov" />
+          </label>
+          <div class="url-bar">
+            <input
+              type="text"
+              id="url-input"
+              placeholder="Paste a video URL..."
+              aria-label="Video URL"
+            />
+            <button class="url-bar-btn" id="load-btn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+              </svg>
+              Play
+            </button>
+          </div>
+          <button class="btn-ghost btn-embed" id="embed-btn" title="Copy embed code">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="16 18 22 12 16 6"></polyline>
               <polyline points="8 6 2 12 8 18"></polyline>
             </svg>
             Embed
           </button>
-          <div class="separator"></div>
-          <label class="btn btn-secondary">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="3" x2="12" y2="15"></line>
-            </svg>
-            Upload File
-            <input type="file" id="file-input" accept="video/*,.mkv,.ts,.avi,.flv,.wmv,.mov" />
-          </label>
         </div>
-      </section>
+      </div>
+    </section>
 
-      <section class="player-stage">
-        <movi-player
-          id="movi-player"
-          renderer="canvas"
-          controls
-          objectfit="control"
-          gesturefs
-          thumb
-          fastseek
-          showtitle
-          ambientmode
-          ambientwrapper="ambient-wrapper"
-          resume
-          stablevolume
-        >
-          <div class="shimmer-wrapper">
-            <div class="shimmer"></div>
+    <!-- ===== PLAYER ===== -->
+    <section class="player-section">
+      <div class="player-wrapper">
+        <div class="player-stage">
+          <movi-player
+            id="movi-player"
+            renderer="canvas"
+            controls
+            objectfit="control"
+            gesturefs
+            thumb
+            fastseek
+            showtitle
+            ambientmode
+            ambientwrapper="ambient-wrapper"
+            resume
+            stablevolume
+          >
+            <div class="shimmer-wrapper">
+              <div class="shimmer"></div>
+            </div>
+          </movi-player>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== FEATURES ===== -->
+    <section class="features-section">
+      <h2>Why MoviPlayer?</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>
           </div>
-        </movi-player>
-      </section>
+          <h3>Universal Formats</h3>
+          <p>MKV, AVI, HEVC, AV1, VP9, HDR &mdash; plays what your browser normally can't.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <h3>100% Private</h3>
+          <p>Everything runs locally in your browser. No uploads, no servers, no tracking.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+          </div>
+          <h3>Subtitles & Multi-Audio</h3>
+          <p>Embedded subtitles, multiple audio tracks, and soft-sub support out of the box.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </div>
+          <h3>WebCodec Powered</h3>
+          <p>Hardware-accelerated decoding via WebCodecs API. Smooth playback even on large files.</p>
+        </div>
+      </div>
+    </section>
 
-    </div>
-
+    <!-- ===== FOOTER ===== -->
     <footer class="footer">
       <p>Powered by <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener">movi-player</a> &mdash; Play MKV, HEVC, AV1, HDR in the browser</p>
-      <p style="margin-top: 0.5rem; font-size: 0.7rem; opacity: 0.6;">All content is provided by users. We do not host or store any media. Users are solely responsible for the content they play. By using this service, you agree that you have the right to access the media you provide.</p>
+      <p class="disclaimer">All content is provided by users. We do not host or store any media. Users are solely responsible for the content they play. By using this service, you agree that you have the right to access the media you provide.</p>
     </footer>
 
     <!-- Movi Player from CDN -->
@@ -559,12 +883,18 @@
       const player = document.getElementById("movi-player");
       const dropOverlay = document.getElementById("drop-overlay");
       const embedBtn = document.getElementById("embed-btn");
+      const navbar = document.getElementById("navbar");
       let currentVideoUrl = "";
       const defaultTitle = document.title;
 
       const updateTitle = (name) => {
         document.title = name ? `${name} - MoviPlayer` : defaultTitle;
       };
+
+      // --- Navbar scroll effect ---
+      window.addEventListener("scroll", () => {
+        navbar.classList.toggle("scrolled", window.scrollY > 20);
+      });
 
       // --- URL Loading (via proxy for CORS bypass) ---
       const proxyUrl = (url) => `/proxy?url=${encodeURIComponent(url)}`;
@@ -578,7 +908,9 @@
         if (player) {
           currentVideoUrl = url;
           player.src = proxyUrl(url);
-          embedBtn.style.display = "inline-flex";
+          embedBtn.classList.add("visible");
+          // Scroll to player
+          document.querySelector(".player-section").scrollIntoView({ behavior: "smooth", block: "center" });
         }
       };
 
@@ -597,6 +929,7 @@
             player.src = file;
           }
           urlInput.value = "";
+          document.querySelector(".player-section").scrollIntoView({ behavior: "smooth", block: "center" });
         }
       });
 
@@ -632,6 +965,7 @@
             player.src = file;
           }
           urlInput.value = "";
+          document.querySelector(".player-section").scrollIntoView({ behavior: "smooth", block: "center" });
         }
       });
 
@@ -641,7 +975,7 @@
         const embedCode = `<iframe src="https://moviplayer.com/embed?url=${encodeURIComponent(currentVideoUrl)}&autoplay" width="800" height="450" frameborder="0" allowfullscreen allow="autoplay"></iframe>`;
         navigator.clipboard.writeText(embedCode).then(() => {
           const orig = embedBtn.innerHTML;
-          embedBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!`;
+          embedBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Copied!`;
           setTimeout(() => { embedBtn.innerHTML = orig; }, 2000);
         });
       });
@@ -658,7 +992,7 @@
         currentVideoUrl = videoUrl;
         urlInput.value = videoUrl;
         player.src = proxyUrl(videoUrl);
-        embedBtn.style.display = "inline-flex";
+        embedBtn.classList.add("visible");
       }
 
       // --- Theme Logic ---
