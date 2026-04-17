@@ -120,6 +120,7 @@ export class MoviElement extends HTMLElement {
   private _videoId: string = "";         // Video ID for encrypted playback
   private _resumeSaveInterval: number | null = null; // Interval to save position
   private _titleAutoLoaded: boolean = false; // Track if title was auto-loaded from metadata
+  private _resumeCheckedWithTitle: boolean = false; // Track if resume was re-checked after title load
   private _stripTitleAttr: boolean = false; // Guard for suppressing native title tooltip
   private _lastDuration: number = 0; // Track duration changes for title auto-load
   private posterElement!: HTMLImageElement; // Poster image element
@@ -9115,6 +9116,12 @@ export class MoviElement extends HTMLElement {
       if (state === "playing") {
         this.dispatchEvent(new Event("play"));
         this.showControls();
+        // Update Media Session metadata with clean title
+        if ("mediaSession" in navigator && this._title) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: this._title,
+          });
+        }
       } else if (state === "paused") {
         this.dispatchEvent(new Event("pause"));
         this.showControls();
@@ -10071,9 +10078,9 @@ export class MoviElement extends HTMLElement {
   set src(value: string | File | null) {
     // Reset title-related flags when src changes
     if (this._titleAutoLoaded) {
-      // If title was auto-loaded (not explicitly set by user), reset it
       this._title = null;
     }
+    this._resumeCheckedWithTitle = false;
     this._titleAutoLoaded = false;
     this._lastDuration = 0;
 
@@ -10829,12 +10836,9 @@ export class MoviElement extends HTMLElement {
    * Get a unique key for the current source (for localStorage)
    */
   private getResumeKey(): string {
-    const src = this._src;
-    if (src instanceof File) {
-      return `movi-resume:${src.name}:${src.size}`;
-    }
-    if (typeof src === "string") {
-      return `movi-resume:${src}`;
+    // Use the final clean title — consistent regardless of URL/proxy/CDN variations.
+    if (this._title) {
+      return `movi-resume:${this._title}`;
     }
     return "";
   }
@@ -11477,6 +11481,14 @@ export class MoviElement extends HTMLElement {
         this._titleAutoLoaded = true;
         if (this._title) {
           this.dispatchEvent(new CustomEvent("titlechange", { detail: { title: this._title } }));
+          // Re-check resume now that title is available (resume key depends on _title)
+          if (this._resume && this.player && !this._resumeCheckedWithTitle) {
+            this._resumeCheckedWithTitle = true;
+            const savedTime = this.getResumePosition();
+            if (savedTime > 2 && savedTime < this.duration - 5) {
+              this.showResumeDialog(savedTime);
+            }
+          }
         }
       }
     }
