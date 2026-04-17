@@ -22,6 +22,7 @@ export class MoviAudioDecoder {
   private onError: ((error: Error) => void) | null = null;
   private currentTrack: AudioTrack | null = null;
   private hasTriedSoftwareFallback: boolean = false; // Track if we've already tried software fallback
+  private hasDescription: boolean = false; // Whether decoder was configured with description (AudioSpecificConfig)
 
   constructor() {
     Logger.debug(TAG, "Created");
@@ -83,8 +84,10 @@ export class MoviAudioDecoder {
     };
 
     // Add description (extradata) if available
+    this.hasDescription = false;
     if (extradata && extradata.length > 0) {
       config.description = extradata;
+      this.hasDescription = true;
     }
 
     // Check if codec is supported
@@ -303,10 +306,17 @@ export class MoviAudioDecoder {
       return;
     }
 
+    // Strip ADTS header if present and decoder has description (AudioSpecificConfig).
+    // MPEG-TS containers deliver AAC as ADTS frames, but when WebCodecs has description
+    // it expects raw AAC frames without ADTS headers.
+    const chunkData = this.hasDescription
+      ? MoviAudioDecoder.stripAdtsHeader(data)
+      : data;
+
     const chunk = new EncodedAudioChunk({
       type: keyframe ? "key" : "delta",
       timestamp: timestamp * 1_000_000, // Convert to microseconds
-      data: data,
+      data: chunkData,
     });
 
     try {
@@ -453,5 +463,39 @@ export class MoviAudioDecoder {
       decoderType: this.useSoftware ? "Software (FFmpeg)" : "Hardware (WebCodecs)",
       queueSize: this.queueSize,
     };
+  }
+
+  /**
+   * Strip ADTS header from AAC packet data if present.
+   * ADTS header is 7 bytes (without CRC) or 9 bytes (with CRC).
+   * Sync word: 0xFFF (12 bits).
+   */
+  private static stripAdtsHeader(data: Uint8Array): Uint8Array {
+    if (data.length < 7) return data;
+
+    // Check ADTS sync word (0xFFF = 12 bits)
+    if (data[0] !== 0xff || (data[1] & 0xf0) !== 0xf0) {
+      return data; // Not ADTS, return as-is
+    }
+
+    // protection_absent flag (bit 0 of byte 1): 1 = no CRC, 0 = CRC present
+    const protectionAbsent = data[1] & 0x01;
+    const headerSize = protectionAbsent ? 7 : 9;
+
+    // ADTS frame length is in bits 30-42 (13 bits) spanning bytes 3-5
+    const frameLength =
+      ((data[3] & 0x03) << 11) | (data[4] << 3) | ((data[5] & 0xe0) >> 5);
+
+    // Sanity check: frame length should match data length (or be close)
+    if (frameLength > 0 && frameLength <= data.length && headerSize < data.length) {
+      return data.subarray(headerSize, frameLength);
+    }
+
+    // If frame length doesn't match, just strip the header
+    if (headerSize < data.length) {
+      return data.subarray(headerSize);
+    }
+
+    return data;
   }
 }

@@ -596,6 +596,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
             frameRate,
             videoTrack.rotation ?? 0,
             videoTrack.isHDR,
+            videoTrack.pixelFormat,
           );
         }
       } else {
@@ -1357,11 +1358,14 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this._decoderStuckSince = 0;
     }
 
-    // When video buffer is full but audio is starving, don't block demuxing —
+    // When video buffer/decoder queue is full but audio is starving, don't block demuxing —
     // set a flag so the demux loop skips video decode while keeping audio flowing.
+    // This is critical for high-FPS content (120fps) where the video decoder queue fills
+    // faster than hardware can process, which would otherwise starve the audio pipeline.
     const audioStarving = !this.disableAudio && audioBuffered < 0.5;
+    const videoDecoderFull = this.videoDecoder.queueSize > maxVideoQueue;
     const videoBufferFull = !skipVideoBackpressure && videoBuffered > maxVideoBuffered;
-    const skipVideoDecodeForAudio = videoBufferFull && audioStarving;
+    const skipVideoDecodeForAudio = (videoBufferFull || videoDecoderFull) && audioStarving;
 
     if (
       (!skipVideoBackpressure && !skipVideoDecodeForAudio && this.videoDecoder.queueSize > maxVideoQueue) ||
@@ -1393,11 +1397,16 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.demuxInFlight = true;
       this.demuxInFlightStartTime = performance.now();
 
-      // Determine burst size based on buffer levels and post-seek state
-      let burstSize = 20;
+      // Determine burst size based on buffer levels, post-seek state, and FPS.
+      // High-FPS content (120fps) has ~120 video packets per ~47 audio packets.
+      // A burst of 20 may only yield 1-2 audio packets (~42ms) which isn't enough
+      // to prevent audio buffer underruns between rAF callbacks (~16.7ms).
+      const fps = this.trackManager?.getActiveVideoTrack()?.frameRate ?? 30;
+      const fpsScale = Math.max(1, Math.ceil(fps / 30)); // 1x for 30fps, 2x for 60fps, 4x for 120fps
+      let burstSize = 20 * fpsScale;
 
       if (isPostSeek) {
-        burstSize = 5;
+        burstSize = 5 * fpsScale;
         Logger.debug(
           TAG,
           `Post-seek throttling: using burst size ${burstSize}`,
@@ -1416,10 +1425,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         const videoQueue = this.videoRenderer?.getQueueSize() ?? 0;
         const currentAudioBuffered = this.audioRenderer.getBufferedDuration();
 
-        // If buffers are low, increase burst size to fill faster
-        const bufferTarget = isSoftware ? 2.0 : 0.5;
+        // If buffers are low, increase burst size to fill faster.
+        // High-FPS needs more headroom because audio packets are sparse among video packets.
+        const bufferTarget = isSoftware ? 2.0 : fps >= 60 ? 1.0 : 0.5;
         if (videoQueue < 30 || currentAudioBuffered < bufferTarget) {
-          burstSize = isSoftware ? 80 : 40; // Read more aggressively when buffers are low
+          burstSize = (isSoftware ? 80 : 40) * fpsScale;
         }
       }
 
@@ -1429,6 +1439,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       const hasAudioForBurst = !!this.trackManager?.getActiveAudioTrack() && !this.disableAudio;
       const maxRendererQueue = 60; // ~2.4s at 25fps, enough buffer without overwhelming
 
+      // When decoder is skipping frames (waitingForKeyframe after error), limit burst
+      // to prevent the demuxer from racing through the entire file in one rAF.
+      // Without this, non-keyframes skip silently → no backpressure → early EOF.
+      if (this.videoDecoder.isWaitingForKeyframe) {
+        burstSize = Math.min(burstSize, 5);
+      }
+
       for (let i = 0; i < burstSize; i++) {
         // Video-only throttle: if renderer queue is full enough, stop submitting
         // and let the presentation loop consume frames before adding more.
@@ -1437,8 +1454,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         }
 
         // Check both video and audio queues after seek to prevent overwhelming decoders
+        // When audio is starving, don't let video queue fullness stop the burst — we need
+        // to keep reading packets to find audio data (video decode is skipped below).
         if (
-          this.videoDecoder.queueSize > maxVideoQueue ||
+          (!skipVideoDecodeForAudio && this.videoDecoder.queueSize > maxVideoQueue) ||
           (!this.disableAudio && this.audioDecoder.queueSize > maxAudioQueue)
         ) {
           // Queue getting full, stop to let decoders catch up
@@ -1452,8 +1471,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         }
 
         // Yield periodically to prevent blocking the main thread, especially in software mode
-        // This helps maintain audio responsiveness and UI interactivity
-        const yieldInterval = isPostSeek ? 2 : isSoftware ? 3 : 20;
+        // Scale with FPS — at 120fps, packets are small and fast, yielding too often starves audio
+        const yieldInterval = isPostSeek ? 2 * fpsScale : isSoftware ? 3 : 20 * fpsScale;
         if (i > 0 && i % yieldInterval === 0) {
           // Use MessageChannel for fast yielding (better than setTimeout)
           const channel = new MessageChannel();
@@ -1575,8 +1594,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
             }
           } else if (activeAudio && activeAudio.id === packet.streamIndex) {
             // Audio can be processed normally (doesn't need keyframes)
-            // Skip audio processing if disabled for debugging or muted
-            if (!this.disableAudio && !this.muted) {
+            // Skip audio processing if disabled for debugging
+            if (!this.disableAudio) {
               // IMPORTANT: Skip audio packets before the seek target time
               if (
                 this.seekTargetTime !== -1 &&
@@ -1586,11 +1605,17 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
               }
 
               // If waiting for video frame to ensure sync, buffer audio packets
+              // (even when muted — needed for clock alignment to start at 0s)
               if (
                 this.waitingForVideoSync &&
                 this.trackManager.getActiveVideoTrack()
               ) {
                 this.pendingAudioPackets.push(packet);
+                continue;
+              }
+
+              // Skip actual decode when muted — seek sync timing is already captured above
+              if (this.muted) {
                 continue;
               }
 

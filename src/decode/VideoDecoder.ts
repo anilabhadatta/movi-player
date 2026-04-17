@@ -41,10 +41,10 @@ export class MoviVideoDecoder {
   private forceSoftware: boolean = false;
   private requiresSoftware: boolean = false; // True for 4:2:2/4:4:4 content that HW can't decode
   private targetFps: number = 0;
-  private lastKeyframeChunk: { data: Uint8Array; timestamp: number } | null =
-    null;
   private isRecovering: boolean = false;
-  private consecutiveRecreations: number = 0;
+  private isAnnexBSource: boolean = false;
+  private _loggedConversion: number = 0;
+  private skippedWhileWaiting: number = 0;
 
   constructor(forceSoftware: boolean = false) {
     this.forceSoftware = forceSoftware;
@@ -70,6 +70,7 @@ export class MoviVideoDecoder {
     // Reset fallback state on new configuration
     this.useSoftware = false;
     this.requiresSoftware = false;
+    this.isAnnexBSource = false;
     this.openGopErrorCount = 0;
     this.hardwareRetryCount = 0;
     this.lastHardwareRetryTime = 0;
@@ -85,17 +86,6 @@ export class MoviVideoDecoder {
       return this.initSoftwareDecoder();
     }
 
-    // HEVC Rext 4:2:2/4:4:4 at 4K+: Chrome's hardware HEVC decoder handles
-    // 4:2:2 up to 1080p but not at 4K. VP9/AV1 handle 4:2:2 at 4K fine.
-    const pf = track.pixelFormat?.toLowerCase() ?? "";
-    const is422or444 = pf && !pf.includes("420") && (pf.includes("422") || pf.includes("444"));
-    const isHevc = track.codec.toLowerCase() === "hevc" || track.codec.toLowerCase() === "h265";
-    if (is422or444 && track.width > 1920 && isHevc) {
-      Logger.info(TAG, `${track.pixelFormat} at ${track.width}x${track.height} exceeds hardware 4:2:2 limit, using software decoder`);
-      this.useSoftware = true;
-      this.requiresSoftware = true;
-      return this.initSoftwareDecoder();
-    }
 
     if (!("VideoDecoder" in window)) {
       Logger.error(TAG, "WebCodecs VideoDecoder not supported");
@@ -125,6 +115,7 @@ export class MoviVideoDecoder {
       Logger.error(TAG, `Unsupported codec: ${track.codec}`);
       return false;
     }
+
 
     // Build config object
     const config: VideoDecoderConfig = {
@@ -161,11 +152,15 @@ export class MoviVideoDecoder {
           description[3] === 1);
 
       if (isAnnexB) {
+        // Annex B extradata means packets are also Annex B (MPEG-TS, raw streams).
+        // WebCodecs handles raw Annex B packets with inline parameter sets (VPS/SPS/PPS in keyframes).
+        // Providing hvcC/avcC description while feeding Annex B packets causes format mismatch → decode errors.
+        // Strip description and let decoder work from inline parameter sets — same as v0.1.5 behavior.
         Logger.warn(
           TAG,
-          "Extradata appears to be Annex B (NAL units). WebCodecs hvc1/avc1 requires MP4 box format (hvcC/avcC). Stripping extradata from config to avoid initialization error.",
+          "Extradata is Annex B — stripping description (decoder will use inline parameter sets from keyframes).",
         );
-        description = undefined; // Do not pass invalid description
+        description = undefined;
       }
     }
 
@@ -395,10 +390,19 @@ export class MoviVideoDecoder {
       if (this.onError) this.onError(e);
     });
 
+    // For high-FPS content (>60fps), cap software decode at 60fps to prevent
+    // main thread blocking that starves the audio pipeline.
+    // The presentation loop already targets 60fps — extra frames are wasted CPU.
+    const swTargetFps = this.targetFps > 0
+      ? this.targetFps
+      : (this.currentTrack.frameRate > 60 ? 60 : 0);
     const success = await this.swDecoder.configure(
       this.currentTrack,
-      this.targetFps,
+      swTargetFps,
     );
+    if (swTargetFps > 0 && this.currentTrack.frameRate > swTargetFps) {
+      Logger.info(TAG, `Software decoder FPS capped: ${this.currentTrack.frameRate}fps → ${swTargetFps}fps`);
+    }
     if (success) {
       this.isConfigured = true;
       this.waitingForKeyframe = true; // Wait for keyframe on new decoder
@@ -429,24 +433,7 @@ export class MoviVideoDecoder {
     if (this.useSoftware) return false;
     if (!this.lastConfig) return false;
 
-    this.consecutiveRecreations++;
-
-    // If hardware keeps crashing after recreation, it can't handle this content — switch to software
-    if (this.consecutiveRecreations > 3) {
-      Logger.warn(
-        TAG,
-        `Hardware decoder failed ${this.consecutiveRecreations} consecutive times. Switching to software decoder.`,
-      );
-      this.consecutiveRecreations = 0;
-      this.lastKeyframeChunk = null;
-      this.initSoftwareDecoder();
-      return false;
-    }
-
-    Logger.warn(
-      TAG,
-      `Recreating decoder to recover from error (attempt ${this.consecutiveRecreations}/3)`,
-    );
+    Logger.warn(TAG, "Recreating decoder to recover from error");
 
     // Close existing
     try {
@@ -458,7 +445,6 @@ export class MoviVideoDecoder {
       output: (frame) => {
         this.openGopErrorCount = 0;
         this.errorCount = 0;
-        this.consecutiveRecreations = 0; // Hardware is working — reset
         this.isResurrecting = false; // Success!
         if (this.onFrame) {
           this.onFrame(frame);
@@ -478,28 +464,10 @@ export class MoviVideoDecoder {
       this.decoder.configure(this.lastConfig);
       this.isConfigured = true;
 
-      // If we have a cached keyframe, re-feed it immediately to avoid
-      // dropping all frames until the next keyframe (which can be 2-6s away).
-      if (this.lastKeyframeChunk) {
-        Logger.info(
-          TAG,
-          `Re-feeding cached keyframe (ts=${this.lastKeyframeChunk.timestamp}) to new decoder for instant recovery`,
-        );
-        try {
-          const chunk = new EncodedVideoChunk({
-            type: "key",
-            timestamp: this.lastKeyframeChunk.timestamp * 1_000_000,
-            data: this.lastKeyframeChunk.data,
-          });
-          this.decoder.decode(chunk);
-          this.waitingForKeyframe = false;
-        } catch (e) {
-          Logger.warn(TAG, "Failed to re-feed cached keyframe, will wait for next one", e);
-          this.waitingForKeyframe = true;
-        }
-      } else {
-        this.waitingForKeyframe = true;
-      }
+      // Wait for next keyframe to resync — don't re-feed cached keyframe
+      // as subsequent non-keyframes may fail on certain content (DoVi P8 etc.)
+      // causing a recreate→re-feed→fail loop that triggers software fallback.
+      this.waitingForKeyframe = true;
       return true;
     } catch (error) {
       Logger.error(TAG, "Failed to recreate decoder", error);
@@ -586,15 +554,40 @@ export class MoviVideoDecoder {
     }
 
     // If we're waiting for keyframe after an error, skip non-keyframes
+    // but still count toward error count to maintain backpressure
     if (this.waitingForKeyframe && !keyframe) {
+      this.skippedWhileWaiting++;
       return;
+    }
+    if (keyframe && this.waitingForKeyframe) {
+      if (this.skippedWhileWaiting > 0) {
+        Logger.debug(TAG, `Skipped ${this.skippedWhileWaiting} non-keyframes while waiting`);
+        this.skippedWhileWaiting = 0;
+      }
+    }
+
+    // Pass packet data as-is — Chrome's WebCodecs handles both Annex B and
+    // length-prefixed formats natively. Converting Annex B → length-prefixed
+    // was causing decode errors on DoVi P8 non-keyframes.
+    const chunkData = data;
+
+    // Diagnostic for Annex B conversion — log first keyframe + first non-keyframe
+    if (this.isAnnexBSource && (this._loggedConversion < 2)) {
+      if ((keyframe && this._loggedConversion === 0) || (!keyframe && this._loggedConversion === 1)) {
+        this._loggedConversion++;
+        const nalUnits = MoviVideoDecoder.splitAnnexBNalUnits(data);
+        const nalTypes = nalUnits.map(n => (n[0] >> 1) & 0x3f);
+        const filtered = nalTypes.filter(t => t < 62);
+        // Check first bytes of packet to verify Annex B format
+        const head = Array.from(data.subarray(0, 8)).map(b => b.toString(16).padStart(2, '0')).join(' ');
+        Logger.info(TAG, `Annex B ${keyframe ? 'KEY' : 'DELTA'}: ${data.length}B → ${chunkData.length}B, NALs: [${nalTypes}], kept: [${filtered}], head: ${head}`);
+      }
     }
 
     // Got a keyframe, reset recovery state
     if (keyframe) {
       this.waitingForKeyframe = false;
-      // Cache keyframe for instant recovery after decoder recreation
-      this.lastKeyframeChunk = { data: new Uint8Array(data), timestamp };
+      // Cache converted keyframe for instant recovery after decoder recreation
     }
 
     // Check if we've exceeded max errors
@@ -605,7 +598,7 @@ export class MoviVideoDecoder {
     const chunk = new EncodedVideoChunk({
       type: keyframe ? "key" : "delta",
       timestamp: timestamp * 1_000_000, // Convert to microseconds
-      data: data,
+      data: chunkData,
     });
 
     try {
@@ -785,22 +778,7 @@ export class MoviVideoDecoder {
         this.decoder.reset();
         this.decoder.configure(this.lastConfig!);
 
-        // Re-feed cached keyframe to resume instantly instead of waiting 2-6s for next one
-        if (this.lastKeyframeChunk) {
-          try {
-            const chunk = new EncodedVideoChunk({
-              type: "key",
-              timestamp: this.lastKeyframeChunk.timestamp * 1_000_000,
-              data: this.lastKeyframeChunk.data,
-            });
-            this.decoder.decode(chunk);
-            this.waitingForKeyframe = false;
-          } catch (e) {
-            this.waitingForKeyframe = true;
-          }
-        } else {
-          this.waitingForKeyframe = true;
-        }
+        this.waitingForKeyframe = true;
         return;
       } catch (e) {
         Logger.warn(TAG, "Fast reset failed, trying full recreation");
@@ -961,9 +939,7 @@ export class MoviVideoDecoder {
    */
   async flush(): Promise<void> {
     this.openGopErrorCount = 0;
-    this.consecutiveRecreations = 0;
     this.pendingChunks = []; // Clear pending inputs
-    this.lastKeyframeChunk = null; // Invalidate cached keyframe — new position after seek
     if (this.swDecoder) {
       return this.swDecoder.flush();
     }
@@ -1013,8 +989,6 @@ export class MoviVideoDecoder {
     }
     this.pendingFrames = [];
     this.pendingChunks = [];
-    this.lastKeyframeChunk = null;
-    this.consecutiveRecreations = 0;
   }
 
   /**
@@ -1140,6 +1114,10 @@ export class MoviVideoDecoder {
     return this.useSoftware;
   }
 
+  get isWaitingForKeyframe(): boolean {
+    return this.waitingForKeyframe;
+  }
+
   /**
    * Get decoder stats for nerd stats overlay
    */
@@ -1149,5 +1127,294 @@ export class MoviVideoDecoder {
       queueSize: this.queueSize,
       errorCount: this.errorCount,
     };
+  }
+
+  // ─── Annex B ↔ MP4 box format conversion utilities ──────────────
+
+  /**
+   * Split Annex B byte stream into individual NAL units.
+   * Handles both 3-byte (00 00 01) and 4-byte (00 00 00 01) start codes.
+   */
+  private static splitAnnexBNalUnits(data: Uint8Array): Uint8Array[] {
+    const nalUnits: Uint8Array[] = [];
+    let i = 0;
+    const len = data.length;
+
+    while (i < len) {
+      // Find start code
+      let startCodeLen = 0;
+      if (i + 3 <= len && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1) {
+        startCodeLen = 3;
+      } else if (i + 4 <= len && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) {
+        startCodeLen = 4;
+      } else {
+        i++;
+        continue;
+      }
+
+      const nalStart = i + startCodeLen;
+
+      // Find next start code or end
+      let nalEnd = len;
+      for (let j = nalStart + 1; j < len - 2; j++) {
+        if (data[j] === 0 && data[j + 1] === 0 &&
+            (data[j + 2] === 1 || (j + 3 < len && data[j + 2] === 0 && data[j + 3] === 1))) {
+          nalEnd = j;
+          break;
+        }
+      }
+
+      if (nalEnd > nalStart) {
+        nalUnits.push(data.subarray(nalStart, nalEnd));
+      }
+      i = nalEnd;
+    }
+
+    return nalUnits;
+  }
+
+  /**
+   * Remove Annex B emulation prevention bytes (00 00 03 → 00 00).
+   * Required for parsing NAL unit content (profile_tier_level etc.)
+   */
+  private static removeEpb(data: Uint8Array): Uint8Array {
+    const output: number[] = [];
+    let i = 0;
+    while (i < data.length) {
+      if (i + 2 < data.length && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 3) {
+        output.push(0, 0);
+        i += 3; // Skip the 03 prevention byte
+      } else {
+        output.push(data[i]);
+        i++;
+      }
+    }
+    return new Uint8Array(output);
+  }
+
+  /**
+   * Convert Annex B extradata to hvcC (HEVC Decoder Configuration Record).
+   * Extracts VPS, SPS, PPS NAL units and packages them into ISO 14496-15 format.
+   * Uses track metadata for reliable profile/tier/level (Annex B NALs have EPB that corrupt offsets).
+   */
+  static annexBToHvcC(annexB: Uint8Array, track?: { profile?: number; level?: number }): Uint8Array | null {
+    const nalUnits = this.splitAnnexBNalUnits(annexB);
+    if (nalUnits.length === 0) return null;
+
+    // Classify NAL units by type
+    const vpsUnits: Uint8Array[] = [];
+    const spsUnits: Uint8Array[] = [];
+    const ppsUnits: Uint8Array[] = [];
+
+    for (const nal of nalUnits) {
+      if (nal.length < 2) continue;
+      const nalType = (nal[0] >> 1) & 0x3f;
+      if (nalType === 32) vpsUnits.push(nal);       // VPS
+      else if (nalType === 33) spsUnits.push(nal);   // SPS
+      else if (nalType === 34) ppsUnits.push(nal);   // PPS
+    }
+
+    if (spsUnits.length === 0) {
+      Logger.warn(TAG, "No SPS found in Annex B extradata");
+      return null;
+    }
+
+    // Parse profile_tier_level from VPS or SPS (with EPB removal for correct offsets)
+    const ptlNalRaw = vpsUnits[0] || spsUnits[0];
+    const ptlNal = this.removeEpb(ptlNalRaw);
+    const ptlNalType = (ptlNal[0] >> 1) & 0x3f;
+    const ptlOffset = ptlNalType === 32 ? 6 : 3; // VPS: 6, SPS: 3
+
+    let generalProfileIdc = track?.profile ?? 2; // Default Main 10
+    let generalTierFlag = 0;
+    let profileCompatFlags = new Uint8Array([0x20, 0x00, 0x00, 0x00]);
+    let constraintBytes = new Uint8Array(6);
+    let generalLevelIdc = track?.level ?? 153; // Default Level 5.1
+
+    if (ptlNal.length >= ptlOffset + 12) {
+      const profileByte = ptlNal[ptlOffset];
+      generalProfileIdc = profileByte & 0x1f;
+      generalTierFlag = (profileByte >> 5) & 1;
+      profileCompatFlags = ptlNal.slice(ptlOffset + 1, ptlOffset + 5);
+      constraintBytes = ptlNal.slice(ptlOffset + 5, ptlOffset + 11);
+      generalLevelIdc = ptlNal[ptlOffset + 11];
+      Logger.debug(TAG, `hvcC from NAL: profile=${generalProfileIdc}, tier=${generalTierFlag}, level=${generalLevelIdc}`);
+    } else if (track?.profile != null || track?.level != null) {
+      Logger.debug(TAG, `hvcC from track metadata: profile=${generalProfileIdc}, level=${generalLevelIdc}`);
+    }
+
+    // Build hvcC record
+    const arrays: Array<{ type: number; nalus: Uint8Array[] }> = [];
+    if (vpsUnits.length > 0) arrays.push({ type: 32, nalus: vpsUnits });
+    if (spsUnits.length > 0) arrays.push({ type: 33, nalus: spsUnits });
+    if (ppsUnits.length > 0) arrays.push({ type: 34, nalus: ppsUnits });
+
+    // Calculate total size
+    let totalSize = 23; // Fixed header size
+    for (const arr of arrays) {
+      totalSize += 3; // array header
+      for (const nalu of arr.nalus) {
+        totalSize += 2 + nalu.length;
+      }
+    }
+
+    const hvcC = new Uint8Array(totalSize);
+    const view = new DataView(hvcC.buffer);
+    let pos = 0;
+
+    // configurationVersion = 1
+    hvcC[pos++] = 1;
+    // general_profile_space(2) | general_tier_flag(1) | general_profile_idc(5)
+    hvcC[pos++] = (generalTierFlag << 5) | (generalProfileIdc & 0x1f);
+    // general_profile_compatibility_flags (32 bits)
+    hvcC[pos++] = profileCompatFlags[0];
+    hvcC[pos++] = profileCompatFlags[1];
+    hvcC[pos++] = profileCompatFlags[2];
+    hvcC[pos++] = profileCompatFlags[3];
+    // general_constraint_indicator_flags (48 bits)
+    for (let i = 0; i < 6; i++) hvcC[pos++] = constraintBytes[i];
+    // general_level_idc
+    hvcC[pos++] = generalLevelIdc;
+    // min_spatial_segmentation_idc = 0 with reserved bits
+    view.setUint16(pos, 0xf000);
+    pos += 2;
+    // parallelismType = 0 with reserved bits
+    hvcC[pos++] = 0xfc;
+    // chromaFormat = 1 (4:2:0) with reserved bits
+    hvcC[pos++] = 0xfd;
+    // bitDepthLuma = 10 (minus 8 = 2) with reserved bits
+    hvcC[pos++] = 0xfa;
+    // bitDepthChroma = 10 (minus 8 = 2) with reserved bits
+    hvcC[pos++] = 0xfa;
+    // avgFrameRate = 0 (unknown)
+    view.setUint16(pos, 0);
+    pos += 2;
+    // constantFrameRate(2)=0 | numTemporalLayers(3)=1 | temporalIdNested(1)=1 | lengthSizeMinusOne(2)=3
+    hvcC[pos++] = 0x0f;
+    // numOfArrays
+    hvcC[pos++] = arrays.length;
+
+    // NAL unit arrays (store original NAL data with EPBs intact — hvcC stores raw NAL bytes)
+    for (const arr of arrays) {
+      hvcC[pos++] = 0x80 | (arr.type & 0x3f);
+      view.setUint16(pos, arr.nalus.length);
+      pos += 2;
+      for (const nalu of arr.nalus) {
+        view.setUint16(pos, nalu.length);
+        pos += 2;
+        hvcC.set(nalu, pos);
+        pos += nalu.length;
+      }
+    }
+
+    return hvcC;
+  }
+
+  /**
+   * Convert Annex B extradata to avcC (AVC Decoder Configuration Record).
+   * Extracts SPS and PPS NAL units.
+   */
+  static annexBToAvcC(annexB: Uint8Array): Uint8Array | null {
+    const nalUnits = this.splitAnnexBNalUnits(annexB);
+    if (nalUnits.length === 0) return null;
+
+    const spsUnits: Uint8Array[] = [];
+    const ppsUnits: Uint8Array[] = [];
+
+    for (const nal of nalUnits) {
+      if (nal.length < 1) continue;
+      const nalType = nal[0] & 0x1f;
+      if (nalType === 7) spsUnits.push(nal);  // SPS
+      else if (nalType === 8) ppsUnits.push(nal);  // PPS
+    }
+
+    if (spsUnits.length === 0) {
+      Logger.warn(TAG, "No SPS found in Annex B extradata for AVC");
+      return null;
+    }
+
+    const sps = spsUnits[0];
+    // avcC header: 6 bytes + SPS entries + PPS entries
+    let totalSize = 6;
+    totalSize += 1; // numSPS
+    for (const s of spsUnits) totalSize += 2 + s.length;
+    totalSize += 1; // numPPS
+    for (const p of ppsUnits) totalSize += 2 + p.length;
+
+    const avcC = new Uint8Array(totalSize);
+    const view = new DataView(avcC.buffer);
+    let pos = 0;
+
+    avcC[pos++] = 1; // configurationVersion
+    avcC[pos++] = sps[1]; // AVCProfileIndication
+    avcC[pos++] = sps[2]; // profile_compatibility
+    avcC[pos++] = sps[3]; // AVCLevelIndication
+    avcC[pos++] = 0xff;   // lengthSizeMinusOne = 3 (4 bytes), with 6 reserved 1-bits
+    avcC[pos++] = 0xe0 | spsUnits.length; // numSPS with 3 reserved 1-bits
+
+    for (const s of spsUnits) {
+      view.setUint16(pos, s.length);
+      pos += 2;
+      avcC.set(s, pos);
+      pos += s.length;
+    }
+
+    avcC[pos++] = ppsUnits.length;
+    for (const p of ppsUnits) {
+      view.setUint16(pos, p.length);
+      pos += 2;
+      avcC.set(p, pos);
+      pos += p.length;
+    }
+
+    return avcC;
+  }
+
+  /**
+   * Check if an HEVC NAL unit type should be stripped before feeding to WebCodecs.
+   * Dolby Vision RPU (type 62), UNSPEC63 (type 63), and other non-standard
+   * NAL types cause hardware decoder errors.
+   */
+  private static isUnsupportedHevcNalType(nalData: Uint8Array): boolean {
+    if (nalData.length < 2) return false;
+    const nalType = (nalData[0] >> 1) & 0x3f;
+    // HEVC NAL types 62-63 are UNSPEC62/63, used by Dolby Vision for RPU data.
+    // NAL types 48-61 are also unspecified but less common.
+    // WebCodecs hardware decoders choke on these.
+    return nalType >= 62;
+  }
+
+  /**
+   * Convert Annex B packet data to 4-byte length-prefixed format.
+   * Replaces start codes (00 00 01 or 00 00 00 01) with 4-byte NAL unit lengths.
+   * Strips Dolby Vision RPU and other unsupported NAL unit types.
+   */
+  static annexBToLengthPrefixed(data: Uint8Array): Uint8Array {
+    const nalUnits = this.splitAnnexBNalUnits(data);
+    if (nalUnits.length === 0) return data; // Fallback: return as-is
+
+    // Filter out unsupported NAL types (DoVi RPU etc.) and calculate total size
+    const filtered: Uint8Array[] = [];
+    let totalSize = 0;
+    for (const nal of nalUnits) {
+      if (this.isUnsupportedHevcNalType(nal)) continue;
+      filtered.push(nal);
+      totalSize += 4 + nal.length;
+    }
+
+    if (filtered.length === 0) return data;
+
+    const output = new Uint8Array(totalSize);
+    const view = new DataView(output.buffer);
+    let pos = 0;
+
+    for (const nal of filtered) {
+      view.setUint32(pos, nal.length);
+      pos += 4;
+      output.set(nal, pos);
+      pos += nal.length;
+    }
+
+    return output;
   }
 }

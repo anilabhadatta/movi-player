@@ -27,6 +27,8 @@ export class CanvasRenderer {
 
   private hdrEnabled: boolean = true;
   private isHDRSource: boolean = false;
+  private isHighBitDepth: boolean = false; // 12-bit+ content needs RGBA16F texture
+  private _loggedFrameFormat: boolean = false;
 
   // Presentation loop
   private rafId: number | null = null;
@@ -154,7 +156,14 @@ export class CanvasRenderer {
     frameRate?: number,
     rotation?: number,
     isHDR?: boolean,
+    pixelFormat?: string,
   ): void {
+    // Detect high bit-depth (12-bit+) content that needs RGBA16F textures
+    const pf = (pixelFormat || "").toLowerCase();
+    this.isHighBitDepth = pf.includes("12") || pf.includes("14") || pf.includes("16");
+    if (this.isHighBitDepth) {
+      Logger.info(TAG, `High bit-depth content detected (${pixelFormat}), using RGBA16F texture`);
+    }
     // Note: We don't overwrite this.width/height if they've already been set by resize()
     if (this.width === 0 || this.height === 0) {
       this.width = width;
@@ -1348,15 +1357,51 @@ export class CanvasRenderer {
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, this.texture);
 
-      // Upload frame
-      gl.texImage2D(
-        gl.TEXTURE_2D,
-        0,
-        gl.RGBA,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        frame,
-      );
+      // Log frame format once to diagnose high bit-depth rendering issues
+      if (this.isHighBitDepth && !this._loggedFrameFormat) {
+        this._loggedFrameFormat = true;
+        Logger.info(TAG, `VideoFrame format: ${frame.format}, ${frame.codedWidth}x${frame.codedHeight}, colorSpace: ${JSON.stringify(frame.colorSpace)}`);
+
+        // Diagnostic: check if VideoFrame actually has pixel data by drawing to 2D canvas
+        try {
+          const testCanvas = new OffscreenCanvas(16, 16);
+          const ctx2d = testCanvas.getContext("2d")!;
+          ctx2d.drawImage(frame, 0, 0, 16, 16);
+          const pixels = ctx2d.getImageData(0, 0, 4, 4).data;
+          const nonZero = pixels.some((v: number) => v > 0);
+          Logger.info(TAG, `VideoFrame pixel test: ${nonZero ? "HAS DATA" : "ALL BLACK"} (sample: R=${pixels[0]} G=${pixels[1]} B=${pixels[2]} A=${pixels[3]})`);
+        } catch (e) {
+          Logger.warn(TAG, `VideoFrame pixel test failed:`, e);
+        }
+      }
+
+      // Upload frame — try RGBA16F for high bit-depth, fallback to RGBA8
+      try {
+        if (this.isHighBitDepth) {
+          gl.texImage2D(
+            gl.TEXTURE_2D,
+            0,
+            gl.RGBA16F,
+            gl.RGBA,
+            gl.HALF_FLOAT,
+            frame,
+          );
+          // Check for GL error — some VideoFrame formats don't work with RGBA16F
+          const err = gl.getError();
+          if (err !== gl.NO_ERROR) {
+            Logger.warn(TAG, `RGBA16F texImage2D failed (GL error ${err}), falling back to RGBA8`);
+            this.isHighBitDepth = false; // Disable for future frames
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+          }
+        } else {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+        }
+      } catch (texError) {
+        // If RGBA16F throws, fall back to standard
+        Logger.warn(TAG, `texImage2D failed, retrying with RGBA8:`, texError);
+        this.isHighBitDepth = false;
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, frame);
+      }
 
       gl.useProgram(this.program);
       gl.bindVertexArray(this.vao);

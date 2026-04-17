@@ -6,6 +6,7 @@
  */
 
 import { CodecParser } from "../decode/CodecParser";
+import { MoviVideoDecoder } from "../decode/VideoDecoder";
 import { Logger } from "./Logger";
 
 const TAG = "ThumbnailRenderer";
@@ -33,6 +34,7 @@ export class ThumbnailRenderer {
 
   private hasNativeHDRSupport: boolean = false;
   private isHDRSource: boolean = false;
+  private isAnnexBSource: boolean = false;
   private hdrEnabled: boolean = true;
   private lastColorPrimaries?: string;
   private lastColorTransfer?: string;
@@ -523,8 +525,8 @@ export class ThumbnailRenderer {
         };
 
         // For VP9, WebCodecs often works best WITHOUT description if we have the full codec string (e.g. vp09.02...)
-        // For H.264/H.265, description (avcC/hvcC) IS important, unless it's Annex B (start codes).
-        // If Annex B, we assume headers are in the keyframe packets.
+        // For H.264/H.265, description (avcC/hvcC) IS important.
+        // Annex B extradata (from .ts containers) is converted to proper box format.
         const isAnnexB =
           extradata &&
           ((extradata.length > 3 &&
@@ -537,17 +539,37 @@ export class ThumbnailRenderer {
               extradata[2] === 0 &&
               extradata[3] === 1));
 
+        let description: Uint8Array | undefined = extradata ?? undefined;
+        if (isAnnexB && extradata) {
+          const isHevc = codecString.startsWith("hvc1") || codecString.startsWith("hev1");
+          const isAvc = codecString.startsWith("avc1") || codecString.startsWith("avc3");
+          if (isHevc) {
+            description = MoviVideoDecoder.annexBToHvcC(extradata) ?? undefined;
+            if (description) {
+              this.isAnnexBSource = true;
+              Logger.debug(TAG, `Converted Annex B to hvcC for thumbnails (${description.length}B)`);
+            }
+          } else if (isAvc) {
+            description = MoviVideoDecoder.annexBToAvcC(extradata) ?? undefined;
+            if (description) {
+              this.isAnnexBSource = true;
+              Logger.debug(TAG, `Converted Annex B to avcC for thumbnails (${description.length}B)`);
+            }
+          } else {
+            description = undefined;
+          }
+        }
+
         if (
-          extradata &&
+          description &&
           !codecString.startsWith("vp09") &&
-          !codecString.startsWith("vp8") &&
-          !isAnnexB
+          !codecString.startsWith("vp8")
         ) {
-          config.description = extradata;
-        } else {
+          config.description = description;
+        } else if (!description && !isAnnexB) {
           Logger.debug(
             TAG,
-            "Skipping description (extradata) for VPx codec, Annex B, or missing data",
+            "Skipping description (extradata) for VPx codec or missing data",
           );
         }
 
@@ -648,11 +670,17 @@ export class ThumbnailRenderer {
       this.pendingDecodeResolve = resolve;
 
       try {
+        // Convert Annex B packet data to length-prefixed for WebCodecs
+        let data = packetData;
+        if (this.isAnnexBSource) {
+          data = MoviVideoDecoder.annexBToLengthPrefixed(packetData);
+        }
+
         const chunk = new EncodedVideoChunk({
           type: "key", // Thumbnails are always keyframes in this context
           timestamp: pts * 1_000_000,
           duration: duration,
-          data: packetData,
+          data: data,
         });
 
         decoder.decode(chunk);
