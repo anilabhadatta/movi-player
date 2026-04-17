@@ -1264,14 +1264,22 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         ? 40
         : 20;
 
-    // Buffer targets (in seconds)
-    const maxAudioBuffered = isSoftware ? 5.0 : isPostSeek ? 1.5 : 2.0;
+    // Buffer targets — scale up at slow speeds so both audio and video buffers
+    // hold the same wall-clock duration as at 1x. Without this, at 0.5x the 100-frame
+    // video buffer lasts 3.3s wall-time while 2s audio buffer starves after 2s → stutter.
+    const rate = Math.max(0.25, this.clock.getPlaybackRate());
+    const rateScale = rate < 1.0 ? 1.0 / rate : 1.0; // e.g. 2x at 0.5x, 4x at 0.25x
+    const maxAudioBuffered = (isSoftware ? 5.0 : isPostSeek ? 1.5 : 2.0) * rateScale;
     // Renderer queue limits (in frames)
-    const maxVideoBuffered = isSoftware ? 60 : isPostSeek ? 20 : 100;
+    const maxVideoBuffered = Math.round((isSoftware ? 60 : isPostSeek ? 20 : 100) * rateScale);
 
-    // In background (not PiP), ignore video backpressure since video decode is skipped.
-    // Only check audio backpressure to keep audio flowing smoothly.
-    const skipVideoBackpressure = this.isBackgrounded && !this.isPiPActive;
+    // Skip video backpressure when video isn't being consumed:
+    // - Background (not PiP): video decode is skipped entirely
+    // - Buffering: presentation loop stopped, frames accumulate but aren't consumed
+    //   (must keep demuxing so audio data flows and isRebufferingForRateChange clears)
+    const skipVideoBackpressure =
+      (this.isBackgrounded && !this.isPiPActive) ||
+      currentState === "buffering";
 
     if (
       (!skipVideoBackpressure && this.videoDecoder.queueSize > maxVideoQueue) ||
@@ -1427,6 +1435,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
             if (this.isBackgrounded && !this.isPiPActive) {
               continue;
             }
+
 
             // After seek, skip non-keyframe video packets until we find a keyframe
             // This prevents decoder errors (decoder needs keyframe after flush)

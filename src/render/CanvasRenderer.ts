@@ -1959,6 +1959,16 @@ export class CanvasRenderer {
   }
 
   /**
+   * Drop the oldest frame from the queue to make room for new ones.
+   * Used at slow playback speeds where frames accumulate faster than consumed.
+   */
+  dropOldestFrame(): void {
+    if (this.frameQueue.length > 0) {
+      this.frameQueue.shift()?.close();
+    }
+  }
+
+  /**
    * Get video rendering stats for nerd stats overlay
    */
   getStats(): { framesPresented: number; frameQueueSize: number; colorSpace: string; resolution: string; syncedToAudio: boolean } {

@@ -178,9 +178,14 @@ export class AudioRenderer {
       }
 
       // Apply pitch preservation if enabled and playback rate is not 1.0
-      let processedBuffer = audioBuffer;
+      let processedBuffer: AudioBuffer | null = audioBuffer;
       if (this.preservePitch && Math.abs(this._playbackRate - 1.0) > 0.01) {
         processedBuffer = this.processSoundTouch(audioBuffer, this._playbackRate);
+        // SoundTouch may buffer internally — skip scheduling until output is ready
+        if (!processedBuffer || processedBuffer.length <= 1) {
+          audioData.close();
+          return;
+        }
       }
 
       // Create buffer source
@@ -258,7 +263,13 @@ export class AudioRenderer {
       }
 
       this.activeSources.push(source);
-      this.scheduledTime = when + audioBuffer.duration / this._playbackRate;
+      // Use actual processedBuffer duration when SoundTouch is active —
+      // SoundTouch may output fewer samples than expected due to internal buffering,
+      // so using the original duration would create gaps and play audio at ~1x speed.
+      const useSoundTouch = this.preservePitch && Math.abs(this._playbackRate - 1.0) > 0.01;
+      this.scheduledTime = when + (useSoundTouch
+        ? processedBuffer.duration
+        : audioBuffer.duration / this._playbackRate);
       this.currentMediaTime = audioTime;
       this.scheduledCount++;
 
@@ -429,8 +440,9 @@ export class AudioRenderer {
     const framesToExtract = Math.min(expectedFrames, availableFrames);
 
     if (framesToExtract === 0) {
-      // Return a silent buffer if no output available
-      return this.audioContext.createBuffer(numChannels, 1, sampleRate);
+      // SoundTouch is still accumulating internally — signal caller to skip scheduling.
+      // Input is buffered inside SoundTouch and will be emitted on subsequent calls.
+      return null as unknown as AudioBuffer;
     }
 
     // Extract processed samples
