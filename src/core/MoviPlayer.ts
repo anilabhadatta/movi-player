@@ -889,6 +889,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.clock.seek(this.startTime);
       this.pendingAudioPackets = [];
       this.eofReached = false;
+      // Reset presentation timing — poster seek set presentationStartTime which
+      // becomes stale if user waits before clicking play. Without this, elapsed
+      // wall-clock time causes getCurrentPlaybackTime() to return a huge value,
+      // dropping all freshly decoded frames as "too far behind".
+      if (this.videoRenderer) {
+        this.videoRenderer.clearQueue();
+      }
     } else {
       // Resume from pause — just resume AudioContext
       if (!this.disableAudio) {
