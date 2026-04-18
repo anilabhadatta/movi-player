@@ -1,7 +1,7 @@
 import HTML_RAW from "./index.html";
 
-const BUILD_VERSION = "__BUILD_VERSION__";
-const HTML = HTML_RAW.replace(/__BUILD_VERSION__/g, BUILD_VERSION);
+const BUILD_VERSION = "1776507281";
+const HTML = HTML_RAW.replace(/1776507281/g, BUILD_VERSION);
 
 const SECURITY_HEADERS = {
   "Cross-Origin-Opener-Policy": "same-origin",
@@ -27,6 +27,11 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Redirect www to non-www
+    if (url.hostname === "www.moviplayer.com") {
+      return Response.redirect(`https://moviplayer.com${path}${url.search}`, 301);
+    }
 
     // CORS preflight
     if (request.method === "OPTIONS") {
@@ -58,6 +63,12 @@ export default {
     // --- Video proxy ---
     if (path === "/proxy") {
       return handleProxy(request, url);
+    }
+
+    // --- Serve static assets from R2 (favicons, etc.) ---
+    if (path.startsWith("/favicon") || path === "/apple-touch-icon.png" || path === "/og-image.png") {
+      const key = path.slice(1);
+      return handleStaticAsset(env, key);
     }
 
     return new Response("Not Found", { status: 404 });
@@ -105,6 +116,9 @@ const MIME_TYPES = {
   wasm: "application/wasm",
   json: "application/json",
   map: "application/json",
+  svg: "image/svg+xml",
+  png: "image/png",
+  ico: "image/x-icon",
 };
 
 async function handleR2(env, key, request) {
@@ -130,6 +144,25 @@ async function handleR2(env, key, request) {
   }
 
   return new Response(object.body, { headers });
+}
+
+async function handleStaticAsset(env, key) {
+  if (!env.ASSETS) {
+    return new Response("Not Found", { status: 404 });
+  }
+
+  const object = await env.ASSETS.get(key);
+  if (!object) {
+    return new Response("Not Found", { status: 404 });
+  }
+
+  const ext = key.split(".").pop();
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": MIME_TYPES[ext] || "application/octet-stream",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
 }
 
 async function handleProxy(request, url) {

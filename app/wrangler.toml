@@ -3,7 +3,8 @@ main = "worker.js"
 compatibility_date = "2024-12-01"
 
 routes = [
-  { pattern = "moviplayer.com", custom_domain = true }
+  { pattern = "moviplayer.com", custom_domain = true },
+  { pattern = "www.moviplayer.com", custom_domain = true }
 ]
 
 [[r2_buckets]]

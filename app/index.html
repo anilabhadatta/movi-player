@@ -3,17 +3,78 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MoviPlayer - Play Any Video in Your Browser</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'%3E%3Cstop offset='0%25' stop-color='%236c5dd3'/%3E%3Cstop offset='100%25' stop-color='%234a3bba'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='50' cy='50' r='45' fill='url(%23g)'/%3E%3Cpolygon points='40,30 40,70 75,50' fill='white'/%3E%3C/svg%3E" />
-    <meta name="description" content="Play MKV, HEVC, AV1, HDR videos directly in your browser. No install, no server. Just drop your file or paste a URL." />
+    <title>MoviPlayer — Play Video Online Without Download or Upload</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+    <!-- SEO Meta -->
+    <meta name="description" content="Play MKV, HEVC, AV1, HDR videos in your browser. No downloads, no installs. Drop a file or paste a URL. 100% private and local." />
+    <meta name="keywords" content="video player, MKV player, HEVC player, AV1 player, HDR video, VP9, browser video player, online video player, play MKV online, play HEVC online, WebCodecs, no install video player, private video player, local video player, play any video format, web video player" />
+    <meta name="author" content="MoviPlayer" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <link rel="canonical" href="https://moviplayer.com/" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://moviplayer.com/" />
+    <meta property="og:title" content="MoviPlayer — Play Any Video in Your Browser" />
+    <meta property="og:description" content="MKV, HEVC, AV1, HDR — formats your browser can't handle, we can. No downloads, no uploads. Everything runs locally." />
+    <meta property="og:image" content="https://moviplayer.com/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:site_name" content="MoviPlayer" />
+    <meta property="og:locale" content="en_US" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="MoviPlayer — Play Any Video in Your Browser" />
+    <meta name="twitter:description" content="MKV, HEVC, AV1, HDR — formats your browser can't handle, we can. No downloads, no uploads. Runs 100% locally." />
+    <meta name="twitter:image" content="https://moviplayer.com/og-image.png" />
+
+    <!-- PWA / Mobile -->
+    <meta name="theme-color" content="#0f0f12" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="MoviPlayer" />
+
+    <!-- Schema.org Structured Data -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "MoviPlayer",
+      "url": "https://moviplayer.com",
+      "description": "Play MKV, HEVC, AV1, HDR, VP9 videos directly in your browser. No downloads, no installs. 100% private, runs locally with WebCodecs.",
+      "applicationCategory": "MultimediaApplication",
+      "operatingSystem": "Any",
+      "browserRequirements": "Requires a modern browser with WebCodecs support",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "featureList": ["MKV playback", "HEVC/H.265 decoding", "AV1 decoding", "HDR support", "VP9 playback", "Subtitle support", "Multiple audio tracks", "No upload required", "100% private"],
+      "screenshot": "https://moviplayer.com/favicon-512x512.png",
+      "softwareVersion": "0.2.1",
+      "creator": {
+        "@type": "Organization",
+        "name": "MoviPlayer",
+        "url": "https://github.com/mrujjwalg/movi-player"
+      }
+    }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <style>
       :root {
-        --accent: #6c5dd3;
-        --accent-hover: #7b6de0;
-        --accent-glow: rgba(108, 93, 211, 0.4);
+        --accent: #7c6cf0;
+        --accent-hover: #9184f5;
+        --accent-glow: rgba(124, 108, 240, 0.45);
         --font-family: "Inter", system-ui, -apple-system, sans-serif;
       }
 
@@ -24,8 +85,8 @@
         --bg-card: #1c1c1c;
         --bg-surface: rgba(255, 255, 255, 0.04);
         --text-primary: #ffffff;
-        --text-secondary: #8c8c8c;
-        --text-muted: #5a5a5a;
+        --text-secondary: #a0a0a0;
+        --text-muted: #6e6e6e;
         --border-subtle: rgba(255, 255, 255, 0.08);
         --border-hover: rgba(255, 255, 255, 0.15);
         --input-bg: rgba(22, 22, 22, 0.8);
@@ -42,8 +103,8 @@
         --shadow-heavy: 0 20px 60px rgba(0, 0, 0, 0.5);
         --feature-bg: rgba(255, 255, 255, 0.03);
         --feature-border: rgba(255, 255, 255, 0.06);
-        --badge-bg: rgba(108, 93, 211, 0.15);
-        --badge-text: #8b7fe8;
+        --badge-bg: rgba(124, 108, 240, 0.18);
+        --badge-text: #a294f5;
       }
 
       /* Light Theme Override */
@@ -71,7 +132,7 @@
         --shadow-heavy: 0 20px 60px rgba(0, 0, 0, 0.12);
         --feature-bg: rgba(0, 0, 0, 0.02);
         --feature-border: rgba(0, 0, 0, 0.06);
-        --badge-bg: rgba(108, 93, 211, 0.1);
+        --badge-bg: rgba(124, 108, 240, 0.1);
         --badge-text: #6c5dd3;
       }
 
@@ -137,7 +198,7 @@
       .brand {
         font-size: 1.35rem;
         font-weight: 800;
-        background: linear-gradient(135deg, #ffffff 0%, #b0b0c0 100%);
+        background: linear-gradient(135deg, #ffffff 0%, #c8c8e0 100%);
         background-clip: text;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
@@ -240,8 +301,9 @@
         position: absolute;
         inset: 0;
         background:
-          radial-gradient(ellipse 80% 50% at 50% 20%, rgba(108, 93, 211, 0.12) 0%, transparent 60%),
-          radial-gradient(ellipse 60% 40% at 80% 60%, rgba(108, 93, 211, 0.06) 0%, transparent 50%);
+          radial-gradient(ellipse 80% 50% at 50% 15%, rgba(124, 108, 240, 0.25) 0%, transparent 55%),
+          radial-gradient(ellipse 50% 35% at 30% 40%, rgba(96, 165, 250, 0.08) 0%, transparent 50%),
+          radial-gradient(ellipse 60% 40% at 75% 55%, rgba(167, 139, 250, 0.10) 0%, transparent 50%);
       }
 
       /* Animated floating orb */
@@ -250,8 +312,8 @@
         width: 500px;
         height: 500px;
         border-radius: 50%;
-        background: radial-gradient(circle, rgba(108, 93, 211, 0.15) 0%, rgba(108, 93, 211, 0.05) 40%, transparent 70%);
-        top: -10%;
+        background: radial-gradient(circle, rgba(124, 108, 240, 0.35) 0%, rgba(124, 108, 240, 0.12) 35%, transparent 65%);
+        top: -15%;
         left: 50%;
         transform: translateX(-50%);
         animation: orbFloat 8s ease-in-out infinite;
@@ -259,7 +321,7 @@
       }
 
       [data-theme="light"] .hero-orb {
-        background: radial-gradient(circle, rgba(108, 93, 211, 0.12) 0%, rgba(108, 93, 211, 0.04) 40%, transparent 70%);
+        background: radial-gradient(circle, rgba(124, 108, 240, 0.12) 0%, rgba(124, 108, 240, 0.04) 40%, transparent 70%);
       }
 
       @keyframes orbFloat {
@@ -290,7 +352,7 @@
       }
 
       [data-theme="light"] .particle {
-        background: radial-gradient(circle, rgba(108, 93, 211, var(--opacity, 0.25)) 0%, transparent 70%);
+        background: radial-gradient(circle, rgba(124, 108, 240, var(--opacity, 0.25)) 0%, transparent 70%);
       }
 
       @keyframes dustFloat {
@@ -343,20 +405,15 @@
         font-weight: 800;
         line-height: 1.08;
         letter-spacing: -1.5px;
+        text-shadow: 0 0 40px rgba(124, 108, 240, 0.15);
       }
 
       .hero h1 .highlight {
-        background: linear-gradient(135deg, var(--accent), #00d4ff);
+        background: linear-gradient(135deg, #a78bfa, #60a5fa);
         background-clip: text;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
-        background-size: 200% auto;
-        animation: gradientShift 4s ease-in-out infinite;
-      }
-
-      @keyframes gradientShift {
-        0%, 100% { background-position: 0% center; }
-        50% { background-position: 100% center; }
+        filter: drop-shadow(0 0 25px rgba(124, 108, 240, 0.4));
       }
 
       .hero-tagline {
@@ -382,13 +439,13 @@
         font-size: 0.7rem;
         font-weight: 700;
         letter-spacing: 0.5px;
-        border: 1px solid rgba(108, 93, 211, 0.15);
+        border: 1px solid rgba(124, 108, 240, 0.2);
         transition: transform 0.2s, box-shadow 0.2s;
       }
 
       .format-chip:hover {
         transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(108, 93, 211, 0.25);
+        box-shadow: 0 4px 12px rgba(124, 108, 240, 0.3);
       }
 
       .hero-desc {
@@ -418,7 +475,7 @@
       .trust-item svg {
         width: 13px;
         height: 13px;
-        opacity: 0.5;
+        opacity: 0.7;
       }
 
       .trust-dot {
@@ -460,8 +517,8 @@
       .url-bar {
         display: flex;
         align-items: center;
-        background: var(--input-bg);
-        border: 1px solid var(--input-border);
+        background: rgba(15, 15, 20, 0.9);
+        border: 1px solid rgba(124, 108, 240, 0.15);
         border-radius: 8px;
         overflow: hidden;
         transition: all 0.3s ease;
@@ -541,9 +598,9 @@
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        background: var(--btn-ghost-bg);
+        background: rgba(124, 108, 240, 0.08);
         color: var(--btn-ghost-text);
-        border: 1px solid var(--border-subtle);
+        border: 1px solid rgba(124, 108, 240, 0.2);
         font-family: inherit;
         font-weight: 600;
         font-size: 0.95rem;
@@ -555,8 +612,9 @@
       }
 
       .btn-ghost:hover {
-        background: var(--btn-ghost-hover);
-        border-color: var(--border-hover);
+        background: rgba(124, 108, 240, 0.15);
+        border-color: rgba(124, 108, 240, 0.35);
+        box-shadow: 0 0 20px rgba(124, 108, 240, 0.15);
       }
 
       .btn-embed {
@@ -581,7 +639,7 @@
         margin: 0 auto;
         border-radius: 16px;
         overflow: hidden;
-        box-shadow: var(--shadow-heavy), 0 0 80px -20px rgba(108, 93, 211, 0.15);
+        box-shadow: var(--shadow-heavy), 0 0 60px -10px rgba(124, 108, 240, 0.2);
         background: #000;
         border: 1px solid var(--border-subtle);
       }
@@ -603,7 +661,7 @@
         --movi-controls-bg: rgba(0, 0, 0, 0.85);
         --movi-controls-color: #ffffff;
         --movi-progress-color: var(--accent);
-        --movi-btn-hover-bg: rgba(108, 93, 211, 0.2);
+        --movi-btn-hover-bg: rgba(124, 108, 240, 0.2);
         --movi-slider-track: rgba(255, 255, 255, 0.15);
       }
 
@@ -624,9 +682,9 @@
         background: linear-gradient(
           90deg,
           transparent 0%,
-          rgba(108, 93, 211, 0.03) 40%,
-          rgba(108, 93, 211, 0.06) 50%,
-          rgba(108, 93, 211, 0.03) 60%,
+          rgba(124, 108, 240, 0.03) 40%,
+          rgba(124, 108, 240, 0.06) 50%,
+          rgba(124, 108, 240, 0.03) 60%,
           transparent 100%
         );
         background-size: 200% 100%;
@@ -697,7 +755,7 @@
         left: 0;
         right: 0;
         height: 1px;
-        background: linear-gradient(90deg, transparent, rgba(108, 93, 211, 0.3), transparent);
+        background: linear-gradient(90deg, transparent, rgba(124, 108, 240, 0.3), transparent);
         opacity: 0;
         transition: opacity 0.3s;
       }
@@ -844,12 +902,12 @@
         }
 
         .hero h1 {
-          font-size: 2rem;
-          letter-spacing: -0.5px;
+          font-size: 2.4rem;
+          letter-spacing: -0.8px;
         }
 
         .hero-tagline {
-          font-size: 0.95rem;
+          font-size: 0.85rem;
         }
 
         .hero-trust {
@@ -894,8 +952,12 @@
         }
 
         .hero h1 {
-          font-size: 1.6rem;
-          letter-spacing: -0.3px;
+          font-size: 2rem;
+          letter-spacing: -0.5px;
+        }
+
+        .hero-tagline {
+          font-size: 0.8rem;
         }
 
         .btn-cta, .btn-ghost {
@@ -963,18 +1025,9 @@
         </div>
       </div>
       <div class="hero-content">
-        <h1>Drop a file.<br><span class="highlight">It just plays.</span></h1>
+        <h1>Play anything.<br><span class="highlight">Download nothing.</span></h1>
         <p class="hero-tagline">MKV, HEVC, AV1, HDR — formats your browser can't handle, we can. No installs, no uploads. Everything runs locally.</p>
         <div class="hero-actions">
-          <label class="btn-ghost">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="3" x2="12" y2="15"></line>
-            </svg>
-            Open File
-            <input type="file" id="file-input" accept="video/*,.mkv,.ts,.avi,.flv,.wmv,.mov" />
-          </label>
           <div class="url-bar">
             <input
               type="text"
@@ -989,6 +1042,15 @@
               Play
             </button>
           </div>
+          <label class="btn-ghost">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="17 8 12 3 7 8"></polyline>
+              <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            Open File
+            <input type="file" id="file-input" accept="video/*,.mkv,.ts,.avi,.flv,.wmv,.mov" />
+          </label>
           <button class="btn-ghost btn-embed" id="embed-btn" title="Copy embed code">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="16 18 22 12 16 6"></polyline>
@@ -1046,43 +1108,80 @@
     <!-- ===== FEATURES ===== -->
     <section class="features-section">
       <h2>Why MoviPlayer?</h2>
-      <p class="section-desc">Built for the files other players refuse to touch.</p>
+      <p class="section-desc">Built for the files other players refuse to touch. Play anything from MKV to HEVC to AV1 &mdash; right in your browser, with nothing to download or install.</p>
       <div class="features-grid">
         <div class="feature-card">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/><line x1="17" y1="17" x2="22" y2="17"/></svg>
           </div>
           <h3>Universal Formats</h3>
-          <p>MKV, AVI, HEVC, AV1, VP9, HDR &mdash; plays what your browser normally can't.</p>
+          <p>MKV, AVI, HEVC, AV1, VP9, HDR &mdash; MoviPlayer handles video formats that your browser normally can't play. No codec packs, no plugins, no conversions needed. Just drop any video file and it plays instantly.</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           </div>
           <h3>100% Private</h3>
-          <p>Everything runs locally in your browser. No uploads, no servers, no tracking.</p>
+          <p>Your videos never leave your device. Everything runs locally in your browser with zero uploads, no servers, and no tracking. Your media stays private &mdash; always.</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
           </div>
           <h3>Subtitles & Multi-Audio</h3>
-          <p>Embedded subtitles, multiple audio tracks, and soft-sub support out of the box.</p>
+          <p>Full support for embedded subtitles (SRT, ASS, SSA), multiple audio tracks, and soft-sub rendering. Switch between languages and subtitle tracks without any extra tools or software.</p>
         </div>
         <div class="feature-card">
           <div class="feature-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
           </div>
-          <h3>WebCodec Powered</h3>
-          <p>Hardware-accelerated decoding via WebCodecs API. Smooth playback even on large files.</p>
+          <h3>WebCodecs Powered</h3>
+          <p>Hardware-accelerated video decoding via the WebCodecs API delivers smooth, stutter-free playback even on large 4K files. No software decoding overhead &mdash; your GPU does the heavy lifting.</p>
         </div>
       </div>
     </section>
 
+    <!-- ===== HOW IT WORKS ===== -->
+    <section class="features-section">
+      <h2>How It Works</h2>
+      <p class="section-desc">Playing any video in your browser takes just three simple steps. No sign-up, no software, no waiting.</p>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </div>
+          <h3>1. Drop or Paste</h3>
+          <p>Drag and drop a video file anywhere on the page, use the file picker to browse your device, or paste a direct video URL to stream remotely.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+          <h3>2. It Just Plays</h3>
+          <p>MoviPlayer automatically detects the format, codec, and container. Whether it's an MKV with HEVC, an AVI with legacy codecs, or a 4K HDR file &mdash; playback starts immediately.</p>
+        </div>
+        <div class="feature-card">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <h3>3. Full Control</h3>
+          <p>Enjoy a full-featured player with keyboard shortcuts, playback speed control, picture-in-picture, fullscreen, volume normalization, and seek thumbnails &mdash; all built in.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== SUPPORTED FORMATS ===== -->
+    <section class="features-section">
+      <h2>Supported Video Formats</h2>
+      <p class="section-desc">MoviPlayer uses FFmpeg WebAssembly for demuxing and the WebCodecs API for hardware-accelerated decoding. This means you can play anything &mdash; from old AVI files to modern 4K HDR content &mdash; without downloading any software.</p>
+      <p class="section-desc">Supported containers include MKV, MP4, AVI, FLV, MOV, MPEG-TS, and WebM. Supported codecs include H.264, H.265 (HEVC), AV1, VP8, VP9, and AAC/Opus/FLAC audio. HDR10 and HLG high dynamic range content is also supported on compatible displays.</p>
+    </section>
+
     <!-- ===== FOOTER ===== -->
     <footer class="footer">
-      <p>Powered by <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener">movi-player</a> &mdash; Play MKV, HEVC, AV1, HDR in the browser</p>
-      <p class="disclaimer">All content is provided by users. We do not host or store any media. Users are solely responsible for the content they play. By using this service, you agree that you have the right to access the media you provide.</p>
+      <p>Powered by <a href="https://github.com/mrujjwalg/movi-player" target="_blank" rel="noopener">movi-player</a> &mdash; the open-source browser video player</p>
+      <p class="disclaimer"><a href="https://github.com/mrujjwalg/movi-player#readme" rel="noopener">Documentation</a> &middot; <a href="https://chromewebstore.google.com/detail/movi-player/ckleeigcopjnpehkjokijokjegknfgej" rel="noopener">Chrome Extension</a> &middot; <a href="https://github.com/mrujjwalg/movi-player/issues" rel="noopener">Report a Bug</a></p>
+      <p class="disclaimer" style="margin-top: 0.5rem;">All content is provided by users. We do not host or store any media. Users are solely responsible for the content they play.</p>
     </footer>
 
     <!-- Movi Player from CDN -->
