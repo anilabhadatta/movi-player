@@ -19,6 +19,11 @@ import type {
   PlayerState,
 } from "../types";
 import { Logger, LogLevel } from "../utils/Logger";
+import { ThumbnailBindings } from "../wasm/bindings";
+import { loadWasmModuleNew } from "../wasm/FFmpegLoader";
+import { FileSource } from "../source/FileSource";
+import { ThumbnailHttpSource } from "../source/ThumbnailHttpSource";
+import { Demuxer } from "../demux/Demuxer";
 
 import { SettingsStorage } from "../utils/SettingsStorage";
 
@@ -84,6 +89,13 @@ export class MoviElement extends HTMLElement {
   private _audioTracks: { src: string; type?: string; lang: string; label: string }[] = []; // Multi-language audio
   private _subtitleTracks: { src: string; lang: string; label: string; format?: string }[] = []; // External subtitles
   private _autoplay: boolean = false;
+  private _pendingPlay: boolean = false;
+  private _posterTime: string | null = null;
+  private _generatedPosterUrl: string | null = null;
+  // Bump on every src change / dispose so in-flight postertime generators
+  // can detect they're stale and bail instead of overwriting the new source's
+  // poster (or flashing an old-source poster during a switch).
+  private _posterGenId: number = 0;
   private _controls: boolean = false;
   private _loop: boolean = false;
   private _muted: boolean = false;
@@ -101,6 +113,13 @@ export class MoviElement extends HTMLElement {
   private _hdr: boolean = true; // HDR enabled by default
   private _theme: "dark" | "light" = "dark"; // Default theme
   private _sw: DecoderType = "auto"; // Preferred decoder mode (auto or software)
+  // True when `sw` was flipped to software as a per-source fallback (user
+  // clicked "Try software" on the broken indicator for this specific video).
+  // Reset on dispose so the next source gets a fresh hardware attempt
+  // instead of inheriting a fallback that was only needed for the prior file.
+  private _swForcedForCurrentSource: boolean = false;
+  // Guards the sw-attr-change callback from auto-reloading during dispose().
+  private _suppressSwReload: boolean = false;
 
   private _fps: number = 0; // Custom frame rate (0 = auto from video)
   private _gesturefs: boolean = false; // Gestures only in fullscreen if true
@@ -185,6 +204,7 @@ export class MoviElement extends HTMLElement {
       "videoid",
       "drm",
       "licenseurl",
+      "postertime",
     ];
   }
 
@@ -8556,6 +8576,14 @@ export class MoviElement extends HTMLElement {
         this._poster = newValue || "";
         this.updatePoster();
         break;
+      case "postertime":
+        this._posterTime = newValue;
+        // Don't auto-regenerate here. If the attribute change is followed by
+        // a src change (common playlist flow), a stale generator would race
+        // the new load and occasionally paint the old source's frame. The
+        // poster is (re)generated from initializePlayer() instead, which
+        // runs once per load on the correct source.
+        break;
       case "width":
       case "height":
         this.updateCanvasSize();
@@ -8634,8 +8662,10 @@ export class MoviElement extends HTMLElement {
         } else {
           this._sw = newValue !== null ? "software" : "auto";
         }
-        // If sw attribute changes and element is connected with src, reload
-        if (this.isConnected && this._src) {
+        // If sw attribute changes and element is connected with src, reload.
+        // Suppressed during dispose() so clearing a per-source software
+        // fallback doesn't trigger a reload of the about-to-be-replaced src.
+        if (this.isConnected && this._src && !this._suppressSwReload) {
           this.load();
         }
         break;
@@ -8982,11 +9012,30 @@ export class MoviElement extends HTMLElement {
         // Render first frame (poster) if not autoplaying and no custom start time.
         // Mark as poster seek so the loading indicator stays hidden during this seek —
         // the user shouldn't see a spinner just to render the first frame.
-        if (this._startAt === 0 && this.player) {
+        //
+        // Skip this when a `postertime` is set OR an explicit poster URL is
+        // active — in those cases the poster overlay is the source of truth,
+        // and an initial seek(0) would briefly show the first frame on canvas
+        // before the real poster appears, which reads as a glitch.
+        if (
+          this._startAt === 0 &&
+          this.player &&
+          !this._posterTime &&
+          !this._poster
+        ) {
           this.isPosterSeek = true;
           // isPosterSeek stays true until state leaves "seeking" (cleared in stateChangeHandler)
           this.player.seek(0).catch(() => {});
         }
+      }
+
+      // If a postertime is set and no explicit poster URL, generate a
+      // high-quality frame at that timestamp via an isolated thumbnail
+      // pipeline. Fire-and-forget — main playback is unaffected.
+      if (this._posterTime && !this._poster) {
+        this.generatePosterFromTime().catch((err) => {
+          Logger.warn(TAG, "postertime poster generation failed", err);
+        });
       }
 
       // Start UI updates
@@ -9029,6 +9078,13 @@ export class MoviElement extends HTMLElement {
       this.handleUnsupportedVideo(title, message);
     } finally {
       this.isLoading = false;
+      // Flush any play() calls that were deferred while loading was in flight.
+      if (this._pendingPlay && this.player && !this._isUnsupported) {
+        this._pendingPlay = false;
+        this.player.play().catch(() => {});
+      } else {
+        this._pendingPlay = false;
+      }
       this.updateControlsState();
       this.updatePlayPauseIcon();
     }
@@ -9226,7 +9282,14 @@ export class MoviElement extends HTMLElement {
    * Play the video
    */
   async play(): Promise<void> {
-    if (this.player && !this.isLoading && !this._isUnsupported) {
+    if (this._isUnsupported) return;
+    // If a load is in flight, defer the play. initializePlayer() flushes
+    // this once loading settles, matching HTMLMediaElement.play() semantics.
+    if (this.isLoading) {
+      this._pendingPlay = true;
+      return;
+    }
+    if (this.player) {
       await this.player.play();
     }
   }
@@ -9235,9 +9298,107 @@ export class MoviElement extends HTMLElement {
    * Pause the video
    */
   pause(): void {
+    // Cancel any queued play() intent so a late load doesn't start playback
+    // after the caller explicitly paused.
+    this._pendingPlay = false;
     if (this.player && !this.isLoading && !this._isUnsupported) {
       this.player.pause();
     }
+  }
+
+  /**
+   * Tear down the internal player and reset transient UI (time, title,
+   * subtitles, timeline) back to the initial, no-source state. Called
+   * internally on every src change so the next source starts clean. Safe to
+   * call when nothing is loaded.
+   *
+   * Note: we deliberately do NOT touch the canvas or the native video
+   * element — the canvas owns a WebGL2 context that the next renderer reuses,
+   * and resetting the <video> can interfere with the DRM/HLS path.
+   */
+  dispose(): void {
+    // Cancel any queued play intent
+    this._pendingPlay = false;
+
+    // Tear down internal player
+    if (this.player) {
+      try {
+        this.player.destroy();
+      } catch {
+        /* noop */
+      }
+      this.player = null;
+    }
+
+    // Clear subtitle overlay
+    if (this.subtitleOverlay) {
+      this.subtitleOverlay.innerHTML = "";
+    }
+
+    // Invalidate any in-flight postertime generator — a late-arriving frame
+    // from the old source would otherwise paint over the new one's poster.
+    this._posterGenId++;
+
+    // If the previous source forced a software-decoder fallback, release
+    // that preference before the next source loads — hardware should be
+    // attempted fresh. We suppress the attr-change reload so removing the
+    // `sw` attribute doesn't kick off an unwanted reload of the old src
+    // (which is still assigned to this._src at this point).
+    if (this._swForcedForCurrentSource) {
+      this._swForcedForCurrentSource = false;
+      this._sw = "auto";
+      if (this.hasAttribute("sw")) {
+        this._suppressSwReload = true;
+        this.removeAttribute("sw");
+        this._suppressSwReload = false;
+      }
+    }
+
+    // Revoke any postertime-generated poster URL and hide the overlay so
+    // the next source doesn't briefly flash the old frame.
+    if (this._generatedPosterUrl) {
+      URL.revokeObjectURL(this._generatedPosterUrl);
+      this._generatedPosterUrl = null;
+    }
+    if (!this._poster && this.posterElement) {
+      this.posterElement.src = "";
+      this.posterElement.style.display = "none";
+    }
+
+    // Reset transient state
+    this.isLoading = false;
+    this._isUnsupported = false;
+    this._lastDuration = 0;
+    if (this._titleAutoLoaded) {
+      this._title = null;
+      this._titleAutoLoaded = false;
+    }
+
+    // Reset timeline strip and thumbnail rotation
+    this.resetTimeline();
+    this.syncThumbnailRotation(0);
+
+    // Reset time display and title text in shadow DOM
+    const sr = this.shadowRoot;
+    if (sr) {
+      const cur = sr.querySelector(".movi-current-time") as HTMLElement | null;
+      const dur = sr.querySelector(".movi-duration") as HTMLElement | null;
+      if (cur) cur.textContent = "0:00";
+      if (dur) dur.textContent = "0:00";
+      if (!this._title) {
+        const titleText = sr.querySelector(".movi-title-text") as HTMLElement | null;
+        if (titleText) titleText.textContent = "";
+      }
+      const rotateStatus = sr.querySelector(".movi-rotate-status") as HTMLElement | null;
+      if (rotateStatus) rotateStatus.textContent = "0°";
+    }
+
+    // Refresh controls to reflect "no player" state
+    this.updateControlsState();
+    this.updatePlayPauseIcon();
+
+    // Hide error/broken indicator
+    if (this.brokenIndicator) this.brokenIndicator.style.display = "none";
   }
 
   get theme(): "dark" | "light" {
@@ -9702,8 +9863,11 @@ export class MoviElement extends HTMLElement {
       this.brokenIndicator.style.display = "none";
     }
 
-    // Set sw attribute to enable software decoding
+    // Set sw attribute to enable software decoding for THIS source. The
+    // flag is cleared on dispose so the next source isn't forced into
+    // software just because the previous one had to fall back.
     this._sw = "software";
+    this._swForcedForCurrentSource = true;
     this.setAttribute("sw", "");
 
     // Get current source
@@ -10090,29 +10254,15 @@ export class MoviElement extends HTMLElement {
   }
 
   set src(value: string | File | null) {
-    // Reset title-related flags when src changes
-    if (this._titleAutoLoaded) {
-      this._title = null;
-    }
-    this._resumeCheckedWithTitle = false;
-    this._titleAutoLoaded = false;
-    this._lastDuration = 0;
-
     // Save position before switching source, then stop saving
     if (this._resume) this.saveResumePosition();
     this.stopResumeSaving();
+    this._resumeCheckedWithTitle = false;
 
-    // Reset timeline and rotation on source change
-    this.resetTimeline();
-    this.syncThumbnailRotation(0);
-    if (this.shadowRoot) {
-      const statusEl = this.shadowRoot.querySelector(".movi-rotate-status");
-      if (statusEl) statusEl.textContent = "0°";
-    }
-
-    // Reset unsupported state on any source change so new source can load
-    this._isUnsupported = false;
-    if (this.brokenIndicator) this.brokenIndicator.style.display = "none";
+    // Reset to fully initial state before loading the new source — clears the
+    // canvas, destroys the internal player, and resets UI so no previous-video
+    // artifacts (last frame, subtitles, duration, title) leak across.
+    this.dispose();
 
     this.dispatchEvent(new CustomEvent("loadstart", { detail: { src: value instanceof File ? value.name : value } }));
 
@@ -10123,11 +10273,6 @@ export class MoviElement extends HTMLElement {
       this.removeAttribute("src");
       // Re-initialize player if already connected
       if (this.isConnected) {
-        // Destroy existing player
-        if (this.player) {
-          this.player.destroy();
-          this.player = null;
-        }
         this.initializePlayer();
       }
     } else if (typeof value === "string") {
@@ -10398,9 +10543,16 @@ export class MoviElement extends HTMLElement {
       this.dispatchEvent(new Event("loadeddata"));
 
       this.isLoading = false;
+      if (this._pendingPlay && this.player && !this._isUnsupported) {
+        this._pendingPlay = false;
+        this.player.play().catch(() => {});
+      } else {
+        this._pendingPlay = false;
+      }
       Logger.info("MoviElement", "Encrypted source loaded");
     } catch (e) {
       this.isLoading = false;
+      this._pendingPlay = false;
       Logger.error("MoviElement", "Failed to load encrypted source", e);
       throw e;
     }
@@ -11363,8 +11515,215 @@ export class MoviElement extends HTMLElement {
       this.posterElement.src = this._poster;
       this.posterElement.style.display = "block";
       this.posterElement.style.objectFit = this._objectFit || "contain";
+    } else if (this._generatedPosterUrl) {
+      // Fall back to the postertime-generated poster if no explicit URL.
+      this.posterElement.src = this._generatedPosterUrl;
+      this.posterElement.style.display = "block";
+      this.posterElement.style.objectFit = this._objectFit || "contain";
     } else {
       this.posterElement.style.display = "none";
+    }
+  }
+
+  get postertime(): string | null {
+    return this._posterTime;
+  }
+  set postertime(value: string | null) {
+    this._posterTime = value;
+    if (value) {
+      this.setAttribute("postertime", value);
+    } else {
+      this.removeAttribute("postertime");
+    }
+  }
+
+  /**
+   * Parse a `postertime` string into seconds, clamped to [0, duration].
+   * Accepted formats:
+   *   - "10%"      → 10% of duration
+   *   - "5"        → 5 seconds
+   *   - "1:30"     → 90 seconds (mm:ss)
+   *   - "0:01:30"  → 90 seconds (hh:mm:ss)
+   */
+  private parsePosterTime(raw: string | null, duration: number): number | null {
+    if (!raw || !isFinite(duration) || duration <= 0) return null;
+    const s = raw.trim();
+    if (!s) return null;
+
+    // Percentage
+    if (s.endsWith("%")) {
+      const pct = parseFloat(s);
+      if (!isFinite(pct)) return null;
+      return Math.max(0, Math.min(duration, (pct / 100) * duration));
+    }
+
+    // hh:mm:ss or mm:ss
+    if (s.includes(":")) {
+      const parts = s.split(":").map((p) => parseFloat(p));
+      if (parts.some((p) => !isFinite(p))) return null;
+      let seconds = 0;
+      if (parts.length === 2) seconds = parts[0] * 60 + parts[1];
+      else if (parts.length === 3) seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+      else return null;
+      return Math.max(0, Math.min(duration, seconds));
+    }
+
+    // Plain seconds (possibly with "s" suffix)
+    const num = parseFloat(s.replace(/s$/i, ""));
+    if (!isFinite(num)) return null;
+    return Math.max(0, Math.min(duration, num));
+  }
+
+  /**
+   * Generate a poster frame at `postertime` using an isolated thumbnail
+   * pipeline (WASM + ThumbnailBindings). Does not touch the main player's
+   * clock/decoder — purely side-channel frame extraction. Respects the
+   * video's rotation metadata so portrait videos display correctly.
+   */
+  private async generatePosterFromTime(): Promise<void> {
+    // Skip when playback is already happening or about to start — the user
+    // would see the poster flash on top of live video otherwise.
+    const state = this.player?.getState();
+    if (this._pendingPlay || state === "playing" || state === "buffering") {
+      return;
+    }
+
+    // Revoke previous generated poster URL
+    if (this._generatedPosterUrl) {
+      URL.revokeObjectURL(this._generatedPosterUrl);
+      this._generatedPosterUrl = null;
+    }
+
+    if (!this._posterTime || this._poster || !this._src) return;
+
+    const duration = this.player?.getDuration() || 0;
+    const timeSec = this.parsePosterTime(this._posterTime, duration);
+    if (timeSec === null) return;
+
+    // Snapshot our generation id at entry; any later src change / dispose
+    // bumps it, which means this run is stale and must bail before it
+    // overwrites the new source's poster.
+    const genId = ++this._posterGenId;
+    const isStale = () => genId !== this._posterGenId;
+
+    // Only File and plain URL sources are supported here. Encrypted/DRM
+    // sources have their own protected pipelines — skip.
+    let dataSource: FileSource | ThumbnailHttpSource;
+    let size: number;
+    if (this._src instanceof File) {
+      dataSource = new FileSource(this._src);
+      size = this._src.size;
+    } else if (
+      typeof this._src === "string" &&
+      (this._src.startsWith("http") || this._src.startsWith("/"))
+    ) {
+      dataSource = new ThumbnailHttpSource(this._src);
+      size = await dataSource.getSize();
+    } else {
+      return;
+    }
+
+    // Pull rotation from a dedicated isolated-WASM Demuxer — ThumbnailBindings'
+    // StreamInfo.rotation is often 0 for display-matrix metadata.
+    let rotation = 0;
+    try {
+      const dm = new Demuxer(
+        this._src instanceof File
+          ? new FileSource(this._src)
+          : new ThumbnailHttpSource(this._src as string),
+        undefined,
+        true,
+      );
+      await dm.open();
+      rotation = dm.getVideoTracks()[0]?.rotation || 0;
+      try { dm.close(); } catch { /* noop */ }
+    } catch { /* fall back to 0 */ }
+
+    let wasm: any;
+    try {
+      wasm = await loadWasmModuleNew();
+    } catch (err) {
+      Logger.warn(TAG, "postertime: failed to load isolated WASM", err);
+      return;
+    }
+    if (isStale()) return;
+
+    const bindings = new ThumbnailBindings(wasm);
+    try {
+      // FileSource/ThumbnailHttpSource implement the DataSource shape at
+      // runtime; the SourceAdapter type difference is incidental.
+      bindings.setDataSource(dataSource as any);
+      await bindings.create(size);
+      if (isStale()) return;
+      if (!(await bindings.open())) return;
+      if (isStale()) return;
+
+      const info = bindings.getStreamInfo();
+      if (!info || !info.width || !info.height) return;
+
+      const sw = info.width;
+      const sh = info.height;
+      const rot = ((rotation || info.rotation || 0) % 360 + 360) % 360;
+      const isRotated = rot === 90 || rot === 270;
+
+      const pktSize = await bindings.readKeyframe(timeSec);
+      if (isStale() || !pktSize || pktSize <= 0) return;
+
+      const rgba = bindings.decodeCurrentPacket(sw, sh);
+      if (!rgba) return;
+
+      // Put raw frame on a source canvas. Copy into a fresh, plain-ArrayBuffer
+      // backed Uint8ClampedArray — WASM memory may be SharedArrayBuffer and
+      // ImageData requires a non-shared buffer.
+      const src = document.createElement("canvas");
+      src.width = sw;
+      src.height = sh;
+      const sctx = src.getContext("2d");
+      if (!sctx) return;
+      const clamped = new Uint8ClampedArray(sw * sh * 4);
+      clamped.set(rgba);
+      sctx.putImageData(new ImageData(clamped, sw, sh), 0, 0);
+
+      // Output canvas with rotation applied
+      const outW = isRotated ? sh : sw;
+      const outH = isRotated ? sw : sh;
+      const out = document.createElement("canvas");
+      out.width = outW;
+      out.height = outH;
+      const octx = out.getContext("2d");
+      if (!octx) return;
+      octx.save();
+      octx.translate(outW / 2, outH / 2);
+      if (rot) octx.rotate((rot * Math.PI) / 180);
+      octx.drawImage(src, -sw / 2, -sh / 2, sw, sh);
+      octx.restore();
+
+      const blob = await new Promise<Blob | null>((r) =>
+        out.toBlob(r, "image/jpeg", 0.92),
+      );
+      if (!blob) return;
+
+      // Final stale check + don't paint the poster if playback has started
+      // while we were decoding (avoids flashing the overlay on live video).
+      const finalState = this.player?.getState();
+      if (
+        isStale() ||
+        this._pendingPlay ||
+        finalState === "playing" ||
+        finalState === "buffering"
+      ) {
+        return;
+      }
+
+      this._generatedPosterUrl = URL.createObjectURL(blob);
+
+      // Show it via the existing poster overlay (explicit poster URL still
+      // wins — we gated on !this._poster above).
+      this.updatePoster();
+
+      try { bindings.clearBuffer?.(); } catch { /* noop */ }
+    } finally {
+      try { bindings.destroy(); } catch { /* noop */ }
     }
   }
 
@@ -11542,7 +11901,14 @@ export class MoviElement extends HTMLElement {
    * "The.Boys.S05E01.Fifteen.Inches.of.Sheer.Dynamite.2160p.AMZN.WEB-DL.Hindi.DDP5.1-English.DDP5.1.Atmos.DV.HDR.H.265-4kHdHub.Com"
    * → "The Boys S05E01 Fifteen Inches of Sheer Dynamite"
    */
-  private cleanVideoTitle(filename: string): string {
+  /**
+   * Turn a raw filename or metadata string into a human-readable title by
+   * stripping separators, release-group tags, and quality/codec suffixes.
+   * Exposed as a static utility so callers (e.g. a playlist UI) can derive
+   * the same value the player does — useful for computing the resume
+   * localStorage key (`movi-resume:<cleanVideoTitle(name)>`).
+   */
+  static cleanVideoTitle(filename: string): string {
     // Replace dots and underscores with spaces
     let title = filename.replace(/[._]/g, " ");
 
@@ -11563,6 +11929,10 @@ export class MoviElement extends HTMLElement {
     return title || filename;
   }
 
+  private cleanVideoTitle(filename: string): string {
+    return MoviElement.cleanVideoTitle(filename);
+  }
+
   get duration(): number {
     return this.player?.getDuration() || 0;
   }
@@ -11573,6 +11943,14 @@ export class MoviElement extends HTMLElement {
 
   get ended(): boolean {
     return this.player?.getState() === "ended" || false;
+  }
+
+  /** True only while the player is actively playing. Unlike `!paused`, this
+   * distinguishes "playing" from intermediate states like "ready", "loading",
+   * "seeking" and "buffering" — useful when deciding whether to carry play
+   * state over to a new source. */
+  get playing(): boolean {
+    return this.player?.getState() === "playing" || false;
   }
 
   get readyState(): number {

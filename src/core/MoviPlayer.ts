@@ -876,24 +876,43 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Fire-and-forget WakeLock (no need to block play for screen sleep prevention)
     this.requestWakeLock();
 
-    // First play after poster seek: re-seek demuxer to start time.
-    // Poster seek's processLoop reads the demuxer ahead (~1s) while decoding the
-    // first video frame. Without this, audio starts at 1s+ instead of 0.
-    // Run demuxer seek and audio init in parallel to minimize startup latency.
+    // First play after poster seek: re-seek demuxer to the clock's current
+    // time. Poster seek's processLoop reads the demuxer ahead (~1s) while
+    // decoding the first video frame, so the demuxer cursor is out of sync
+    // with where we actually want playback to start. Re-seeking realigns it.
+    //
+    // IMPORTANT: respect any user seek that happened before the first play —
+    // read the target from the clock (which getTime() reports as paused or
+    // seeked position), NOT the hardcoded startTime. Previously we always
+    // seeked to startTime here, which silently discarded a pre-play scrub
+    // and restarted from the beginning.
     if (this._playStartTime === 0 && this.demuxer) {
-      const demuxerSeek = this.demuxer.seek(this.startTime);
+      const targetTime = this.clock.getTime();
+      const userSeeked = Math.abs(targetTime - this.startTime) > 0.05;
+
+      // If the user scrubbed before play, the prebuffer (load-time) has
+      // already decoded audio/video at startTime. Flush those pipelines so
+      // they don't briefly play startTime content before the seek target.
+      if (userSeeked) {
+        await this.videoDecoder.flush();
+        await this.audioDecoder.flush();
+        if (this.videoRenderer) this.videoRenderer.clearQueue();
+        this.audioRenderer.reset();
+      }
+
+      const demuxerSeek = this.demuxer.seek(targetTime);
       const audioInit = !this.disableAudio
         ? this.audioRenderer.play()
         : Promise.resolve();
       await Promise.all([demuxerSeek, audioInit]);
-      this.clock.seek(this.startTime);
+      this.clock.seek(targetTime);
       this.pendingAudioPackets = [];
       this.eofReached = false;
       // Reset presentation timing — poster seek set presentationStartTime which
       // becomes stale if user waits before clicking play. Without this, elapsed
       // wall-clock time causes getCurrentPlaybackTime() to return a huge value,
       // dropping all freshly decoded frames as "too far behind".
-      if (this.videoRenderer) {
+      if (this.videoRenderer && !userSeeked) {
         this.videoRenderer.clearQueue();
       }
     } else {
@@ -1049,28 +1068,48 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       `Seek completion at ${time.toFixed(3)}s (target: ${seekTarget.toFixed(3)}s)`,
     );
 
-    // Sync correction: Match clock to actual video/audio start time
-    // CRITICAL: If we have pending audio packets, sync to the EARLIEST audio packet
-    // instead of the video frame. This prevents dropping audio when hardware video
-    // decoding has delay (which causes video to arrive 100-500ms after audio).
+    // Sync correction: Match clock to actual video/audio start time.
+    //
+    // When video arrives late (hardware decode lag, or no keyframe at the
+    // exact seek target), we have two options:
+    //
+    //   a) Sync clock to earliest audio packet — audio stays continuous, but
+    //      video frame sits queued until clock catches up, so the user hears
+    //      audio while the video is frozen/stale for the gap duration.
+    //
+    //   b) Sync clock to video frame time — drops the stale audio packets
+    //      between seek target and video time, but A/V stays coherent.
+    //
+    // Small gaps (< 200ms) are imperceptible, so (a) wins. Large gaps (from
+    // sparse keyframes / slow HEVC+HDR decoders) were causing bad user-facing
+    // desync: video and audio visibly drifting for nearly a second. For those
+    // we now prefer (b) — a brief audio skip beats sustained A/V mismatch.
     if (time > seekTarget + 0.01) {
+      const AUDIO_SYNC_GAP_LIMIT = 0.2;
       let syncTime = time;
+      let syncedToAudio = false;
 
-      // If we have pending audio, use the earliest audio packet time
       if (this.pendingAudioPackets.length > 0) {
         const earliestAudioTime = Math.min(
           ...this.pendingAudioPackets.map((p) => p.timestamp)
         );
 
-        // Sync to audio if it's earlier than video (hardware decode delay case)
         if (earliestAudioTime < time) {
-          syncTime = earliestAudioTime;
-          Logger.debug(
-            TAG,
-            `Video arrived late (${time.toFixed(3)}s), syncing clock to earliest audio (${syncTime.toFixed(3)}s) instead`,
-          );
+          const gap = time - earliestAudioTime;
+          if (gap <= AUDIO_SYNC_GAP_LIMIT) {
+            syncTime = earliestAudioTime;
+            syncedToAudio = true;
+            Logger.debug(
+              TAG,
+              `Video arrived late (${time.toFixed(3)}s), syncing clock to earliest audio (${syncTime.toFixed(3)}s) — gap ${(gap * 1000).toFixed(0)}ms`,
+            );
+          } else {
+            Logger.info(
+              TAG,
+              `Video-audio gap ${(gap * 1000).toFixed(0)}ms exceeds ${AUDIO_SYNC_GAP_LIMIT * 1000}ms; syncing clock to video (${time.toFixed(3)}s) and dropping stale audio before that`,
+            );
+          }
         } else {
-          // Video and audio aligned, sync to video
           Logger.debug(
             TAG,
             `Stream jumped ahead. Syncing clock to video at ${syncTime.toFixed(3)}s.`,
@@ -1085,10 +1124,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
       this.clock.seek(syncTime);
 
-      // Only filter audio packets that are truly too old (before seek target)
-      // Don't drop packets just because video arrived late!
+      // Filter audio packets:
+      //  - synced to audio: keep everything from seek target onward
+      //  - synced to video: drop audio before the video frame so AV stays
+      //    aligned after the seek
+      const cutoff = syncedToAudio ? seekTarget - 0.01 : syncTime - 0.01;
       this.pendingAudioPackets = this.pendingAudioPackets.filter(
-        (p) => p.timestamp >= seekTarget - 0.01,
+        (p) => p.timestamp >= cutoff,
       );
     }
 
