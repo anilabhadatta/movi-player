@@ -33,15 +33,17 @@ function parseQuery(input) {
 // Parse TV series queries - all common formats
 // S02E01, S2E1, Season 2 Episode 1, S02, Season 2, 2x01, etc.
 function parseSeriesQuery(input) {
+  // Trailing text after the episode code (e.g. episode title) is allowed and discarded:
+  // "From S04E01 The Arrival" → title "From", season 4, episode 1.
   const patterns = [
     // S02E01, S2E1, s02e01
-    /^(.+?)\s*S(\d{1,2})E(\d{1,3})$/i,
+    /^(.+?)\s*S(\d{1,2})E(\d{1,3})(?:\b.*)?$/i,
     // S02 EP01, S2 EP1
-    /^(.+?)\s*S(\d{1,2})\s*EP(\d{1,3})$/i,
+    /^(.+?)\s*S(\d{1,2})\s*EP(\d{1,3})(?:\b.*)?$/i,
     // 2x01, 02x01
-    /^(.+?)\s*(\d{1,2})x(\d{1,3})$/i,
+    /^(.+?)\s*(\d{1,2})x(\d{1,3})(?:\b.*)?$/i,
     // Season 2 Episode 1, Season 2 Ep 1
-    /^(.+?)\s*Season\s*(\d+)\s*(?:Episode|Ep\.?)\s*(\d+)$/i,
+    /^(.+?)\s*Season\s*(\d+)\s*(?:Episode|Ep\.?)\s*(\d+)(?:\b.*)?$/i,
   ];
 
   for (const pattern of patterns) {
@@ -53,8 +55,8 @@ function parseSeriesQuery(input) {
 
   // Season only: S02, Season 2
   const seasonOnly = [
-    /^(.+?)\s*S(\d{1,2})$/i,
-    /^(.+?)\s*Season\s*(\d+)$/i,
+    /^(.+?)\s*S(\d{1,2})(?:\b.*)?$/i,
+    /^(.+?)\s*Season\s*(\d+)(?:\b.*)?$/i,
   ];
 
   for (const pattern of seasonOnly) {
