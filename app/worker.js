@@ -457,8 +457,10 @@ function isAllowedProxyReferer(request) {
 
 // Sniff the first MAGIC_SNIFF_SIZE bytes from a ReadableStream, then
 // return a new stream that re-emits the sniffed prefix followed by the
-// remaining bytes. Returns { ok: false } if the signature doesn't match
-// a supported container.
+// remaining bytes. `reason` distinguishes "format" (we read bytes and
+// they don't match a known container) from "network" (read failed
+// mid-stream) so the caller can return 415 vs 502 correctly — a
+// transient subrequest failure shouldn't be reported as a format error.
 async function sniffAndPassthrough(stream) {
   const reader = stream.getReader();
   const chunks = [];
@@ -472,7 +474,7 @@ async function sniffAndPassthrough(stream) {
     }
   } catch {
     reader.cancel().catch(() => {});
-    return { ok: false, stream: null };
+    return { ok: false, reason: "network", stream: null };
   }
   const prefix = new Uint8Array(total);
   let off = 0;
@@ -482,7 +484,7 @@ async function sniffAndPassthrough(stream) {
   }
   if (!hasSupportedSignature(prefix)) {
     reader.cancel().catch(() => {});
-    return { ok: false, stream: null };
+    return { ok: false, reason: "format", stream: null };
   }
   const { readable, writable } = new TransformStream();
   (async () => {
@@ -502,25 +504,52 @@ async function sniffAndPassthrough(stream) {
   return { ok: true, stream: readable };
 }
 
-// Preflight magic-byte check for requests whose response body can't be
-// sniffed inline (HEAD, or Range seek past byte 0). One small extra
-// subrequest — Cloudflare edge caches it after the first hit.
+// Preflight magic-byte check for Range seeks past byte 0 (we can't
+// infer the container signature from mid-file bytes, so we have to
+// probe separately). Reads just MAGIC_SNIFF_SIZE bytes off the response
+// stream rather than arrayBuffer()-ing the whole thing — matters for
+// upstreams that ignore Range and return 200 with the full body.
+// Retries once to smooth over transient subrequest failures (CF→CF
+// fetches occasionally flake on cold paths).
 async function preflightSignatureCheck(targetUrl) {
-  try {
-    const res = await fetch(targetUrl, {
-      method: "GET",
-      headers: {
-        "Range": `bytes=0-${MAGIC_SNIFF_SIZE - 1}`,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-      },
-      redirect: "follow",
-    });
-    if (!res.ok && res.status !== 206) return false;
-    const buf = new Uint8Array(await res.arrayBuffer());
-    return hasSupportedSignature(buf);
-  } catch {
-    return false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(targetUrl, {
+        method: "GET",
+        headers: {
+          "Range": `bytes=0-${MAGIC_SNIFF_SIZE - 1}`,
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        },
+        redirect: "follow",
+      });
+      if (!res.ok && res.status !== 206) {
+        if (attempt === 0) continue;
+        return { ok: false, reason: "network" };
+      }
+      if (!res.body) return { ok: false, reason: "network" };
+      const reader = res.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        while (total < MAGIC_SNIFF_SIZE) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          total += value.byteLength;
+        }
+      } finally {
+        reader.cancel().catch(() => {});
+      }
+      const buf = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+      return { ok: hasSupportedSignature(buf), reason: "format" };
+    } catch {
+      if (attempt === 0) continue;
+      return { ok: false, reason: "network" };
+    }
   }
+  return { ok: false, reason: "network" };
 }
 
 async function handleProxy(request, url) {
@@ -583,21 +612,33 @@ async function handleProxy(request, url) {
 
     // Magic-byte check: upstream Content-Type can lie, so also verify
     // the actual file signature. Inline when the body starts at byte 0
-    // (no Range or Range: bytes=0-…); otherwise do a preflight since we
-    // can't infer the signature from mid-file bytes.
+    // (no Range or Range: bytes=0-…); preflight when the body starts
+    // mid-file. HEAD requests have no body to check, and the follow-up
+    // GET will get magic-checked anyway — skip the subrequest on HEAD
+    // so a flaky CF-to-CF probe can't fail the metadata request.
     const startsAtZero = !rangeHeader || /^bytes=0[-=]/i.test(rangeHeader);
     let body = response.body;
-    if (request.method === "HEAD" || !startsAtZero) {
-      const ok = await preflightSignatureCheck(targetUrl);
-      if (!ok) {
-        return jsonResponse({ error: "Unsupported file format" }, 415);
+    if (request.method !== "HEAD") {
+      if (!startsAtZero) {
+        const result = await preflightSignatureCheck(targetUrl);
+        if (!result.ok) {
+          const status = result.reason === "format" ? 415 : 502;
+          const message = result.reason === "format"
+            ? "Unsupported file format"
+            : "Upstream probe failed";
+          return jsonResponse({ error: message }, status);
+        }
+      } else if (body) {
+        const sniffed = await sniffAndPassthrough(body);
+        if (!sniffed.ok) {
+          const status = sniffed.reason === "format" ? 415 : 502;
+          const message = sniffed.reason === "format"
+            ? "Unsupported file format"
+            : "Upstream probe failed";
+          return jsonResponse({ error: message }, status);
+        }
+        body = sniffed.stream;
       }
-    } else if (body) {
-      const sniffed = await sniffAndPassthrough(body);
-      if (!sniffed.ok) {
-        return jsonResponse({ error: "Unsupported file format" }, 415);
-      }
-      body = sniffed.stream;
     }
 
     // Build response headers
