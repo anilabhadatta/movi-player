@@ -505,6 +505,247 @@
         margin-top: 0.25rem;
       }
 
+      /* Floating Chrome extension card — sits below the navbar in the
+         top-right. Hidden by default; the inline script flips it on only
+         for Chromium-based browsers, and dismissal is persisted. */
+      /* Anchored to top-right of the document (not the viewport), so it
+         scrolls away with the page instead of overlaying content like a
+         classic floating popup. Doesn't push hero content down. */
+      .ext-prompt-wrap {
+        display: none;
+        position: absolute;
+        top: calc(64px + 1rem);
+        right: 1.25rem;
+        z-index: 5;
+      }
+
+      .ext-prompt-wrap.visible { display: block; }
+
+      .ext-prompt {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        width: 340px;
+        max-width: 100%;
+        padding: 1.1rem 1.15rem 1.1rem;
+        background:
+          radial-gradient(120% 100% at 0% 0%, rgba(124, 108, 240, 0.09) 0%, transparent 55%),
+          #0b0b12;
+        border: 1px solid rgba(255, 255, 255, 0.07);
+        border-radius: 16px;
+        box-shadow:
+          0 24px 60px rgba(0, 0, 0, 0.55),
+          0 1px 0 rgba(255, 255, 255, 0.05) inset;
+        color: var(--text-primary, #fff);
+        animation: ext-prompt-in 0.4s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+      }
+
+      [data-theme="light"] .ext-prompt {
+        background:
+          radial-gradient(120% 100% at 0% 0%, rgba(124, 108, 240, 0.07) 0%, transparent 55%),
+          var(--bg-elevated, #ffffff);
+        border-color: var(--border-subtle, rgba(0, 0, 0, 0.08));
+        box-shadow:
+          0 24px 60px rgba(20, 20, 40, 0.18),
+          0 1px 0 rgba(255, 255, 255, 0.6) inset;
+        color: var(--text-primary, #1a1a2e);
+      }
+
+      @keyframes ext-prompt-in {
+        from { opacity: 0; transform: translateY(-10px) scale(0.96); }
+        to   { opacity: 1; transform: translateY(0)    scale(1); }
+      }
+
+      /* Header: icon tile + title */
+      .ext-prompt-header {
+        display: flex;
+        align-items: center;
+        gap: 0.7rem;
+        padding-right: 1.75rem; /* room for close button */
+      }
+
+      .ext-prompt-icon-tile {
+        flex: 0 0 40px;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 10px;
+      }
+
+      [data-theme="light"] .ext-prompt-icon-tile {
+        background: rgba(0, 0, 0, 0.025);
+        border-color: rgba(0, 0, 0, 0.06);
+      }
+
+      .ext-prompt-icon { width: 26px; height: 26px; }
+
+      .ext-prompt-titles { min-width: 0; }
+
+      .ext-prompt-title {
+        font-size: 0.97rem;
+        font-weight: 700;
+        line-height: 1.2;
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+
+      /* Divider between header and points */
+      .ext-prompt-divider {
+        height: 1px;
+        margin: 0.95rem 0 0.85rem;
+        background: linear-gradient(to right,
+          rgba(255, 255, 255, 0) 0%,
+          rgba(255, 255, 255, 0.08) 20%,
+          rgba(255, 255, 255, 0.08) 80%,
+          rgba(255, 255, 255, 0) 100%);
+      }
+
+      [data-theme="light"] .ext-prompt-divider {
+        background: linear-gradient(to right,
+          rgba(0, 0, 0, 0) 0%,
+          rgba(0, 0, 0, 0.08) 20%,
+          rgba(0, 0, 0, 0.08) 80%,
+          rgba(0, 0, 0, 0) 100%);
+      }
+
+      /* Bulleted points with checkmark icons */
+      .ext-prompt-points {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        font-size: 0.81rem;
+        line-height: 1.35;
+        color: var(--text-secondary, rgba(255, 255, 255, 0.78));
+      }
+
+      [data-theme="light"] .ext-prompt-points { color: rgba(20, 20, 40, 0.75); }
+
+      .ext-prompt-points li {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.55rem;
+      }
+
+      .ext-prompt-points li svg {
+        flex: 0 0 14px;
+        width: 14px;
+        height: 14px;
+        margin-top: 2px;
+        color: #8a7cf2;
+      }
+
+      [data-theme="light"] .ext-prompt-points li svg { color: #5b4bd8; }
+
+      /* Close button */
+      .ext-prompt-close {
+        position: absolute;
+        top: 0.55rem;
+        right: 0.55rem;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        background: transparent;
+        border: none;
+        border-radius: 50%;
+        color: var(--text-muted, rgba(255, 255, 255, 0.45));
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s;
+      }
+
+      .ext-prompt-close:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text-primary, #fff);
+      }
+
+      [data-theme="light"] .ext-prompt-close:hover {
+        background: rgba(0, 0, 0, 0.06);
+        color: var(--text-primary, #1a1a2e);
+      }
+
+      .ext-prompt-close svg { width: 12px; height: 12px; }
+
+      /* CTA button */
+      .ext-prompt-cta {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        margin-top: 1rem;
+        padding: 0.72rem 1rem;
+        background: linear-gradient(135deg, #7c6cf0 0%, #5b4bd8 100%);
+        color: #fff;
+        font-size: 0.86rem;
+        font-weight: 700;
+        letter-spacing: -0.005em;
+        text-decoration: none;
+        border-radius: 10px;
+        box-shadow:
+          0 6px 16px rgba(91, 75, 216, 0.32),
+          0 1px 0 rgba(255, 255, 255, 0.18) inset;
+        transition: transform 0.15s, box-shadow 0.15s, filter 0.15s;
+      }
+
+      .ext-prompt-cta:hover {
+        transform: translateY(-1px);
+        box-shadow:
+          0 10px 26px rgba(91, 75, 216, 0.42),
+          0 1px 0 rgba(255, 255, 255, 0.22) inset;
+        filter: brightness(1.06);
+      }
+
+      .ext-prompt-cta:active {
+        transform: translateY(0);
+        filter: brightness(0.96);
+      }
+
+      .ext-prompt-cta svg {
+        width: 14px;
+        height: 14px;
+        transition: transform 0.15s;
+      }
+
+      .ext-prompt-cta:hover svg { transform: translateX(2px); }
+
+      /* Trust line below CTA */
+      .ext-prompt-trust {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        margin: 0.65rem 0 0;
+        font-size: 0.7rem;
+        color: var(--text-muted, rgba(255, 255, 255, 0.5));
+      }
+
+      [data-theme="light"] .ext-prompt-trust { color: rgba(20, 20, 40, 0.55); }
+
+      .ext-prompt-trust .dot {
+        width: 3px;
+        height: 3px;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0.5;
+      }
+
+      @media (max-width: 640px) {
+        .ext-prompt-wrap {
+          left: 0.75rem;
+          right: 0.75rem;
+          top: calc(64px + 0.75rem);
+        }
+        .ext-prompt { width: auto; }
+      }
+
       .kbd {
         background: var(--btn-ghost-bg);
         border: 1px solid var(--border-subtle);
@@ -1646,6 +1887,105 @@
         </button>
       </div>
     </nav>
+
+    <!-- ===== CHROME EXTENSION PROMPT (Chromium browsers only) ===== -->
+    <div id="ext-prompt-wrap" class="ext-prompt-wrap">
+    <div class="ext-prompt" role="region" aria-label="MoviPlayer Chrome extension">
+      <button type="button" class="ext-prompt-close" id="ext-prompt-close" aria-label="Dismiss">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+      </button>
+      <div class="ext-prompt-header">
+        <div class="ext-prompt-icon-tile">
+          <svg class="ext-prompt-icon" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 48 48" aria-hidden="true">
+            <defs>
+              <linearGradient id="ext-chrome-a" x1="3.2173" y1="15" x2="44.7812" y2="15" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#d93025"/><stop offset="1" stop-color="#ea4335"/></linearGradient>
+              <linearGradient id="ext-chrome-b" x1="20.7219" y1="47.6791" x2="41.5039" y2="11.6837" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#fcc934"/><stop offset="1" stop-color="#fbbc04"/></linearGradient>
+              <linearGradient id="ext-chrome-c" x1="26.5981" y1="46.5015" x2="5.8161" y2="10.506" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#1e8e3e"/><stop offset="1" stop-color="#34a853"/></linearGradient>
+            </defs>
+            <circle cx="24" cy="23.9947" r="12" style="fill:#fff"/>
+            <path d="M3.2154,36A24,24,0,1,0,12,3.2154,24,24,0,0,0,3.2154,36ZM34.3923,18A12,12,0,1,1,18,13.6077,12,12,0,0,1,34.3923,18Z" style="fill:none"/>
+            <path d="M24,12H44.7812a23.9939,23.9939,0,0,0-41.5639.0029L13.6079,30l.0093-.0024A11.9852,11.9852,0,0,1,24,12Z" style="fill:url(#ext-chrome-a)"/>
+            <circle cx="24" cy="24" r="9.5" style="fill:#1a73e8"/>
+            <path d="M34.3913,30.0029,24.0007,48A23.994,23.994,0,0,0,44.78,12.0031H23.9989l-.0025.0093A11.985,11.985,0,0,1,34.3913,30.0029Z" style="fill:url(#ext-chrome-b)"/>
+            <path d="M13.6086,30.0031,3.218,12.006A23.994,23.994,0,0,0,24.0025,48L34.3931,30.0029l-.0067-.0068a11.9852,11.9852,0,0,1-20.7778.007Z" style="fill:url(#ext-chrome-c)"/>
+          </svg>
+        </div>
+        <div class="ext-prompt-titles">
+          <p class="ext-prompt-title">Make any video just play</p>
+        </div>
+      </div>
+      <div class="ext-prompt-divider" aria-hidden="true"></div>
+      <ul class="ext-prompt-points">
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          Right-click any video to open it here
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          Quick play icon on every video link
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          Plays instantly and smoothly
+        </li>
+        <li>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+          No downloads, no waiting
+        </li>
+      </ul>
+      <a class="ext-prompt-cta" href="https://chromewebstore.google.com/detail/movi-player/ckleeigcopjnpehkjokijokjegknfgej" target="_blank" rel="noopener">
+        Add to Chrome
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </a>
+      <p class="ext-prompt-trust">
+        <span>Free</span><span class="dot"></span><span>No sign-up</span><span class="dot"></span><span>Open source</span>
+      </p>
+    </div>
+    </div>
+    <script>
+      // Show only on desktop Chromium-based browsers (Chrome, Edge, Brave, Opera, Arc, etc.).
+      // The Chrome extension we promote is desktop-only, so mobile users would just hit a
+      // dead end. Dismissal is per-session — closes for this tab/session, returns next visit.
+      (function () {
+        var wrap = document.getElementById("ext-prompt-wrap");
+        var closeBtn = document.getElementById("ext-prompt-close");
+        if (!wrap || !closeBtn) return;
+        if (location.protocol === "chrome-extension:" || location.protocol === "moz-extension:") return;
+
+        var ua = navigator.userAgent;
+        var uaData = navigator.userAgentData;
+        var brands = (uaData && uaData.brands) || [];
+
+        // Chromium detection: prefer UA Client Hints, fall back to UA sniff.
+        var isChromiumByHints = brands.some(function (b) { return /Chromium|Google Chrome|Microsoft Edge|Brave|Opera/i.test(b.brand); });
+        var isChromiumByUA = !!window.chrome && /Chrome|Chromium|CriOS|Edg|OPR/i.test(ua) && !/Firefox|FxiOS/i.test(ua);
+        var isChromium = isChromiumByHints || isChromiumByUA;
+
+        // Desktop detection: uaData.mobile is the cleanest signal in Chromium.
+        // Fallback combines UA regex, coarse pointer (touch-only), and viewport width.
+        var isMobileByHints = uaData && typeof uaData.mobile === "boolean" ? uaData.mobile : null;
+        var isMobileByUA = /Android|iPhone|iPad|iPod|Mobile|Tablet|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+        var isCoarsePointer = window.matchMedia && window.matchMedia("(pointer: coarse)").matches;
+        var isSmallViewport = window.innerWidth < 900;
+        var isMobile = isMobileByHints !== null
+          ? isMobileByHints
+          : (isMobileByUA || (isCoarsePointer && isSmallViewport));
+
+        if (!isChromium || isMobile) return;
+
+        var dismissed = false;
+        try { dismissed = sessionStorage.getItem("movi-ext-dismissed") === "1"; } catch (_) { /* private mode */ }
+        if (dismissed) return;
+
+        wrap.classList.add("visible");
+        closeBtn.addEventListener("click", function (e) {
+          e.preventDefault();
+          e.stopPropagation();
+          wrap.classList.remove("visible");
+          try { sessionStorage.setItem("movi-ext-dismissed", "1"); } catch (_) { /* private mode */ }
+        });
+      })();
+    </script>
 
     <!-- ===== HERO ===== -->
     <section class="hero">
