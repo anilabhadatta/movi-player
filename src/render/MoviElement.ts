@@ -607,6 +607,15 @@ export class MoviElement extends HTMLElement {
       </div>
     `;
     shadowRoot.appendChild(contextMenu);
+
+    // Move submenus out of the menu so they escape its backdrop-filter / overflow
+    // containing-block trap. They live as siblings of the menu in shadowRoot, and
+    // setupSubmenuHover positions them in :host-relative absolute coordinates.
+    const submenuNodes = contextMenu.querySelectorAll(
+      ".movi-context-menu-submenu, .movi-context-menu-submenu-audio, .movi-context-menu-submenu-subtitle",
+    );
+    submenuNodes.forEach((node) => shadowRoot.appendChild(node));
+
     Logger.debug(
       TAG,
       "[ContextMenu] Context menu element appended to shadow root",
@@ -3308,7 +3317,10 @@ export class MoviElement extends HTMLElement {
           if (
             node instanceof Element &&
             (node.classList.contains("movi-context-menu") ||
-              node.closest(".movi-context-menu"))
+              node.closest(".movi-context-menu") ||
+              node.closest(
+                ".movi-context-menu-submenu, .movi-context-menu-submenu-audio, .movi-context-menu-submenu-subtitle",
+              ))
           ) {
             return true;
           }
@@ -3340,8 +3352,10 @@ export class MoviElement extends HTMLElement {
       hideContextMenu(); // Used new local method
     });
 
-    // Handle context menu item clicks
-    contextMenu.addEventListener("click", (e) => {
+    // Handle context menu item clicks. The same handler is attached to
+    // submenus too because they live as siblings of contextMenu in shadowRoot
+    // (moved out so they escape the menu's backdrop-filter containing block).
+    const itemClickHandler = (e: Event) => {
       const target = e.target as HTMLElement;
       const item = target.closest(".movi-context-menu-item") as HTMLElement;
       if (!item) return;
@@ -3587,7 +3601,13 @@ export class MoviElement extends HTMLElement {
         );
         hideContextMenu();
       }
-    });
+    };
+    contextMenu.addEventListener("click", itemClickHandler);
+    shadowRoot
+      .querySelectorAll(
+        ".movi-context-menu-submenu, .movi-context-menu-submenu-audio, .movi-context-menu-submenu-subtitle",
+      )
+      .forEach((sm) => sm.addEventListener("click", itemClickHandler));
 
     // Handle hover for submenu
     const speedItem = contextMenu.querySelector(
@@ -3851,85 +3871,64 @@ export class MoviElement extends HTMLElement {
         clearTimeout(hideTimeout);
         hideTimeout = null;
       }
-      // Position submenu to align with parent item
-      const contextMenu = item.closest(".movi-context-menu") as HTMLElement;
+      // Submenu lives as a sibling of the context menu inside shadowRoot.
+      // It's position:absolute, so coordinates are relative to :host (player).
+      const contextMenu = this.shadowRoot?.querySelector(
+        ".movi-context-menu",
+      ) as HTMLElement | null;
       if (contextMenu) {
         const itemRect = item.getBoundingClientRect();
         const menuRect = contextMenu.getBoundingClientRect();
-        const topOffset = itemRect.top - menuRect.top;
-        submenu.style.top = `${topOffset}px`;
-
-        // Intelligent positioning
         const playerRect = this.getBoundingClientRect();
         const submenuWidth = submenu.offsetWidth || 160;
+        const gap = 4;
         const padding = 10;
 
         const spaceOnRight = playerRect.right - menuRect.right;
         const spaceOnLeft = menuRect.left - playerRect.left;
 
+        submenu.style.right = "auto";
+        submenu.style.marginLeft = "0";
+        submenu.style.marginRight = "0";
+
+        // Convert viewport coords → :host-relative
         if (spaceOnRight >= submenuWidth + padding) {
-          // 1. Show on RIGHT (Preferred)
-          submenu.style.left = "100%";
-          submenu.style.right = "auto";
-          submenu.style.marginLeft = "4px";
-          submenu.style.marginRight = "0";
+          // 1. RIGHT (Preferred)
+          submenu.style.left = `${menuRect.right + gap - playerRect.left}px`;
           submenu.style.transform = "translateX(-8px)";
         } else if (spaceOnLeft >= submenuWidth + padding) {
-          // 2. Show on LEFT
-          submenu.style.left = "auto";
-          submenu.style.right = "100%";
-          submenu.style.marginLeft = "0";
-          submenu.style.marginRight = "4px";
+          // 2. LEFT
+          submenu.style.left = `${menuRect.left - submenuWidth - gap - playerRect.left}px`;
           submenu.style.transform = "translateX(8px)";
         } else {
-          // 3. OVERLAP (Mobile/Tight Space) - "Stack" it
-          submenu.style.left = "20px"; // Slight offset to show depth
-          submenu.style.right = "auto";
-          submenu.style.marginLeft = "0";
-          submenu.style.marginRight = "0";
-          submenu.style.transform = "translateY(10px)"; // Slide up slightly
+          // 3. OVERLAP (tight space)
+          submenu.style.left = `${menuRect.left + 20 - playerRect.left}px`;
+          submenu.style.transform = "translateY(10px)";
         }
 
-        // Vertical positioning: Check if there's space on the bottom
-        // We need to make the element temporarily visible to measure it if it's hidden
+        let topPx = itemRect.top - playerRect.top;
+        submenu.style.top = `${topPx}px`;
+
+        // Measure submenu height (force layout if hidden)
         const wasClassVisible = submenu.classList.contains(
           "movi-context-menu-submenu-visible",
         );
-
-        // Force layout for measurement
         if (!wasClassVisible) {
           submenu.style.visibility = "hidden";
           submenu.style.display = "block";
         }
-
-        // Now measure
-        const submenuRect = submenu.getBoundingClientRect();
-
-        // Restore
+        const submenuHeight = submenu.getBoundingClientRect().height;
         if (!wasClassVisible) {
           submenu.style.display = "";
           submenu.style.visibility = "";
         }
 
-        // submenuRect.top is currently based on the initial top assignment
-        // The absolute top relative to viewport would be menuRect.top + topOffset
-        const currentAbsTop = menuRect.top + topOffset;
-
-        // Check if the bottom of the submenu would be below the player bottom
-        if (currentAbsTop + submenuRect.height > playerRect.bottom - 10) {
-          // It overflows! Shift it up.
-          // New top relative to menu parent:
-          // We want bottom of submenu to be at playerRect.bottom - 10
-          // So top = (playerRect.bottom - 10) - height - menuRect.top
-          let newTop =
-            playerRect.bottom - 10 - submenuRect.height - menuRect.top;
-
-          // Ensure we don't go off the top either
-          if (menuRect.top + newTop < playerRect.top + 10) {
-            newTop = playerRect.top + 10 - menuRect.top;
-          }
-
-          submenu.style.top = `${newTop}px`;
+        // Clamp to player bounds (player-relative)
+        const playerHeight = playerRect.height;
+        if (topPx + submenuHeight > playerHeight - padding) {
+          topPx = playerHeight - padding - submenuHeight;
+          if (topPx < padding) topPx = padding;
+          submenu.style.top = `${topPx}px`;
         }
       }
 
@@ -7513,9 +7512,6 @@ export class MoviElement extends HTMLElement {
 
       .movi-context-menu-submenu {
         position: absolute;
-        left: 100%;
-        top: 0;
-        margin-left: 4px;
         background: rgba(15, 15, 22, 0.95);
         backdrop-filter: blur(30px);
         -webkit-backdrop-filter: blur(30px);
@@ -7540,13 +7536,10 @@ export class MoviElement extends HTMLElement {
         transform: translateX(0) !important;
         pointer-events: auto !important;
       }
-      
+
       .movi-context-menu-submenu-audio,
       .movi-context-menu-submenu-subtitle {
         position: absolute;
-        left: 100%;
-        top: 0;
-        margin-left: 4px;
         background: rgba(15, 15, 22, 0.95);
         backdrop-filter: blur(30px);
         -webkit-backdrop-filter: blur(30px);
@@ -8080,15 +8073,20 @@ export class MoviElement extends HTMLElement {
         .movi-context-menu-submenu,
         .movi-context-menu-submenu-audio,
         .movi-context-menu-submenu-subtitle {
+          /* Match the mobile menu panel: 80% width / 350px max, full height,
+             anchored top-right. Sized in :host coords because submenus now
+             live as siblings of the menu in shadowRoot. */
           position: absolute !important;
           top: 0 !important;
           right: 0 !important;
           left: auto !important;
-          width: 100% !important;
+          width: 80% !important;
+          max-width: 350px !important;
           height: 100% !important;
           margin: 0 !important;
           border-radius: 0 !important;
           border: none !important;
+          border-left: 1px solid rgba(255, 255, 255, 0.1) !important;
           z-index: 20001 !important;
           background: rgba(15, 15, 22, 0.98) !important;
           transform: translateX(100%) !important;
