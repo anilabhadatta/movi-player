@@ -258,20 +258,74 @@ player.setVolume(0.5); // 50% volume
 
 ---
 
-#### `mute(): void` / `unmute(): void`
+#### `setMuted(muted: boolean): void` / `getMuted(): boolean`
 
-Mutes or unmutes audio without changing volume level.
+Toggle/read mute state independently from `setVolume()`. Muting also disables the audio decode path on the renderer to save CPU.
+
+```typescript
+player.setMuted(true);
+console.log(player.getMuted()); // true
+```
 
 ---
 
-#### `setLoop(loop: boolean): void`
+#### `setStableAudio(enabled: boolean): void` / `getStableAudio(): boolean`
 
-Enables or disables loop mode.
+Enable/disable the loudness-normalization compressor (driven by `DynamicsCompressorNode`). Same toggle as the `stablevolume` attribute on `<movi-player>`.
 
-**Behavior:**
+```typescript
+player.setStableAudio(true);
+```
 
-- When enabled, playback restarts from beginning when reaching end
-- Fires `looped` event on each restart
+---
+
+#### `setHDREnabled(enabled: boolean): void` / `isHDRSupported(): boolean`
+
+Force HDR rendering on/off, and check whether the **content** is HDR. Note that effective rendering also depends on browser/display capability — see the [HDR guide](../guide/hdr-support.md).
+
+```typescript
+if (player.isHDRSupported()) {
+  player.setHDREnabled(true);
+}
+```
+
+---
+
+#### `setMaxBufferSize(megabytes: number): void`
+
+Adjusts the prefetch window in megabytes (HTTP and encrypted sources). Mirrors the `buffersize` HTML attribute.
+
+```typescript
+player.setMaxBufferSize(400); // 400 MB ahead
+```
+
+---
+
+#### `rotateVideo(): number` / `getVideoRotation(): number` / `setVideoRotation(deg: number): void`
+
+Rotate the canvas output. `rotateVideo()` cycles 0 → 90 → 180 → 270 and returns the new angle. `setVideoRotation()` jumps directly to a value.
+
+```typescript
+player.rotateVideo();          // → 90
+player.setVideoRotation(180);
+console.log(player.getVideoRotation()); // 180
+```
+
+---
+
+#### `setFitMode(mode): void`
+
+Set the canvas fit policy. `mode` is `"contain" | "cover" | "fill" | "zoom" | "control"`.
+
+```typescript
+player.setFitMode("cover");
+```
+
+---
+
+#### `setLetterboxColor(r: number, g: number, b: number): void`
+
+Override the WebGL letterbox color (each channel `0..1`). Used internally by ambient mode; expose for custom UI tints.
 
 ---
 
@@ -326,27 +380,9 @@ type PlayerState =
 
 ---
 
-#### `isPaused(): boolean`
-
-Returns true if player is paused.
-
----
-
-#### `isLooping(): boolean`
-
-Returns true if loop mode is enabled.
-
----
-
 #### `getVolume(): number`
 
 Returns current volume (0.0 to 1.0).
-
----
-
-#### `isMuted(): boolean`
-
-Returns true if audio is muted.
 
 ---
 
@@ -359,6 +395,24 @@ Returns current playback rate multiplier.
 #### `getMediaInfo(): MediaInfo | null`
 
 Returns media metadata (null if not loaded).
+
+---
+
+#### `getContentDispositionFilename(): string | null` / `getMetadataTitle(): string | null`
+
+Filename hinted by the server's `Content-Disposition` header, and the title carried in container metadata (e.g., MKV's `<Title>`). The element uses these to populate the in-player overlay and tab title.
+
+---
+
+#### `getChapters(): Array<{ title, start, end }>`
+
+Chapters parsed from the source's metadata. Empty array when none are present.
+
+```typescript
+for (const ch of player.getChapters()) {
+  console.log(`${ch.start}-${ch.end}: ${ch.title}`);
+}
+```
 
 ---
 
@@ -386,102 +440,141 @@ Returns subtitle tracks only.
 
 ---
 
-### Track Selection
+#### `getAudioLangs(): { lang, label, active }[]` / `selectAudioLang(lang: string): boolean`
 
-#### `selectVideoTrack(trackId: number): void`
-
-Switches to a different video track.
-
-**Use Cases:**
-
-- Multi-quality video (480p, 720p, 1080p, 4K)
-- Multi-angle video
-- Different codec variants
-
-**Example:**
+Language-keyed accessors for muxed audio tracks — easier than working with numeric `trackId` when you just want "switch to Hindi".
 
 ```typescript
-const tracks = player.getVideoTracks();
-const track4K = tracks.find((t) => t.height >= 2160);
-if (track4K) {
-  player.selectVideoTrack(track4K.id);
-}
+player.selectAudioLang("hi");
 ```
 
 ---
 
-#### `selectAudioTrack(trackId: number): void`
+#### `getSubtitleLangs(): { lang, label, active }[]` / `selectSubtitleLang(lang: string \| null): Promise<boolean>`
 
-Switches to a different audio track.
+Same idea for subtitles. Pass `null` to disable.
 
-**Use Cases:**
+---
 
-- Multi-language audio
-- Different audio codecs
-- Surround sound vs stereo
+#### `useMuxedAudio(): void` / `isNativeAudioActive(): boolean` / `hasNativeAudio(): boolean`
 
-**Example:**
+Switch between muxed-in audio and a separately-loaded native audio element (the split-source path). `hasNativeAudio()` reports whether a separate audio element exists; `isNativeAudioActive()` whether it's currently driving playback.
+
+---
+
+### Track Selection
+
+#### `selectAudioTrack(trackId: number): boolean`
+
+Switches to a different audio track by numeric ID. Returns `true` on success. For language-keyed switching see [`selectAudioLang()`](#getaudiolangs-lang-label-active-selectaudiolanglang-string-boolean).
 
 ```typescript
 const tracks = player.getAudioTracks();
 const english = tracks.find((t) => t.language === "eng");
-if (english) {
-  player.selectAudioTrack(english.id);
-}
+if (english) player.selectAudioTrack(english.id);
 ```
+
+::: info Video tracks
+There is **no** `selectVideoTrack()` on `MoviPlayer` — for HLS quality switching, use the HLS-wrapped path or the `<movi-player>` quality menu. Multi-quality non-HLS sources are not yet supported at the programmatic-API level.
+:::
 
 ---
 
-#### `selectSubtitleTrack(trackId: number | null): void`
+#### `selectSubtitleTrack(trackId: number | null): Promise<boolean>`
 
 Enables a subtitle track or disables subtitles.
 
-**Parameters:**
-
-- `trackId` - Track ID to enable, or `null` to disable
-
-**Example:**
-
 ```typescript
-const tracks = player.getSubtitleTracks();
-const spanish = tracks.find((t) => t.language === "spa");
-if (spanish) {
-  player.selectSubtitleTrack(spanish.id);
-}
+const spanish = player.getSubtitleTracks().find((t) => t.language === "spa");
+if (spanish) await player.selectSubtitleTrack(spanish.id);
 
-// Disable subtitles
-player.selectSubtitleTrack(null);
+await player.selectSubtitleTrack(null); // Off
 ```
 
 ---
 
-### Preview Generation
+### Preview / Timeline Generation
 
-#### `generatePreview(timestamp: number, width?: number, height?: number): Promise<Blob>`
+#### `getPreviewFrame(time: number): Promise<Blob | null>`
 
-Generates a thumbnail image at a specific timestamp.
-
-**Parameters:**
-
-- `timestamp` - Time in seconds
-- `width` - Optional width (default: video width / 4)
-- `height` - Optional height (default: video height / 4)
-
-**Returns:** JPEG image blob
-
-**Features:**
-
-- Uses isolated WASM instance (no interference with playback)
-- Software decoding only (faster for single frames)
-- Automatic cleanup after generation
-
-**Example:**
+Generates a single thumbnail at a given timestamp using an **isolated** WASM instance, so it doesn't disturb the main playback decoders. Returns `null` if generation fails.
 
 ```typescript
-const thumbnail = await player.generatePreview(60, 320, 180);
-const url = URL.createObjectURL(thumbnail);
-imgElement.src = url;
+const blob = await player.getPreviewFrame(60);
+if (blob) imgElement.src = URL.createObjectURL(blob);
 ```
+
+---
+
+#### `generateTimeline(...): Promise<...>`
+
+Pre-renders a strip of N evenly-spaced thumbnails for the timeline scrubber. Driven by the `T` keyboard shortcut and the timeline UI. See [src/core/MoviPlayer.ts:2437](../src/core/MoviPlayer.ts#L2437) for the current signature.
+
+---
+
+### Buffer / Cache Inspection
+
+#### `getBufferedTime(): number`
+
+Returns the highest contiguous buffered time (in seconds) starting from the current position. This is what the seek-bar buffered indicator reads.
+
+---
+
+#### `getCachedTimeRanges(): Array<{ start, end }>`
+
+All cached time ranges, not just the contiguous one. Useful for drawing multi-segment buffer indicators.
+
+---
+
+#### `getCacheStats()` / `getNetworkSpeed(): number` / `getStats()`
+
+Diagnostic counters surfaced in the "Stats for nerds" overlay (`I` key) — bytes cached, current network throughput, codec/decoder/buffer health, etc.
+
+---
+
+#### `getBufferStartBytes() / getBufferEndBytes() / getBufferStartTime() / getBufferEndTime()`
+
+Byte- and time-level edges of the active buffer window. Used by the encrypted source's prefetch/refill heuristics; rarely needed in app code.
+
+---
+
+### Source / Renderer Inspection
+
+#### `getSource(): SourceAdapter | null` / `isFileSource(): boolean` / `isHttpSource(): boolean`
+
+Reflect on the currently-loaded source. `getSource()` returns the underlying `HttpSource`/`EncryptedHttpSource`/`FileSource` instance (advanced).
+
+---
+
+#### `isSoftwareDecoding(): boolean`
+
+`true` if the player is currently using the software (FFmpeg WASM) decoder path — either because hardware decode failed or because the source forced it.
+
+---
+
+#### `getHLSVideoElement(): HTMLVideoElement | null`
+
+The native `<video>` element used for HLS/DRM playback paths, or `null` for the canvas pipeline.
+
+---
+
+#### `resizeCanvas(width: number, height: number): void`
+
+Notify the renderer that the canvas dimensions changed. The element calls this from its `ResizeObserver`; you only need it when driving `MoviPlayer` directly.
+
+---
+
+### Subtitle Surface
+
+#### `setSubtitleOverlay(overlay: HTMLElement | null): void`
+
+Mount/unmount the DOM node that subtitle text renders into. The element passes its shadow-root overlay automatically.
+
+---
+
+#### `setSubtitleControlsPadding(padding: number): void`
+
+Push subtitles up by N pixels so they don't sit under the controls bar when controls are visible.
 
 ---
 
@@ -587,37 +680,36 @@ class TrackManager {
 
 ## Events
 
-The player extends `EventEmitter` and fires standard media events:
+The player extends `EventEmitter` and fires the events declared in `PlayerEventMap`. See the **[full Events Reference](./events.md)** for every event, payload type, and example handler — including the MoviElement DOM event mirror.
 
-### Event Types
+### Event Types (summary)
 
 ```typescript
 interface PlayerEventMap {
   // Lifecycle
-  loadstart: void;
-  loadedmetadata: MediaInfo;
-  canplay: void;
-  play: void;
-  pause: void;
+  loadStart: void;
+  loadEnd: void;
+  stateChange: PlayerState;
   ended: void;
-
-  // Time updates
-  timeupdate: { currentTime: number; duration: number };
-  seeking: number;
-  seeked: number;
-
-  // State changes
-  statechange: PlayerState;
-
-  // Looping
-  looped: void;
-
-  // Errors
   error: Error;
 
-  // Rendering (advanced)
-  frame: VideoFrame;
-  audio: Float32Array;
+  // Progress
+  timeUpdate: number;
+  durationChange: number;
+  seeking: number;
+  seeked: number;
+  bufferUpdate: { start: number; end: number }[]; // reserved (not yet emitted)
+
+  // Tracks
+  tracksChange: Track[];
+  audioTrackChange: { lang: string; label: string };
+  subtitleTrackChange:
+    | { lang: string; label: string }
+    | { lang: null; label: null };
+
+  // Frame-level (advanced)
+  frame: DecodedVideoFrame;
+  audio: DecodedAudioFrame;
   subtitle: SubtitleCue;
 }
 ```
@@ -625,28 +717,19 @@ interface PlayerEventMap {
 ### Event Subscription
 
 ```typescript
-// Single event
-player.on("play", () => {
-  console.log("Playback started");
-});
-
-// Time updates (fires at ~10Hz during playback)
-player.on("timeupdate", ({ currentTime, duration }) => {
-  console.log(`${currentTime}s / ${duration}s`);
-  updateProgressBar(currentTime / duration);
-});
-
-// Error handling
-player.on("error", (error) => {
-  console.error("Playback error:", error);
-  showErrorMessage(error.message);
-});
+player.on("stateChange", (state) => console.log("State:", state));
+player.on("timeUpdate", (t) => updateProgressBar(t / player.getDuration()));
+player.on("error", (err) => showErrorMessage(err.message));
 
 // Unsubscribe
 const handler = () => console.log("Paused");
-player.on("pause", handler);
-player.off("pause", handler);
+player.on("stateChange", handler);
+player.off("stateChange", handler);
 ```
+
+::: warning Event names are camelCase
+`MoviPlayer` events are camelCase (`loadStart`, `timeUpdate`, `stateChange`). The DOM-level events on `<movi-player>` use HTML-style lowercase (`loadstart`, `timeupdate`, `statechange`). Don't mix the two — see the [events reference](./events.md) for both tables side-by-side.
+:::
 
 ---
 
@@ -845,8 +928,8 @@ async function generateThumbnails(url: string, count: number) {
   const thumbnails: Blob[] = [];
   for (let i = 1; i <= count; i++) {
     const timestamp = interval * i;
-    const thumbnail = await player.generatePreview(timestamp, 160, 90);
-    thumbnails.push(thumbnail);
+    const thumbnail = await player.getPreviewFrame(timestamp);
+    if (thumbnail) thumbnails.push(thumbnail);
   }
 
   player.destroy();
@@ -1039,17 +1122,15 @@ player.on("error", async (error) => {
 ### 3. Optimize for Mobile
 
 ```typescript
-// Detect mobile and reduce quality
+// Detect mobile and shrink the prefetch window
 const isMobile = /iPhone|iPad|Android/i.test(navigator.userAgent);
 
 if (isMobile) {
-  const tracks = player.getVideoTracks();
-  const sdTrack = tracks.find((t) => t.height <= 720);
-  if (sdTrack) {
-    player.selectVideoTrack(sdTrack.id);
-  }
+  player.setMaxBufferSize(80); // 80 MB prefetch instead of the default 250
 }
 ```
+
+Multi-quality switching is HLS-only at the programmatic-API level; for a non-HLS source, swap `src` to a lower-bitrate file when bandwidth/device dictates.
 
 ---
 

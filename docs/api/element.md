@@ -1018,112 +1018,144 @@ await player.loadEncrypted({
 
 ### Track Selection
 
-#### `getVideoTracks(): VideoTrack[]`
+::: info
+The element does **not** expose numeric `selectVideoTrack` / `selectAudioTrack` / `selectSubtitleTrack` directly — use the language-keyed helpers below ([`selectAudioLang`](#getaudiolangs-lang-label-active), [`selectSubtitleLang`](#getsubtitlelangs-lang-label-active)). For raw `Track[]` lists and numeric IDs, drop down to the underlying `MoviPlayer` instance via [`getCanvas()`](#getcanvas-htmlcanvaselement)'s sibling APIs or the programmatic `MoviPlayer` directly.
+:::
 
-Returns available video tracks.
+---
+
+### Source Helpers
+
+#### `setFile(file: File | null): void`
+
+Convenience setter for a `File` source — equivalent to `player.src = file`.
 
 ```typescript
-const tracks = player.getVideoTracks();
-tracks.forEach((track) => {
-  console.log(`${track.width}x${track.height} @ ${track.frameRate}fps`);
+fileInput.addEventListener("change", (e) => {
+  player.setFile(e.target.files[0]);
 });
 ```
 
 ---
 
-#### `getAudioTracks(): AudioTrack[]`
+#### `source(value?): { src, type, audioSrc } | void`
 
-Returns available audio tracks.
+Video.js-style source API. With no arg, returns the current source descriptor; with an arg, sets a new one.
 
 ```typescript
-const tracks = player.getAudioTracks();
-tracks.forEach((track) => {
-  console.log(`${track.language}: ${track.codec}`);
+// Single string
+player.source("video.mp4");
+
+// Object with type hint
+player.source({ src: "video.mp4", type: "video/mp4" });
+
+// Multiple sources — first playable wins (uses canPlayType)
+player.source([
+  { src: "video.mp4", type: "video/mp4" },
+  { src: "video.webm", type: "video/webm" },
+]);
+
+// Separate video + audio (DASH-style split)
+player.source({
+  video: { src: "video-only.mp4", type: "video/mp4" },
+  audio: { src: "audio.m4a", type: "audio/mp4" },
 });
+
+// Multi-language audio + external subtitles
+player.source({
+  video: { src: "video.mp4", type: "video/mp4" },
+  audio: [
+    { src: "en.m4a", type: "audio/mp4", lang: "en", label: "English" },
+    { src: "hi.m4a", type: "audio/mp4", lang: "hi", label: "Hindi" },
+  ],
+  subtitles: [
+    { src: "en.vtt", lang: "en", label: "English", format: "vtt" },
+  ],
+});
+
+// Read current source
+const current = player.source();
+console.log(current.src, current.type, current.audioSrc);
 ```
 
 ---
 
-#### `getSubtitleTracks(): SubtitleTrack[]`
+#### `audioSrc: string | null`
 
-Returns available subtitle tracks.
+Gets/sets a separate audio source URL for split video+audio playback. Can also be set via the child `<source kind="audio">` pattern in HTML.
 
 ```typescript
-const tracks = player.getSubtitleTracks();
+player.audioSrc = "audio-only.m4a";
 ```
 
 ---
 
-#### `selectVideoTrack(trackId: number): void`
+### Track Helpers (language-keyed)
 
-Switches to a different video track.
+When you prefer language codes over numeric track IDs, the element exposes a parallel set of helpers.
+
+#### `getAudioLangs(): { lang, label, active }[]`
+
+Returns the currently available audio languages. Works for muxed multi-audio files **and** for the multi-language `source({ audio: [...] })` form.
 
 ```typescript
-const tracks = player.getVideoTracks();
-player.selectVideoTrack(tracks[1].id); // Select second track
+const langs = player.getAudioLangs();
+// [{ lang: "en", label: "English", active: true }, { lang: "hi", label: "Hindi", active: false }]
 ```
 
 ---
 
-#### `selectAudioTrack(trackId: number): void`
+#### `selectAudioLang(lang: string): boolean`
 
-Switches to a different audio track.
+Switches the active audio track by language code. Returns `true` if a matching track was found.
 
 ```typescript
-const englishTrack = player.getAudioTracks().find((t) => t.language === "eng");
-if (englishTrack) {
-  player.selectAudioTrack(englishTrack.id);
-}
+player.selectAudioLang("hi");
 ```
 
 ---
 
-#### `selectSubtitleTrack(trackId: number | null): void`
+#### `getSubtitleLangs(): { lang, label, active }[]`
 
-Enables a subtitle track or disables subtitles.
+Returns external subtitle tracks (those declared via `source({ subtitles: [...] })` or sideloaded).
+
+---
+
+#### `selectSubtitleLang(lang: string | null): Promise<boolean>`
+
+Activates an external subtitle track by language, or pass `null` to disable subtitles. Returns a promise that resolves to `true` on success.
 
 ```typescript
-// Enable subtitles
-player.selectSubtitleTrack(tracks[0].id);
-
-// Disable subtitles
-player.selectSubtitleTrack(null);
+await player.selectSubtitleLang("en");   // Turn on English
+await player.selectSubtitleLang(null);    // Turn off
 ```
 
 ---
 
-### Advanced Methods
+### Other Helpers
 
-#### `requestPictureInPicture(): Promise<PictureInPictureWindow>`
+#### `getCanvas(): HTMLCanvasElement`
 
-Enters picture-in-picture mode (if supported).
+Returns the underlying `<canvas>` the player draws into. Useful for snapshotting, applying CSS filters/transforms, or chaining further GPU work — note that the canvas is owned by the element and you should not detach or resize it manually.
 
 ```typescript
-if (document.pictureInPictureEnabled) {
-  await player.requestPictureInPicture();
-}
+const canvas = player.getCanvas();
+const dataUrl = canvas.toDataURL("image/png");
 ```
 
 ---
 
 #### `requestFullscreen(): Promise<void>`
 
-Enters fullscreen mode.
+Native `HTMLElement.requestFullscreen()` — the element inherits it. Pressing `F` or using the fullscreen button calls this internally.
 
 ```typescript
 await player.requestFullscreen();
 ```
 
----
-
-#### `generatePreview(timestamp: number, width?: number, height?: number): Promise<Blob>`
-
-Generates a thumbnail image.
-
-```typescript
-const thumbnail = await player.generatePreview(60, 320, 180);
-imgElement.src = URL.createObjectURL(thumbnail);
-```
+::: tip Picture-in-Picture
+The element does **not** expose a `requestPictureInPicture()` method (it extends `HTMLElement`, not `HTMLVideoElement`). PiP is handled internally via the Document Picture-in-Picture API and is triggered by the `P` keyboard shortcut, the PiP button, or the context menu. Listen for the [`pipchange`](#events) event to react to state changes.
+:::
 
 ---
 
@@ -1540,27 +1572,26 @@ if (
 
 ### Multi-Quality Streaming
 
-Select video quality at runtime:
+Switch the active audio language at runtime (the element doesn't expose direct video-track switching — see the note in [Track Selection](#track-selection)):
 
 ```html
-<movi-player id="player" src="video.mp4" controls></movi-player>
-
-<select id="quality">
-  <option value="0">1080p</option>
-  <option value="1">720p</option>
-  <option value="2">480p</option>
-</select>
+<movi-player id="player" src="video.mkv" controls></movi-player>
+<select id="audio"></select>
 
 <script>
   const player = document.getElementById("player");
-  const quality = document.getElementById("quality");
+  const audio = document.getElementById("audio");
 
-  player.addEventListener("loadedmetadata", () => {
-    const tracks = player.getVideoTracks();
-    // Assume tracks are sorted by resolution
-    quality.addEventListener("change", () => {
-      player.selectVideoTrack(tracks[quality.value].id);
-    });
+  player.addEventListener("loadeddata", () => {
+    audio.innerHTML = "";
+    for (const t of player.getAudioLangs()) {
+      const opt = new Option(`${t.label} (${t.lang})`, t.lang, t.active, t.active);
+      audio.add(opt);
+    }
+  });
+
+  audio.addEventListener("change", () => {
+    player.selectAudioLang(audio.value);
   });
 </script>
 ```
