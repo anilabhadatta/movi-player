@@ -1641,6 +1641,58 @@ async function handleEncVideo(request, env) {
     return new Response(null, { status: upstream.status, headers: headHeaders });
   }
 
+  // Peek the first chunk of the upstream body and retry the fetch if it
+  // closes immediately with no data. Observed behavior under concurrent
+  // load: certain byte ranges return 206 OK headers but `done=true` on
+  // first reader.read() — the body is empty. Faithfully passing that
+  // empty body through to the client surfaces as "Stream ended before
+  // block N" errors and wedges the thumbnail/playback consumer. A small
+  // retry loop here is fully transparent: by the time we return the
+  // Response below we either have a real chunk in hand or we've given
+  // up and return 502 so the client retries via its own error path.
+  const MAX_UPSTREAM_RETRIES = 2;
+  let upstreamReader = null;
+  let firstChunk = null;
+  for (let attempt = 0; attempt <= MAX_UPSTREAM_RETRIES; attempt++) {
+    if (attempt > 0) {
+      // Re-issue the upstream fetch from scratch. Don't reuse the prior
+      // upstream's body — we already drained it (it was empty).
+      try {
+        upstream = await fetch(payload.url, {
+          method: "GET",
+          headers: upstreamHeaders,
+          redirect: "follow",
+        });
+      } catch {
+        upstream = null;
+      }
+      if (!upstream || (!upstream.ok && upstream.status !== 206)) continue;
+    }
+    if (!upstream.body) continue;
+    const reader = upstream.body.getReader();
+    let probe;
+    try {
+      probe = await reader.read();
+    } catch {
+      try { reader.releaseLock(); } catch { /* noop */ }
+      continue;
+    }
+    if (!probe.done && probe.value && probe.value.length > 0) {
+      upstreamReader = reader;
+      firstChunk = probe.value;
+      break;
+    }
+    // Empty body — release the reader and either retry or bail.
+    try { reader.releaseLock(); } catch { /* noop */ }
+    try { await upstream.body.cancel(); } catch { /* noop */ }
+  }
+  if (!upstreamReader) {
+    return jsonResponse(
+      { error: "Upstream returned empty body after retries" },
+      502,
+    );
+  }
+
   // Stream-and-encrypt the upstream body in fixed 2MB plaintext frames.
   // Each frame is its own self-contained AES-GCM message so the client
   // can decrypt frames progressively as they arrive (SAB-style
@@ -1712,7 +1764,11 @@ async function handleEncVideo(request, env) {
 
   const outStream = new ReadableStream({
     async start(controller) {
-      const reader = upstream.body.getReader();
+      // Reader was already opened during the empty-body peek above; the
+      // first chunk we read from it is sitting in `firstChunk` and must
+      // be replayed before resuming reads.
+      const reader = upstreamReader;
+      let pendingFirstChunk = firstChunk;
       // Fresh buffer per frame so the in-flight pipeline promises don't
       // race against the next-frame accumulation path writing into the
       // same memory.
@@ -1747,7 +1803,15 @@ async function handleEncVideo(request, env) {
       let firstFrameEmitted = false;
       try {
         outer: while (true) {
-          const { done, value } = await reader.read();
+          let done;
+          let value;
+          if (pendingFirstChunk) {
+            value = pendingFirstChunk;
+            pendingFirstChunk = null;
+            done = false;
+          } else {
+            ({ done, value } = await reader.read());
+          }
           if (done) break;
           if (!value || value.length === 0) continue;
 
