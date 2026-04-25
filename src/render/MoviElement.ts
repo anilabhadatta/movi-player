@@ -15,6 +15,8 @@ import type {
   SourceConfig,
   RendererType,
   VideoTrack,
+  AudioTrack,
+  SubtitleTrack,
   DecoderType,
   PlayerState,
 } from "../types";
@@ -703,7 +705,16 @@ export class MoviElement extends HTMLElement {
                   </svg>
                 </button>
                 <div class="movi-audio-track-menu" style="display: none;">
+                  <div class="movi-track-menu-header">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M9 18V5l12-2v13"></path>
+                      <circle cx="6" cy="18" r="3"></circle>
+                      <circle cx="18" cy="16" r="3"></circle>
+                    </svg>
+                    <span>Audio Track</span>
+                  </div>
                   <div class="movi-audio-track-list"></div>
+                  <div class="movi-track-menu-footer movi-audio-track-footer"></div>
                 </div>
               </div>
               <div class="movi-subtitle-track-container">
@@ -717,7 +728,15 @@ export class MoviElement extends HTMLElement {
                   </svg>
                 </button>
                 <div class="movi-subtitle-track-menu" style="display: none;">
+                  <div class="movi-track-menu-header">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect width="20" height="16" x="2" y="4" rx="2" ry="2"></rect>
+                      <path d="M10 8.5H8a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2 M18 8.5h-2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2"></path>
+                    </svg>
+                    <span>Subtitles</span>
+                  </div>
                   <div class="movi-subtitle-track-list"></div>
+                  <div class="movi-track-menu-footer movi-subtitle-track-footer"></div>
                 </div>
               </div>
 
@@ -4325,6 +4344,49 @@ export class MoviElement extends HTMLElement {
     icon.innerHTML = svg;
   }
 
+  private static readonly TRACK_ICON_AUDIO = `<svg class="movi-track-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+  private static readonly TRACK_ICON_SUBTITLE = `<svg class="movi-track-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2" ry="2"/><path d="M10 8.5H8a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2 M18 8.5h-2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2"/></svg>`;
+  private static readonly TRACK_ICON_OFF = `<svg class="movi-track-item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="6" y1="12" x2="18" y2="12"/></svg>`;
+  private static readonly TRACK_ICON_CHECK = `<svg class="movi-track-item-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+
+  private formatAudioBadge(track: AudioTrack): string {
+    const codec = (track.codec || "").toUpperCase();
+    if (track.channels) {
+      const layout =
+        track.channels === 1
+          ? "Mono"
+          : track.channels === 2
+            ? "Stereo"
+            : track.channels === 6
+              ? "5.1"
+              : track.channels === 8
+                ? "7.1"
+                : `${track.channels}ch`;
+      return codec ? `${codec} ${layout}` : layout;
+    }
+    if (track.language) {
+      const lang = track.language.length >= 2
+        ? track.language.substring(0, 3).toUpperCase()
+        : track.language.toUpperCase();
+      return codec ? `${codec} • ${lang}` : lang;
+    }
+    return codec;
+  }
+
+  private formatSubtitleBadge(track: SubtitleTrack): string {
+    const parts: string[] = [];
+    if (track.language) {
+      const lang = track.language.length >= 2
+        ? track.language.substring(0, 3).toUpperCase()
+        : track.language.toUpperCase();
+      parts.push(lang);
+    }
+    if (track.subtitleType) {
+      parts.push(track.subtitleType === "image" ? "Image" : "Text");
+    }
+    return parts.join(" • ");
+  }
+
   private updateAudioTrackMenu(): void {
     if (!this.player) return;
 
@@ -4367,32 +4429,24 @@ export class MoviElement extends HTMLElement {
     // Build combined menu — muxed tracks first, then external
     let menuHTML = "";
 
+    const ICON = MoviElement.TRACK_ICON_AUDIO;
+    const CHECK = MoviElement.TRACK_ICON_CHECK;
+
     // Muxed audio tracks (from MKV/MP4 demuxer)
     menuHTML += audioTracks
       .map((track) => {
         // Muxed track is active only when native audio is NOT active
         const isActive = !isNativeActive && activeTrack?.id === track.id;
         const label = track.label || `Audio ${track.id}`;
-        const infoParts: string[] = [];
-
-        if (track.language) {
-          const langCode =
-            track.language.length >= 2
-              ? track.language.substring(0, 3).toUpperCase()
-              : track.language.toUpperCase();
-          infoParts.push(langCode);
-        }
-        if (track.channels) {
-          infoParts.push(`${track.channels}ch`);
-        }
-
-        const info = infoParts.length > 0 ? infoParts.join(" • ") : "";
+        const badge = this.formatAudioBadge(track);
 
         return `
         <div class="movi-audio-track-item ${isActive ? "movi-audio-track-active" : ""}"
              data-track-id="${track.id}">
+          ${ICON}
           <span class="movi-audio-track-label">${label}</span>
-          ${info ? `<span class="movi-audio-track-info">${info}</span>` : ""}
+          ${badge ? `<span class="movi-audio-track-info">${badge}</span>` : ""}
+          ${CHECK}
         </div>`;
       })
       .join("");
@@ -4402,12 +4456,25 @@ export class MoviElement extends HTMLElement {
       .map((t) => `
         <div class="movi-audio-track-item ${t.active ? "movi-audio-track-active" : ""}"
              data-audio-lang="${t.lang}">
+          ${ICON}
           <span class="movi-audio-track-label">${t.label}</span>
           <span class="movi-audio-track-info">${t.lang.toUpperCase()}</span>
+          ${CHECK}
         </div>`)
       .join("");
 
     audioTrackList.innerHTML = menuHTML;
+
+    // Footer count
+    const audioFooter = this.shadowRoot?.querySelector(
+      ".movi-audio-track-footer",
+    ) as HTMLElement | null;
+    if (audioFooter) {
+      audioFooter.textContent =
+        totalTracks === 1
+          ? "1 audio track available"
+          : `${totalTracks} audio tracks available`;
+    }
 
     // Add click handlers
     audioTrackList
@@ -4692,11 +4759,17 @@ export class MoviElement extends HTMLElement {
       if (subtitleIconFilled) subtitleIconFilled.style.display = "none";
     }
 
+    const ICON = MoviElement.TRACK_ICON_SUBTITLE;
+    const ICON_OFF = MoviElement.TRACK_ICON_OFF;
+    const CHECK = MoviElement.TRACK_ICON_CHECK;
+
     // Build menu - start with "Off" option
     let menuHTML = `
       <div class="movi-subtitle-track-item ${offActive ? "movi-subtitle-track-active" : ""}"
            data-track-id="null">
+        ${ICON_OFF}
         <span class="movi-subtitle-track-label">Off</span>
+        ${CHECK}
       </div>
     `;
 
@@ -4705,27 +4778,15 @@ export class MoviElement extends HTMLElement {
       .map((track) => {
         const isActive = activeTrack?.id === track.id;
         const label = track.label || `Subtitle ${track.id}`;
-        const infoParts: string[] = [];
-
-        if (track.language) {
-          const langCode =
-            track.language.length >= 2
-              ? track.language.substring(0, 3).toUpperCase()
-              : track.language.toUpperCase();
-          infoParts.push(langCode);
-        }
-
-        if (track.subtitleType) {
-          infoParts.push(track.subtitleType === "image" ? "Image" : "Text");
-        }
-
-        const info = infoParts.length > 0 ? infoParts.join(" • ") : "";
+        const badge = this.formatSubtitleBadge(track);
 
         return `
         <div class="movi-subtitle-track-item ${isActive ? "movi-subtitle-track-active" : ""}"
              data-track-id="${track.id}">
+          ${ICON}
           <span class="movi-subtitle-track-label">${label}</span>
-          ${info ? `<span class="movi-subtitle-track-info">${info}</span>` : ""}
+          ${badge ? `<span class="movi-subtitle-track-info">${badge}</span>` : ""}
+          ${CHECK}
         </div>
       `;
       })
@@ -4736,13 +4797,27 @@ export class MoviElement extends HTMLElement {
       .map((t) => `
         <div class="movi-subtitle-track-item ${t.active ? "movi-subtitle-track-active" : ""}"
              data-subtitle-lang="${t.lang}">
+          ${ICON}
           <span class="movi-subtitle-track-label">${t.label}</span>
           <span class="movi-subtitle-track-info">${t.lang.toUpperCase()}</span>
+          ${CHECK}
         </div>
       `)
       .join("");
 
     subtitleTrackList.innerHTML = menuHTML;
+
+    // Footer count
+    const subtitleFooter = this.shadowRoot?.querySelector(
+      ".movi-subtitle-track-footer",
+    ) as HTMLElement | null;
+    if (subtitleFooter) {
+      const count = subtitleTracks.length + externalSubs.length;
+      subtitleFooter.textContent =
+        count === 1
+          ? "1 subtitle track available"
+          : `${count} subtitle tracks available`;
+    }
 
     // Add click handlers
     subtitleTrackList
@@ -5795,7 +5870,8 @@ export class MoviElement extends HTMLElement {
         display: none;
       }
 
-      .movi-audio-track-menu {
+      .movi-audio-track-menu,
+      .movi-subtitle-track-menu {
         position: absolute;
         bottom: calc(100% + 12px);
         right: 0;
@@ -5803,49 +5879,116 @@ export class MoviElement extends HTMLElement {
         backdrop-filter: blur(var(--movi-glass-blur));
         -webkit-backdrop-filter: blur(var(--movi-glass-blur));
         border: 1px solid var(--movi-glass-border);
-        border-radius: 12px;
-        min-width: 200px;
-        max-height: 280px;
-        overflow-y: auto;
+        border-radius: 14px;
+        min-width: 260px;
+        max-width: 340px;
+        max-height: 360px;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
         box-shadow: var(--movi-shadow-lg);
         z-index: 1000;
         pointer-events: auto !important;
       }
 
-      .movi-audio-track-list {
-        padding: 8px 0;
-      }
-
-      .movi-audio-track-item {
-        padding: 12px 16px;
-        cursor: pointer;
+      .movi-track-menu-header {
         display: flex;
-        justify-content: space-between;
         align-items: center;
-        color: var(--movi-controls-color);
-        transition: background var(--movi-transition-fast);
-        gap: 12px;
-        min-width: 0;
-        font-size: 14px;
-      }
-
-      .movi-audio-track-item:hover {
-        background: color-mix(in srgb, var(--movi-primary) 0.15);
-      }
-
-      .movi-audio-track-item.movi-audio-track-active {
-        background: color-mix(in srgb, var(--movi-primary) 0.25);
+        gap: 8px;
+        padding: 12px 16px 10px;
+        font-size: 12px;
         font-weight: 600;
-      }
-
-      .movi-audio-track-item.movi-audio-track-active::before {
-        content: '✓';
-        margin-right: 8px;
-        color: var(--movi-primary);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--movi-text-tertiary);
+        border-bottom: 1px solid var(--movi-glass-border);
         flex-shrink: 0;
       }
 
-      .movi-audio-track-label {
+      .movi-track-menu-header svg {
+        width: 14px;
+        height: 14px;
+        opacity: 0.85;
+      }
+
+      .movi-track-menu-footer {
+        padding: 8px 16px 10px;
+        font-size: 11px;
+        color: var(--movi-text-tertiary);
+        border-top: 1px solid var(--movi-glass-border);
+        flex-shrink: 0;
+        text-align: center;
+        opacity: 0.75;
+      }
+
+      .movi-track-menu-footer:empty {
+        display: none;
+      }
+
+      .movi-audio-track-list,
+      .movi-subtitle-track-list {
+        padding: 6px;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+      }
+
+      .movi-audio-track-item,
+      .movi-subtitle-track-item {
+        position: relative;
+        padding: 10px 12px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        color: var(--movi-controls-color);
+        transition: background var(--movi-transition-fast);
+        gap: 10px;
+        min-width: 0;
+        font-size: 14px;
+        border-radius: 8px;
+        margin: 1px 0;
+      }
+
+      .movi-audio-track-item:hover,
+      .movi-subtitle-track-item:hover {
+        background: color-mix(in srgb, var(--movi-primary) 0.12, transparent);
+      }
+
+      .movi-audio-track-item.movi-audio-track-active,
+      .movi-subtitle-track-item.movi-subtitle-track-active {
+        background: color-mix(in srgb, var(--movi-primary) 0.22, transparent);
+        font-weight: 600;
+      }
+
+      .movi-track-item-icon {
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+        color: var(--movi-text-tertiary);
+        opacity: 0.85;
+      }
+
+      .movi-audio-track-item.movi-audio-track-active .movi-track-item-icon,
+      .movi-subtitle-track-item.movi-subtitle-track-active .movi-track-item-icon {
+        color: var(--movi-primary);
+        opacity: 1;
+      }
+
+      .movi-track-item-check {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        color: var(--movi-primary);
+        opacity: 0;
+      }
+
+      .movi-audio-track-item.movi-audio-track-active .movi-track-item-check,
+      .movi-subtitle-track-item.movi-subtitle-track-active .movi-track-item-check {
+        opacity: 1;
+      }
+
+      .movi-audio-track-label,
+      .movi-subtitle-track-label {
         flex: 1;
         min-width: 0;
         overflow: hidden;
@@ -5853,11 +5996,25 @@ export class MoviElement extends HTMLElement {
         white-space: nowrap;
       }
 
-      .movi-audio-track-info {
-        font-size: 12px;
+      .movi-audio-track-info,
+      .movi-subtitle-track-info {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.02em;
         color: var(--movi-text-tertiary);
         flex-shrink: 0;
         white-space: nowrap;
+        padding: 3px 8px;
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--movi-controls-color) 0.08, transparent);
+        border: 1px solid color-mix(in srgb, var(--movi-controls-color) 0.08, transparent);
+      }
+
+      .movi-audio-track-item.movi-audio-track-active .movi-audio-track-info,
+      .movi-subtitle-track-item.movi-subtitle-track-active .movi-subtitle-track-info {
+        background: color-mix(in srgb, var(--movi-primary) 0.18, transparent);
+        border-color: color-mix(in srgb, var(--movi-primary) 0.3, transparent);
+        color: var(--movi-controls-color);
       }
 
       .movi-subtitle-track-container {
@@ -5869,71 +6026,6 @@ export class MoviElement extends HTMLElement {
 
       .movi-subtitle-track-btn {
         display: none; /* Hidden by default, shown when subtitle tracks available */
-      }
-
-      .movi-subtitle-track-menu {
-        position: absolute;
-        bottom: calc(100% + 8px);
-        right: 0;
-        background: var(--movi-glass-bg);
-        backdrop-filter: blur(var(--movi-glass-blur));
-        -webkit-backdrop-filter: blur(var(--movi-glass-blur));
-        border: 1px solid var(--movi-glass-border);
-        border-radius: 12px;
-        min-width: 200px;
-        max-height: 280px;
-        overflow-y: auto;
-        box-shadow: var(--movi-shadow-lg);
-        z-index: 1000;
-        pointer-events: auto !important;
-      }
-
-      .movi-subtitle-track-list {
-        padding: 8px 0;
-      }
-
-      .movi-subtitle-track-item {
-        padding: 12px 16px;
-        cursor: pointer;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        color: var(--movi-controls-color);
-        transition: background var(--movi-transition-fast);
-        gap: 12px;
-        min-width: 0;
-        font-size: 14px;
-      }
-
-      .movi-subtitle-track-item:hover {
-        background: color-mix(in srgb, var(--movi-primary) 0.15);
-      }
-
-      .movi-subtitle-track-item.movi-subtitle-track-active {
-        background: color-mix(in srgb, var(--movi-primary) 0.25);
-        font-weight: 600;
-      }
-
-      .movi-subtitle-track-item.movi-subtitle-track-active::before {
-        content: '✓';
-        margin-right: 8px;
-        color: var(--movi-primary);
-        flex-shrink: 0;
-      }
-
-      .movi-subtitle-track-label {
-        flex: 1;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
-      .movi-subtitle-track-info {
-        font-size: 12px;
-        color: var(--movi-text-tertiary);
-        flex-shrink: 0;
-        cursor: pointer;
       }
       
       /* HDR Button Styling */
