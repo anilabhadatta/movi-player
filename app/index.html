@@ -950,6 +950,10 @@
         box-shadow: 0 0 20px rgba(124, 108, 240, 0.15);
       }
 
+      .btn-ghost[hidden] {
+        display: none;
+      }
+
       .btn-embed {
         display: none;
       }
@@ -2256,6 +2260,12 @@
             Open Folder
           </button>
           <input type="file" id="folder-input-fallback" webkitdirectory multiple hidden />
+          <button class="btn-ghost" id="playlist-show-btn" type="button" title="Show playlist" hidden>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>
+            </svg>
+            Show Playlist
+          </button>
           <button class="btn-ghost btn-embed" id="embed-btn" title="Copy embed code">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="16 18 22 12 16 6"></polyline>
@@ -2316,7 +2326,7 @@
               <span class="playlist-title">Playlist</span>
               <span class="playlist-count" id="playlist-count">0</span>
             </div>
-            <button class="playlist-close" id="playlist-close" type="button" title="Close playlist" aria-label="Close playlist">
+            <button class="playlist-close" id="playlist-close" type="button" title="Hide playlist" aria-label="Hide playlist">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
             </button>
           </div>
@@ -2549,6 +2559,7 @@
       const playlistItemsEl = document.getElementById("playlist-items");
       const playlistCountEl = document.getElementById("playlist-count");
       const playlistCloseBtn = document.getElementById("playlist-close");
+      const playlistShowBtn = document.getElementById("playlist-show-btn");
       const playlistAutoplayEl = document.getElementById("playlist-autoplay");
       let currentVideoUrl = "";
       const defaultTitle = document.title;
@@ -2787,6 +2798,24 @@
       let metaProcessing = false;
       let thumbWasmPromise = null;
 
+      const syncPlaylistShowBtn = () => {
+        playlistShowBtn.hidden = !(playlist.length > 0 && playlistPanel.hidden);
+      };
+
+      const hidePlaylist = () => {
+        playlistPanel.hidden = true;
+        playerLayout.classList.remove("has-playlist");
+        syncPlaylistShowBtn();
+      };
+
+      const showPlaylist = () => {
+        if (!playlist.length) return;
+        playlistPanel.hidden = false;
+        playerLayout.classList.add("has-playlist");
+        syncPlaylistShowBtn();
+        syncPlaylistHeight();
+      };
+
       const clearPlaylist = () => {
         playlist = [];
         playlistIndex = -1;
@@ -2804,6 +2833,7 @@
         // single file) doesn't inherit stale poster state from the playlist.
         player.removeAttribute("poster");
         player.removeAttribute("postertime");
+        syncPlaylistShowBtn();
       };
 
       const formatDuration = (secs) => {
@@ -3245,6 +3275,7 @@
         playlistIndex = -1;
         playlistPanel.hidden = false;
         playerLayout.classList.add("has-playlist");
+        syncPlaylistShowBtn();
         renderPlaylist();
         playPlaylistItem(0);
         scrollToPlayer();
@@ -3311,7 +3342,8 @@
         folderInputFallback.value = "";
       });
 
-      playlistCloseBtn.addEventListener("click", clearPlaylist);
+      playlistCloseBtn.addEventListener("click", hidePlaylist);
+      playlistShowBtn.addEventListener("click", showPlaylist);
 
       player.addEventListener("ended", () => {
         // Mark watched on completion
