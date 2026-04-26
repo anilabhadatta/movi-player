@@ -21,6 +21,26 @@ const entries = [
   { name: 'index', path: 'src/index.ts' },
 ];
 
+// Rewrites every console.log/info/warn/error/debug call site to
+// globalThis.__movilog?.<level>(...). We do this BEFORE terser runs:
+// terser's drop_console only matches the literal console.* property
+// path, so once rewritten the calls survive minification and reach
+// the on-page dev console panel at runtime (see app/index.html).
+//
+// Lives as a Rollup plugin (renderChunk) so it sees the merged bundle
+// after tree-shaking but before minification.
+const movilogRewritePlugin = () => ({
+  name: 'movilog-rewrite',
+  renderChunk(code) {
+    if (!/\bconsole\.(log|info|warn|error|debug)\s*\(/.test(code)) return null;
+    const out = code.replace(
+      /\bconsole\.(log|info|warn|error|debug)(\s*)\(/g,
+      'globalThis.__movilog?.$1$2(',
+    );
+    return { code: out, map: null };
+  },
+});
+
 const terserConfig = {
   compress: {
     drop_console: true,
@@ -104,7 +124,8 @@ async function buildEntry(entry, format) {
       },
       rollupOptions: {
         external: [],
-        plugins: [terser(terserConfig)],
+        // Order matters: rewrite console.* → __movilog FIRST, then terser.
+        plugins: [movilogRewritePlugin(), terser(terserConfig)],
         output: {
           globals: {},
           assetFileNames: (assetInfo) => {

@@ -1843,7 +1843,212 @@
       /* Dev-only controls are hidden until body.dev-mode is set. */
       .dev-only { display: none !important; }
       body.dev-mode .dev-only { display: inline-flex !important; }
+
+      /* Dev console — only visible when body.dev-mode is set. Sits
+         directly under the player and tails console.* output so the
+         user can inspect what's happening without opening DevTools. */
+      .dev-log-panel {
+        display: none;
+        max-width: 1200px;
+        margin: 1rem auto 0;
+        padding: 0;
+        background: rgba(0, 0, 0, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 12px;
+        overflow: hidden;
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      }
+      body.dev-mode .dev-log-panel { display: block; }
+      [data-theme="light"] .dev-log-panel {
+        background: rgba(255, 255, 255, 0.85);
+        border-color: rgba(0, 0, 0, 0.12);
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+      }
+      .dev-log-header {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.5rem 0.85rem;
+        background: rgba(255, 255, 255, 0.04);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        font-size: 0.78rem;
+        color: rgba(255, 255, 255, 0.7);
+        user-select: none;
+      }
+      [data-theme="light"] .dev-log-header {
+        background: rgba(0, 0, 0, 0.03);
+        border-bottom-color: rgba(0, 0, 0, 0.08);
+        color: rgba(0, 0, 0, 0.6);
+      }
+      .dev-log-header .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #7de3c8;
+        box-shadow: 0 0 6px #7de3c8;
+      }
+      .dev-log-header .title {
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        color: inherit;
+      }
+      .dev-log-header .count {
+        font-variant-numeric: tabular-nums;
+        opacity: 0.7;
+      }
+      .dev-log-header .spacer { flex: 1; }
+      .dev-log-header button {
+        appearance: none;
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        color: inherit;
+        font: inherit;
+        font-size: 0.72rem;
+        padding: 0.2rem 0.55rem;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: background 0.15s, border-color 0.15s;
+      }
+      .dev-log-header button:hover {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.25);
+      }
+      [data-theme="light"] .dev-log-header button {
+        border-color: rgba(0, 0, 0, 0.15);
+      }
+      [data-theme="light"] .dev-log-header button:hover {
+        background: rgba(0, 0, 0, 0.05);
+        border-color: rgba(0, 0, 0, 0.3);
+      }
+      .dev-log-body {
+        max-height: 240px;
+        overflow-y: auto;
+        padding: 0.4rem 0;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        font-size: 0.72rem;
+        line-height: 1.5;
+      }
+      .dev-log-row {
+        display: flex;
+        gap: 0.6rem;
+        padding: 0.15rem 0.85rem;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      [data-theme="light"] .dev-log-row {
+        border-bottom-color: rgba(0, 0, 0, 0.04);
+      }
+      .dev-log-row:last-child { border-bottom: 0; }
+      .dev-log-row .ts {
+        flex: 0 0 auto;
+        color: rgba(255, 255, 255, 0.4);
+        font-variant-numeric: tabular-nums;
+      }
+      [data-theme="light"] .dev-log-row .ts { color: rgba(0, 0, 0, 0.4); }
+      .dev-log-row .lvl {
+        flex: 0 0 44px;
+        text-transform: uppercase;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .dev-log-row .msg {
+        flex: 1 1 auto;
+        color: rgba(255, 255, 255, 0.92);
+      }
+      [data-theme="light"] .dev-log-row .msg { color: rgba(0, 0, 0, 0.85); }
+      .dev-log-row.log    .lvl { color: #9aa4b1; }
+      .dev-log-row.info   .lvl { color: #5ec6ff; }
+      .dev-log-row.warn   .lvl { color: #f1c453; }
+      .dev-log-row.warn   .msg { color: #f1c453; }
+      .dev-log-row.error  .lvl { color: #ff6b6b; }
+      .dev-log-row.error  .msg { color: #ff8e8e; }
+      .dev-log-row.debug  .lvl { color: #b48cff; }
+      .dev-log-empty {
+        padding: 0.9rem 0.85rem;
+        color: rgba(255, 255, 255, 0.45);
+        font-style: italic;
+      }
+      [data-theme="light"] .dev-log-empty { color: rgba(0, 0, 0, 0.45); }
     </style>
+    <!-- Dev console capture: patch console.* and global error handlers
+         as early as possible so logs emitted during module import (e.g.
+         from the player itself) are buffered. The panel hydrates from
+         this buffer once dev mode is on and the DOM is ready. -->
+    <script>
+      (function () {
+        var MAX = 500;
+        var buf = [];
+        var listeners = [];
+        // We intentionally do NOT keep references to the originals —
+        // logs should appear ONLY in the on-page dev panel, never in
+        // the browser DevTools console.
+        //
+        // Note: terser is configured with drop_console: true, which
+        // strips all console.* calls from the bundled player source
+        // at build time. So the console patch below only catches
+        // console.* calls made from this page's own scripts. To log
+        // from the player source, use window.__movilog(...) instead —
+        // that name survives minification.
+        function fmt(arg) {
+          if (arg instanceof Error) return arg.stack || (arg.name + ": " + arg.message);
+          if (typeof arg === "string") return arg;
+          try { return JSON.stringify(arg, function (k, v) {
+            if (typeof v === "bigint") return v.toString() + "n";
+            if (v instanceof Element) return "<" + v.tagName.toLowerCase() + ">";
+            return v;
+          }); } catch { return String(arg); }
+        }
+        function push(level, args) {
+          var text = Array.prototype.map.call(args, fmt).join(" ");
+          var entry = { level: level, text: text, t: Date.now() };
+          buf.push(entry);
+          if (buf.length > MAX) buf.splice(0, buf.length - MAX);
+          for (var i = 0; i < listeners.length; i++) {
+            try { listeners[i](entry); } catch { /* noop */ }
+          }
+        }
+        ["log", "info", "warn", "error", "debug"].forEach(function (lvl) {
+          console[lvl] = function () {
+            push(lvl, arguments);
+          };
+        });
+        window.addEventListener("error", function (e) {
+          push("error", [e.message + " @ " + (e.filename || "?") + ":" + (e.lineno || 0)]);
+        });
+        window.addEventListener("unhandledrejection", function (e) {
+          var r = e.reason;
+          push("error", ["Unhandled rejection: " + (r && (r.stack || r.message) ? (r.stack || r.message) : fmt(r))]);
+        });
+        window.__moviDevLog = {
+          buffer: buf,
+          subscribe: function (fn) { listeners.push(fn); return function () {
+            var i = listeners.indexOf(fn); if (i >= 0) listeners.splice(i, 1);
+          }; },
+          clear: function () { buf.length = 0; for (var i = 0; i < listeners.length; i++) {
+            try { listeners[i](null); } catch { /* noop */ }
+          } },
+        };
+
+        // Public logger API for code that survives terser's drop_console
+        // (the player bundle). Call window.__movilog("hello") for a
+        // plain log, or window.__movilog.warn(...) / .error(...) etc.
+        // This is the ONLY way for bundled code to surface logs to the
+        // dev panel without depending on console.*.
+        function makeLogger(level) {
+          return function () { push(level, arguments); };
+        }
+        var movilog = makeLogger("log");
+        movilog.log = makeLogger("log");
+        movilog.info = makeLogger("info");
+        movilog.warn = makeLogger("warn");
+        movilog.error = makeLogger("error");
+        movilog.debug = makeLogger("debug");
+        window.__movilog = movilog;
+      })();
+    </script>
   </head>
 
   <body>
@@ -2122,6 +2327,22 @@
           </label>
         </aside>
       </div>
+
+      <!-- Dev console (visible only in dev mode) -->
+      <aside class="dev-log-panel" id="dev-log-panel" aria-label="Developer console">
+        <div class="dev-log-header">
+          <span class="dot" aria-hidden="true"></span>
+          <span class="title">Console</span>
+          <span class="count" id="dev-log-count">0</span>
+          <span class="spacer"></span>
+          <button type="button" id="dev-log-autoscroll" aria-pressed="true" title="Toggle autoscroll">Autoscroll: on</button>
+          <button type="button" id="dev-log-copy" title="Copy logs to clipboard">Copy</button>
+          <button type="button" id="dev-log-clear" title="Clear logs">Clear</button>
+        </div>
+        <div class="dev-log-body" id="dev-log-body" role="log" aria-live="polite">
+          <div class="dev-log-empty" id="dev-log-empty">No logs yet.</div>
+        </div>
+      </aside>
     </section>
 
     <!-- ===== FEATURES ===== -->
@@ -2212,12 +2433,93 @@
       const encryptToggle = document.getElementById("encrypt-toggle");
       const devModeSwitch = document.getElementById("dev-mode-switch");
 
+      // Dev console panel — wires the early-capture buffer (window.__moviDevLog)
+      // into the on-page log viewer. Only renders rows while dev mode is on,
+      // so the panel does no work for normal users.
+      const devLogPanel = document.getElementById("dev-log-panel");
+      const devLogBody = document.getElementById("dev-log-body");
+      const devLogEmpty = document.getElementById("dev-log-empty");
+      const devLogCount = document.getElementById("dev-log-count");
+      const devLogClear = document.getElementById("dev-log-clear");
+      const devLogCopy = document.getElementById("dev-log-copy");
+      const devLogAutoscroll = document.getElementById("dev-log-autoscroll");
+      let devLogAutoscrollOn = true;
+      let devLogUnsub = null;
+      let devLogHydrated = false;
+
+      const formatTs = (t) => {
+        const d = new Date(t);
+        const pad = (n, w = 2) => String(n).padStart(w, "0");
+        return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds()) + "." + pad(d.getMilliseconds(), 3);
+      };
+      const appendDevLogRow = (entry) => {
+        if (!entry || !devLogBody) return;
+        if (devLogEmpty && devLogEmpty.parentNode === devLogBody) devLogBody.removeChild(devLogEmpty);
+        const row = document.createElement("div");
+        row.className = "dev-log-row " + entry.level;
+        const ts = document.createElement("span"); ts.className = "ts"; ts.textContent = formatTs(entry.t);
+        const lvl = document.createElement("span"); lvl.className = "lvl"; lvl.textContent = entry.level;
+        const msg = document.createElement("span"); msg.className = "msg"; msg.textContent = entry.text;
+        row.appendChild(ts); row.appendChild(lvl); row.appendChild(msg);
+        devLogBody.appendChild(row);
+        // Cap rendered rows to keep the DOM small even if the buffer is full.
+        while (devLogBody.childElementCount > 500) devLogBody.removeChild(devLogBody.firstElementChild);
+        if (devLogCount) devLogCount.textContent = String(window.__moviDevLog?.buffer?.length ?? 0);
+        if (devLogAutoscrollOn) devLogBody.scrollTop = devLogBody.scrollHeight;
+      };
+      const clearDevLogDom = () => {
+        if (!devLogBody) return;
+        devLogBody.innerHTML = "";
+        if (devLogEmpty) { devLogEmpty.textContent = "No logs yet."; devLogBody.appendChild(devLogEmpty); }
+        if (devLogCount) devLogCount.textContent = "0";
+      };
+      const hydrateDevLog = () => {
+        if (devLogHydrated || !window.__moviDevLog) return;
+        devLogHydrated = true;
+        clearDevLogDom();
+        for (const e of window.__moviDevLog.buffer) appendDevLogRow(e);
+        devLogUnsub = window.__moviDevLog.subscribe((e) => {
+          if (e === null) { clearDevLogDom(); return; }
+          appendDevLogRow(e);
+        });
+      };
+      if (devLogClear) devLogClear.addEventListener("click", () => window.__moviDevLog?.clear());
+      if (devLogCopy) devLogCopy.addEventListener("click", async () => {
+        const buf = window.__moviDevLog?.buffer || [];
+        const text = buf.map((e) => `[${formatTs(e.t)}] ${e.level.toUpperCase()} ${e.text}`).join("\n");
+        const original = devLogCopy.textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+          devLogCopy.textContent = "Copied!";
+        } catch {
+          // Clipboard API can fail (insecure context, denied permission) —
+          // fall back to a hidden textarea + execCommand.
+          try {
+            const ta = document.createElement("textarea");
+            ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+            document.body.appendChild(ta); ta.select();
+            document.execCommand("copy"); document.body.removeChild(ta);
+            devLogCopy.textContent = "Copied!";
+          } catch {
+            devLogCopy.textContent = "Copy failed";
+          }
+        }
+        setTimeout(() => { devLogCopy.textContent = original; }, 1200);
+      });
+      if (devLogAutoscroll) devLogAutoscroll.addEventListener("click", () => {
+        devLogAutoscrollOn = !devLogAutoscrollOn;
+        devLogAutoscroll.setAttribute("aria-pressed", devLogAutoscrollOn ? "true" : "false");
+        devLogAutoscroll.textContent = "Autoscroll: " + (devLogAutoscrollOn ? "on" : "off");
+        if (devLogAutoscrollOn) devLogBody.scrollTop = devLogBody.scrollHeight;
+      });
+
       // Developer mode gates dev-only UI (e.g. the Protected toggle).
       // Persist across reloads. Apply early so dev-only controls never
       // flash into view before the class is set.
       const applyDevMode = (on) => {
         document.body.classList.toggle("dev-mode", on);
         if (devModeSwitch) devModeSwitch.setAttribute("aria-checked", on ? "true" : "false");
+        if (on) hydrateDevLog();
       };
       let devModeOn = false;
       try { devModeOn = localStorage.getItem("dev-mode") === "1"; } catch { /* noop */ }
