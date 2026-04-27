@@ -101,7 +101,7 @@
   "bugs": {
     "url": "https://github.com/mrujjwalg/movi-player/issues"
   },
-  "homepage": "https://moviplayer.com/",
+  "homepage": "https://moviplayer.com",
   "devDependencies": {
     "@playwright/test": "^1.40.0",
     "@rollup/plugin-terser": "^0.4.4",
