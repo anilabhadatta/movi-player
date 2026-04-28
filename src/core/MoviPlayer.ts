@@ -1300,7 +1300,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Audio desync detection: if audio falls significantly behind video at 1x.
     // Clock syncs to audio so clock vs audio is always ~0. Compare audio against
     // maxScheduledMediaTime vs actual playback position to detect real desync.
-    if (this.stateManager.getState() === "playing" && !this.disableAudio && !inPlayGrace && Math.abs(this.clock.getPlaybackRate() - 1.0) < 0.01) {
+    // Skip when muted — demux loop drops audio decode entirely (see muted check
+    // in process loop), so getAudioClock() stays clamped and would falsely trip.
+    if (this.stateManager.getState() === "playing" && !this.disableAudio && !this.muted && !inPlayGrace && Math.abs(this.clock.getPlaybackRate() - 1.0) < 0.01) {
       const audioTime = this.audioRenderer.getAudioClock();
       const videoTime = this.videoRenderer
         ? (this.videoRenderer as any).currentTime ?? -1
