@@ -1323,7 +1323,7 @@
         transform: translateY(-2px);
       }
 
-      .btn-ghost:hover svg { transform: scale(1.15) rotate(-3deg); }
+      .btn-ghost:hover svg { transform: scale(1.15); }
 
       .btn-ghost:active { transform: translateY(0) scale(0.98); }
 
@@ -1965,7 +1965,7 @@
         transition: opacity 0.15s;
       }
       .cache-info:hover { opacity: 1; }
-      .cache-info[hidden] { display: none; }
+      .cache-info[hidden] { display: none !important; }
       .cache-info .cache-size {
         display: inline-flex;
         align-items: center;
@@ -2926,7 +2926,7 @@
             </svg>
             Show Playlist
           </button>
-          <button class="btn-ghost btn-embed dev-only" id="embed-btn" title="Copy embed code (developer feature)">
+          <button class="btn-ghost btn-embed" id="embed-btn" title="Copy embed code (developer feature)">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="16 18 22 12 16 6"></polyline>
               <polyline points="8 6 2 12 8 18"></polyline>
@@ -2935,14 +2935,14 @@
           </button>
         </div>
         <span class="kbd-hint">or drag & drop anywhere</span>
-        <div class="cache-info" id="cache-info" hidden>
+        <div class="cache-info dev-only" id="cache-info" hidden>
           <span class="cache-size" id="cache-size" title="Cached thumbnails">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
             </svg>
             <span id="cache-size-text">—</span>
           </span>
-          <button type="button" class="cache-clear" id="cache-clear-btn" title="Clear thumbnail cache">Clear cache</button>
+          <button type="button" class="cache-clear dev-only" id="cache-clear-btn" title="Clear thumbnail cache">Clear cache</button>
         </div>
         <div class="hero-trust">
           <span class="trust-item">
@@ -3308,6 +3308,7 @@
         document.body.classList.toggle("dev-mode", on);
         if (devModeSwitch) devModeSwitch.setAttribute("aria-checked", on ? "true" : "false");
         if (on) hydrateDevLog();
+        try { syncEmbedVisibility(); } catch { /* defined later — initial bootstrap call no-ops */ }
       };
       let devModeOn = false;
       try { devModeOn = localStorage.getItem("dev-mode") === "1"; } catch { /* noop */ }
@@ -3516,10 +3517,27 @@
         scrollToPlayer();
       };
 
+      const isValidUrl = (s) => {
+        if (!s) return false;
+        try {
+          const u = new URL(s);
+          return u.protocol === "http:" || u.protocol === "https:";
+        } catch {
+          return false;
+        }
+      };
+
+      const syncEmbedVisibility = () => {
+        const ok = document.body.classList.contains("dev-mode")
+          && isValidUrl(urlInput.value.trim());
+        embedBtn.classList.toggle("visible", ok);
+      };
+
       const loadUrl = () => {
         const url = urlInput.value.trim();
-        if (!url) {
+        if (!isValidUrl(url)) {
           urlInput.focus();
+          urlInput.select();
           return;
         }
         if (!player) return;
@@ -3543,6 +3561,8 @@
       urlInput.addEventListener("keypress", (e) => {
         if (e.key === "Enter") loadUrl();
       });
+      urlInput.addEventListener("input", syncEmbedVisibility);
+      syncEmbedVisibility();
 
       // --- File Upload ---
       fileInput.addEventListener("change", (e) => {
