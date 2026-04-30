@@ -25,6 +25,64 @@
     @keyframes movi-spin { to { transform: rotate(360deg); } }
     .loading-text { font-size: 13px; color: #888; }
     .loading-name { font-size: 12px; color: #444; max-width: 80%; text-align: center; word-break: break-all; }
+
+    .fs-confirm-overlay {
+      position: fixed; inset: 0; z-index: 9999;
+      background: rgba(0, 0, 0, 0.72);
+      display: flex; align-items: center; justify-content: center;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      animation: fs-fade-in 0.18s ease-out;
+    }
+    .fs-confirm-overlay.hidden { display: none; }
+    @keyframes fs-fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+    .fs-confirm-card {
+      background: #18181f;
+      border: 1px solid rgba(139, 92, 246, 0.25);
+      border-radius: 14px;
+      padding: 28px 28px 22px;
+      max-width: 480px; width: calc(100% - 48px);
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 60px rgba(139, 92, 246, 0.08);
+      color: #fff;
+      animation: fs-slide-up 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+    @keyframes fs-slide-up { from { transform: translateY(12px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+    .fs-confirm-title {
+      font-size: 17px; font-weight: 600; margin-bottom: 14px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .fs-confirm-title::before {
+      content: ""; width: 8px; height: 8px; border-radius: 50%;
+      background: #8B5CF6; box-shadow: 0 0 12px rgba(139, 92, 246, 0.7);
+    }
+    .fs-confirm-section { margin-bottom: 14px; font-size: 13px; line-height: 1.55; }
+    .fs-confirm-label { color: #8B5CF6; font-weight: 600; font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 6px; }
+    .fs-confirm-body { color: #c4c4cc; }
+    .fs-confirm-body code {
+      background: rgba(139, 92, 246, 0.14); color: #e0d5ff;
+      padding: 1px 6px; border-radius: 4px; font-size: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .fs-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 22px; }
+    .fs-confirm-btn {
+      padding: 8px 18px; border-radius: 8px; font-size: 13px; font-weight: 500;
+      border: none; cursor: pointer; transition: all 0.15s; outline: none;
+    }
+    .fs-confirm-btn-cancel {
+      background: rgba(255, 255, 255, 0.06); color: #c4c4cc;
+    }
+    .fs-confirm-btn-cancel:hover { background: rgba(255, 255, 255, 0.1); color: #fff; }
+    .fs-confirm-btn-primary {
+      background: linear-gradient(180deg, #9b6cf8, #7c4ce8); color: #fff;
+      box-shadow: 0 2px 8px rgba(139, 92, 246, 0.35);
+    }
+    .fs-confirm-btn-primary:hover { transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(139, 92, 246, 0.5); }
+    .fs-confirm-btn:focus-visible { box-shadow: 0 0 0 2px #8B5CF6; }
   </style>
 
   <!-- Spoof crossOriginIsolated=true so MoviElement.checkSecurityHeaders() passes. -->
@@ -93,6 +151,27 @@
     <div class="loading-spinner"></div>
     <div class="loading-text">Loading video</div>
     <div class="loading-name" id="loadingName"></div>
+  </div>
+
+  <div class="fs-confirm-overlay hidden" id="fsConfirmOverlay">
+    <div class="fs-confirm-card" role="dialog" aria-modal="true" aria-labelledby="fsConfirmTitle">
+      <div class="fs-confirm-title" id="fsConfirmTitle">Enter Movi Fullscreen?</div>
+
+      <div class="fs-confirm-section">
+        <div class="fs-confirm-label">Will hide</div>
+        <div class="fs-confirm-body">Breadcrumbs, command center, tabs, activity bar, status bar, Explorer, secondary sidebar, terminal.</div>
+      </div>
+
+      <div class="fs-confirm-section">
+        <div class="fs-confirm-label">On exit</div>
+        <div class="fs-confirm-body">Chrome (breadcrumbs, tabs, status bar, etc.) will be restored. Sidebars and terminal will <b>not</b> auto-reopen — use <code>⌘B</code> / <code>⌘⌥B</code> / <code>⌘J</code> to reopen them.</div>
+      </div>
+
+      <div class="fs-confirm-actions">
+        <button class="fs-confirm-btn fs-confirm-btn-cancel" id="fsConfirmCancel">Cancel</button>
+        <button class="fs-confirm-btn fs-confirm-btn-primary" id="fsConfirmContinue" autofocus>Continue</button>
+      </div>
+    </div>
   </div>
 
   <script src="%ELEMENT_JS%" type="module"></script>

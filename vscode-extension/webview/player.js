@@ -23,7 +23,81 @@ document.addEventListener("fullscreenchange", () => {
 });
 document.addEventListener("fullscreenerror", (e) => {
   console.error("[Movi] fullscreenerror:", e.type, "target:", e.target && e.target.tagName);
+  // Fallback path (e.g. double-tap gesturefs) — primary paths (button
+  // click, 'f' key) are intercepted in capture phase below before they
+  // ever reach the player's toggleFullscreen.
+  sendFullscreen();
 });
+
+// Debounce so capture-intercept + fullscreenerror fallback can't double-fire.
+let _lastFullscreenAt = 0;
+let _inMoviFullscreen = false;
+let _fullscreenDisabled = false;
+function sendFullscreen() {
+  if (_fullscreenDisabled) return;
+  const now = Date.now();
+  if (now - _lastFullscreenAt < 300) return;
+  _lastFullscreenAt = now;
+
+  // Skip the confirm dialog on EXIT — only ask before entering fullscreen.
+  if (_inMoviFullscreen) {
+    _inMoviFullscreen = false;
+    try { vscode.postMessage({ type: "fullscreen" }); } catch {}
+    return;
+  }
+
+  showFullscreenConfirm().then((ok) => {
+    if (!ok) return;
+    _inMoviFullscreen = true;
+    try { vscode.postMessage({ type: "fullscreen" }); } catch {}
+  });
+}
+
+function showFullscreenConfirm() {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("fsConfirmOverlay");
+    const continueBtn = document.getElementById("fsConfirmContinue");
+    const cancelBtn = document.getElementById("fsConfirmCancel");
+    if (!overlay || !continueBtn || !cancelBtn) return resolve(true);
+
+    function cleanup(answer) {
+      overlay.classList.add("hidden");
+      continueBtn.removeEventListener("click", onContinue);
+      cancelBtn.removeEventListener("click", onCancel);
+      overlay.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey, true);
+      resolve(answer);
+    }
+    function onContinue() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    function onBackdrop(e) { if (e.target === overlay) cleanup(false); }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cleanup(false); }
+      else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); cleanup(true); }
+    }
+
+    continueBtn.addEventListener("click", onContinue);
+    cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey, true);
+    overlay.classList.remove("hidden");
+    setTimeout(() => continueBtn.focus(), 0);
+  });
+}
+
+// Capture-phase 'f' interceptor — fires before the player's keydown handler
+// or our document-level forwarder, so the player never sees the keypress
+// and never attempts requestFullscreen (which would fail with a permissions
+// error AND leave the player's internal fullscreen state inconsistent).
+window.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
+  if (e.code === "KeyF" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    sendFullscreen();
+  }
+}, true);
 
 const loadingOverlay = document.getElementById("loadingOverlay");
 const loadingName = document.getElementById("loadingName");
@@ -57,19 +131,26 @@ customElements.whenDefined("movi-player").then(() => {
     style.textContent = `
       .movi-pip-btn,
       .movi-context-menu-item[data-action="pip"] { display: none !important; }
-
-      .movi-fullscreen-btn {
-        opacity: 0.4 !important;
-        cursor: not-allowed !important;
-        pointer-events: none !important;
-      }
-      .movi-context-menu-item[data-action="fullscreen"] {
-        opacity: 0.4 !important;
-        pointer-events: none !important;
-        cursor: not-allowed !important;
-      }
     `;
     player.shadowRoot.appendChild(style);
+
+    // Capture-phase click interceptor on the shadow root: fullscreen button
+    // and the right-click context-menu fullscreen entry both bypass the
+    // player's own click handler — we send the message ourselves and stop
+    // propagation so the player never calls requestFullscreen.
+    if (!player.shadowRoot._moviFsClickIntercept) {
+      player.shadowRoot.addEventListener("click", (e) => {
+        const btn = e.target && e.target.closest && e.target.closest(
+          '.movi-fullscreen-btn, .movi-context-menu-item[data-action="fullscreen"]'
+        );
+        if (!btn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        sendFullscreen();
+      }, true);
+      player.shadowRoot._moviFsClickIntercept = true;
+    }
   }
   hideUnsupported();
   // Re-apply after first frame in case shadow root populates async
@@ -176,8 +257,33 @@ window.addEventListener("message", (event) => {
       pendingChunks.delete(msg.id);
       pending.reject(new Error(msg.error));
     }
+  } else if (msg.type === "disableFullscreen") {
+    _fullscreenDisabled = true;
+    hideFullscreenUi();
   }
 });
+
+// Inject CSS into the player's shadow root that hides the fullscreen
+// button + its context-menu entry. Re-applied on a small interval since
+// the shadow root may populate asynchronously after the message arrives.
+function hideFullscreenUi() {
+  function apply() {
+    const player = document.getElementById("player");
+    if (!player || !player.shadowRoot) return;
+    if (player.shadowRoot.getElementById("movi-fs-disable")) return;
+    const style = document.createElement("style");
+    style.id = "movi-fs-disable";
+    style.textContent = `
+      .movi-fullscreen-btn,
+      .movi-context-menu-item[data-action="fullscreen"] { display: none !important; }
+    `;
+    player.shadowRoot.appendChild(style);
+  }
+  apply();
+  setTimeout(apply, 0);
+  setTimeout(apply, 500);
+  setTimeout(apply, 1500);
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;
