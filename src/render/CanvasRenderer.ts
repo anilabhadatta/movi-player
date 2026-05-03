@@ -82,6 +82,9 @@ export class CanvasRenderer {
   // Animation state for object-fit transitions
   private currentScaleX: number = 0;
   private currentScaleY: number = 0;
+  private lastTargetScaleX: number = 0;
+  private lastTargetScaleY: number = 0;
+  private fitAnimRafId: number | null = null;
 
   // Persist last rendered frame for redrawing on resize during pause
   /**
@@ -818,10 +821,31 @@ export class CanvasRenderer {
       }
     }
 
-    // Re-render last frame if paused to show fit mode change immediately
-    if (!this.isPlaying && this.lastRenderedFrame) {
-      this.drawFrame(this.lastRenderedFrame, true);
+    // Re-render last frame to show fit mode change immediately. Cannot gate on
+    // !isPlaying — after a seek-to-paused, the presentation loop is still
+    // running but no new frames arrive, so the loop alone won't repaint.
+    // Drive an RAF loop so drawFrame runs without `force`, letting the scale
+    // interpolation animate toward the new target.
+    if (this.lastRenderedFrame) {
+      this.startFitAnimation();
     }
+  }
+
+  private startFitAnimation(): void {
+    if (this.fitAnimRafId !== null) return;
+    const tick = () => {
+      this.fitAnimRafId = null;
+      if (!this.lastRenderedFrame) return;
+      this.drawFrame(this.lastRenderedFrame, false);
+      // Stop once scale has effectively converged (drawFrame snaps within 1e-4)
+      const settled =
+        Math.abs(this.currentScaleX - this.lastTargetScaleX) < 1e-4 &&
+        Math.abs(this.currentScaleY - this.lastTargetScaleY) < 1e-4;
+      if (!settled) {
+        this.fitAnimRafId = requestAnimationFrame(tick);
+      }
+    };
+    this.fitAnimRafId = requestAnimationFrame(tick);
   }
 
   /**
@@ -1328,6 +1352,9 @@ export class CanvasRenderer {
         targetScaleX = scale;
         targetScaleY = scale;
       }
+
+      this.lastTargetScaleX = targetScaleX;
+      this.lastTargetScaleY = targetScaleY;
 
       if (this.currentScaleX === 0 || this.currentScaleY === 0 || force) {
         this.currentScaleX = targetScaleX;

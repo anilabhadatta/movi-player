@@ -274,6 +274,9 @@ export class MoviElement extends HTMLElement {
     this.posterElement.style.objectFit = "contain";
     this.posterElement.style.display = "none";
     this.posterElement.style.zIndex = "1";
+    // Pure visual overlay — let click/dblclick/gesture events pass through to
+    // the canvas/video underneath where the player's handlers are attached.
+    this.posterElement.style.pointerEvents = "none";
     shadowRoot.appendChild(this.posterElement);
 
     // Create subtitle overlay element
@@ -8733,6 +8736,10 @@ export class MoviElement extends HTMLElement {
             }
           }
 
+          // Source changed — re-evaluate poster visibility (it's gated on
+          // having an actual source so it doesn't paint in the empty state).
+          this.updatePoster();
+
           // If src changed and element is connected, reload
           if (this.isConnected && this._src && this._src !== oldSrc) {
             this.load();
@@ -9019,8 +9026,23 @@ export class MoviElement extends HTMLElement {
       }
     }
 
+    if (this.posterElement) {
+      this.posterElement.style.objectFit = this.posterObjectFit();
+    }
+
     // Ensure icon matches the state immediately
     this.updateAspectRatioIcon();
+  }
+
+  // CSS object-fit only supports contain/cover/fill/none/scale-down. Map our
+  // custom modes (zoom, control) to the closest visual match for the poster
+  // overlay, since the canvas-side custom math doesn't apply to a plain <img>.
+  private posterObjectFit(): string {
+    const fit = this._objectFit === "control" ? this._currentFit : this._objectFit;
+    if (fit === "zoom") return "cover";
+    if (fit === "fill") return "fill";
+    if (fit === "cover") return "cover";
+    return "contain";
   }
 
   /**
@@ -10516,6 +10538,8 @@ export class MoviElement extends HTMLElement {
       this._src = value;
       // Remove the src attribute if it was a string
       this.removeAttribute("src");
+      // updatePoster gates on hasSource — re-evaluate now that _src is set.
+      this.updatePoster();
       // Re-initialize player if already connected
       if (this.isConnected) {
         this.initializePlayer();
@@ -11836,15 +11860,23 @@ export class MoviElement extends HTMLElement {
   }
 
   private updatePoster() {
+    // Only show the poster when there's actually a media source to back it.
+    // Without this gate, setting poster="..." paints the overlay even in the
+    // empty "No Video" state, which looks like a broken image.
+    const hasSource = !!this._src || (this._encrypted && !!this._videoUrl);
+    if (!hasSource) {
+      this.posterElement.style.display = "none";
+      return;
+    }
     if (this._poster) {
       this.posterElement.src = this._poster;
       this.posterElement.style.display = "block";
-      this.posterElement.style.objectFit = this._objectFit || "contain";
+      this.posterElement.style.objectFit = this.posterObjectFit();
     } else if (this._generatedPosterUrl) {
       // Fall back to the postertime-generated poster if no explicit URL.
       this.posterElement.src = this._generatedPosterUrl;
       this.posterElement.style.display = "block";
-      this.posterElement.style.objectFit = this._objectFit || "contain";
+      this.posterElement.style.objectFit = this.posterObjectFit();
     } else {
       this.posterElement.style.display = "none";
     }
