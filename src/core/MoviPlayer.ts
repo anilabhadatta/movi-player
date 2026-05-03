@@ -90,6 +90,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private _bufferingEntryTime: number = 0; // When we entered buffering state
   private _playStartTime: number = 0; // When play() was called — grace period for stall detection
   private _decoderStuckSince: number = 0; // When video decoder was first detected stuck
+  private _lastDesyncSeekTime: number = 0; // performance.now() of last desync-triggered resync
 
   // Playback Loop
   private animationFrameId: number | null = null;
@@ -1314,8 +1315,15 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         : -1;
       if (audioTime >= 0 && videoTime > 0) {
         const audioBehind = videoTime - audioTime;
-        if (audioBehind > 0.5) {
+        // Cooldown: a resync seek itself takes ~1–2s, so back-to-back desync
+        // detections trigger a stutter loop where almost no playback happens
+        // between seeks (especially with slow software audio decoders). Wait
+        // at least 5s between desync-driven seeks — better to tolerate a
+        // sustained ~500ms offset than to pause every second.
+        const sinceLastResync = performance.now() - this._lastDesyncSeekTime;
+        if (audioBehind > 0.5 && sinceLastResync > 5000) {
           Logger.warn(TAG, `Audio desync detected: video=${videoTime.toFixed(2)}s, audio=${audioTime.toFixed(2)}s, behind=${(audioBehind * 1000).toFixed(0)}ms — resyncing`);
+          this._lastDesyncSeekTime = performance.now();
           this.seek(this.getCurrentTime()).catch(() => {});
         }
       }
@@ -3561,6 +3569,22 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     const isPlaying = this.stateManager.getState() === "playing" || this.stateManager.getState() === "buffering";
 
     if (document.visibilityState === "hidden" && isPlaying) {
+      // On phones/tablets, skip background-playback gymnastics entirely. The OS
+      // throttles/freezes hidden tabs aggressively (timers stop, AudioContext
+      // suspends, recovery on resume is unreliable) — easier to just pause.
+      // PiP is exempted; that's an explicit "keep playing" gesture.
+      // UA check (not pointer:coarse) so Windows touch laptops aren't misclassified.
+      const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+      const uaData = (navigator as any)?.userAgentData;
+      const isMobile = uaData?.mobile === true ||
+        /Android|iPhone|iPod|Mobile|Opera Mini|IEMobile|BlackBerry/i.test(ua) ||
+        // iPad on iOS 13+ reports as Mac — disambiguate via touch points
+        (/Macintosh/.test(ua) && (navigator.maxTouchPoints ?? 0) > 1);
+      if (isMobile && !this.isPiPActive) {
+        this.pause();
+        return;
+      }
+
       // Tab went to background — use Worker timer (Safari throttles setInterval to 1s+)
       this.isBackgrounded = true;
 
@@ -3592,9 +3616,19 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.stopBackgroundTimer();
 
       if (isPlaying) {
-        // Resume AudioContext if needed
-        if (this.audioRenderer) {
-          (this.audioRenderer as any).audioContext?.resume?.().catch(() => {});
+        // Resume AudioContext if needed. On mobile after long background the
+        // browser may keep it suspended (autoplay policy — prior gesture has
+        // expired). If resume doesn't actually move us back to "running",
+        // there's no point pretending playback is live: pause cleanly so the
+        // UI shows the play button and the user can tap to resume.
+        const audioCtx = (this.audioRenderer as any)?.audioContext as AudioContext | undefined;
+        if (audioCtx) {
+          try { await audioCtx.resume(); } catch {}
+          if (audioCtx.state === "suspended" && !this.muted && !this.disableAudio) {
+            Logger.warn(TAG, "AudioContext stuck suspended after foreground — pausing for user tap");
+            this.pause();
+            return;
+          }
         }
 
         if (!this.isPiPActive) {

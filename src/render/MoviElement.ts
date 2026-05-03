@@ -8317,15 +8317,28 @@ export class MoviElement extends HTMLElement {
 
   private handleContextRestored = () => {
     Logger.info(TAG, "WebGL context restored - recovering playback");
+    // handleContextLost set isLoading=true to show the spinner; clear it so
+    // initializePlayer's early-return guard doesn't bail before re-creating
+    // the player (otherwise the spinner stays forever after a long minimize).
+    this.isLoading = false;
     this.initializePlayer().then(() => {
       if (this.player) {
         if (this._contextLostTime > 0) {
           this.player.seek(this._contextLostTime).catch(() => {});
         }
         if (this._contextLostPlaying) {
-          this.player.play().catch(() => {});
+          this.player.play().catch(() => {
+            // Mobile browsers block autoplay after long backgrounding because
+            // the prior user gesture has expired. Force paused state so the UI
+            // shows the play button and the user can tap to resume.
+            if (this.player) this.player.pause();
+          });
         }
       }
+      // Clear recovery markers so the next initializePlayer (e.g. user picks
+      // a new file) doesn't suppress the resume dialog or skip the seek.
+      this._contextLostTime = 0;
+      this._contextLostPlaying = false;
     });
   };
 
@@ -9258,8 +9271,11 @@ export class MoviElement extends HTMLElement {
         await this.player.seek(this._startAt).catch((e: unknown) => {
           Logger.warn(TAG, "Failed to seek to start time", e);
         });
-      } else if (this._resume && this.player) {
-        // Show resume dialog if saved position exists
+      } else if (this._resume && this.player && this._contextLostTime === 0) {
+        // Show resume dialog if saved position exists.
+        // Skip during WebGL context-loss recovery — handleContextRestored will
+        // seek directly to _contextLostTime, so prompting "Resume from X?" is
+        // redundant noise (and would race the silent recovery seek).
         const savedTime = this.getResumePosition();
         if (savedTime > 2 && savedTime < this.duration - 5) {
           this.showResumeDialog(savedTime);
@@ -11257,6 +11273,12 @@ export class MoviElement extends HTMLElement {
   private showResumeDialog(savedTime: number): void {
     const shadowRoot = this.shadowRoot;
     if (!shadowRoot) return;
+
+    // Skip when the player is already at (or very close to) the saved position.
+    // Happens after background-pause: state is preserved at exactly the saved
+    // time, and a "Resume from X?" prompt at the same X is pointless noise.
+    const currentTime = this.player ? this.player.getCurrentTime() : 0;
+    if (Math.abs(savedTime - currentTime) < 3) return;
 
     const dialog = shadowRoot.querySelector(".movi-resume-dialog") as HTMLElement;
     if (!dialog) return;
