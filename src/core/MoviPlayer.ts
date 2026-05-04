@@ -22,6 +22,7 @@ import {
   HttpSource,
   FileSource,
   ThumbnailHttpSource,
+  EncryptedHttpSource,
   type SourceAdapter,
 } from "../source";
 import { LRUCache } from "../cache";
@@ -544,7 +545,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
 
     if (config.type === "encrypted" && config.encrypted) {
-      const { EncryptedHttpSource } = await import("../source/EncryptedHttpSource");
       return new EncryptedHttpSource({
         ...config.encrypted,
         headers: config.headers,
