@@ -939,13 +939,22 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.videoRenderer.startPresentationLoop();
     }
 
-    // Start native audio BEFORE clock so it becomes master immediately
+    // Start native audio BEFORE clock so it becomes master immediately.
+    // If autoplay is blocked, abort the play() and stay paused so the user
+    // can resume with a gesture — otherwise video would advance without
+    // audio and the clock would never sync.
     if (this.nativeAudioEl) {
       this.nativeAudioEl.playbackRate = this.clock.getPlaybackRate();
       try {
         await this.nativeAudioEl.play();
       } catch {
-        Logger.warn(TAG, "Native audio play failed (autoplay blocked?)");
+        Logger.warn(TAG, "Native audio play blocked — staying paused for user gesture");
+        if (!this.disableAudio) this.audioRenderer.pause();
+        if (this.videoRenderer) this.videoRenderer.stopPresentationLoop();
+        if (this.stateManager.getState() !== "paused") {
+          this.stateManager.setState("paused");
+        }
+        return;
       }
     }
 
@@ -3039,18 +3048,23 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     this.nativeAudioEl.muted = this.muted;
     this.disableAudio = true;
 
-    // Wire up clock + video renderer to native audio
+    // Wire up clock + video renderer to native audio.
+    // When paused (e.g. autoplay blocked) currentTime stays at 0 but
+    // readyState reports HAVE_FUTURE_DATA — Clock would then "sync" to
+    // a frozen 0 and stall video. Return -1 so Clock falls back to wall
+    // clock until the user gesture lets <audio> actually start.
     const audioEl = this.nativeAudioEl;
     const self = this;
+    const isAudioReady = () => !audioEl.paused && audioEl.readyState >= 3;
     this.clock.setAudioProvider({
-      getAudioClock: () => audioEl.currentTime + self.startTime,
-      hasHealthyBuffer: () => audioEl.readyState >= 3,
+      getAudioClock: () => isAudioReady() ? audioEl.currentTime + self.startTime : -1,
+      hasHealthyBuffer: isAudioReady,
       isAudioPlaying: () => !audioEl.paused,
     });
     if (this.videoRenderer) {
       this.videoRenderer.setAudioTimeProvider(
-        () => audioEl.currentTime + self.startTime,
-        () => audioEl.readyState >= 3,
+        () => isAudioReady() ? audioEl.currentTime + self.startTime : -1,
+        isAudioReady,
       );
     }
 
@@ -3137,6 +3151,19 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /** True whenever a native <audio> element is loaded (single split-source or multi-lang). */
   hasNativeAudio(): boolean {
     return this.nativeAudioEl !== null;
+  }
+
+  /**
+   * True if any audio path is active that the user can mute / volume-control.
+   * Covers muxed (WASM) tracks, split-source <audio>, and HLS streams whose
+   * audio is muxed inside the native <video> element.
+   */
+  hasAudibleSource(): boolean {
+    return (
+      this.trackManager.getAudioTracks().length > 0 ||
+      this.hasNativeAudio() ||
+      this.hlsWrapper !== null
+    );
   }
 
   /**

@@ -2764,16 +2764,14 @@ export class MoviElement extends HTMLElement {
         case "ArrowUp":
           // Up Arrow: Increase volume
           e.preventDefault();
-          // Allow volume change when in-container audio tracks OR a separate
-          // native <audio> element is present (split video/audio sources).
-          if (this.player && (this.player.getAudioTracks().length > 0 || this.player.hasNativeAudio())) {
+          if (this.player && this.player.hasAudibleSource()) {
             this.volume = Math.min(1, this.volume + 0.1);
           }
           break;
         case "ArrowDown":
           // Down Arrow: Decrease volume
           e.preventDefault();
-          if (this.player && (this.player.getAudioTracks().length > 0 || this.player.hasNativeAudio())) {
+          if (this.player && this.player.hasAudibleSource()) {
             this.volume = Math.max(0, this.volume - 0.1);
           }
           break;
@@ -4547,9 +4545,9 @@ export class MoviElement extends HTMLElement {
     const isNativeActive = this.player.isNativeAudioActive();
     const totalTracks = audioTracks.length + nativeLangs.length;
 
-    // Volume is always visible when any audio exists (muxed, multi-lang native,
-    // or single split-source native <audio>).
-    const hasAudio = totalTracks > 0 || this.player.hasNativeAudio();
+    // Volume is always visible when any audio exists (muxed, multi-lang
+    // native, single split-source <audio>, or HLS stream).
+    const hasAudio = this.player.hasAudibleSource();
     const volumeContainer = this.shadowRoot?.querySelector(
       ".movi-volume-container",
     ) as HTMLElement;
@@ -4705,8 +4703,14 @@ export class MoviElement extends HTMLElement {
       return;
     }
 
+    // Filter out invalid tracks (e.g. audio-only HLS levels surface as 0×0
+    // entries which render as "0p" — useless to expose to the user)
+    const validTracks = tracks.filter(
+      (t) => t.id === -1 || (t.height && t.height > 0),
+    );
+
     // Sort tracks: Auto (-1) first, then by resolution descending, then by bitrate descending
-    const sortedTracks = [...tracks].sort((a, b) => {
+    const sortedTracks = [...validTracks].sort((a, b) => {
       if (a.id === -1) return -1;
       if (b.id === -1) return 1;
       const heightDiff = (b.height || 0) - (a.height || 0);
@@ -9074,7 +9078,7 @@ export class MoviElement extends HTMLElement {
       // We add a check for timestamp to avoid showing on initial page load if we had a persistent volume setter
       // For now, simpler is better: if connected and player is ready
       // AND checks if audio tracks exist before showing OSD
-      if (this.player && (this.player.getAudioTracks().length > 0 || this.player.hasNativeAudio())) {
+      if (this.player && this.player.hasAudibleSource()) {
         this.showOSD(icon, `${volumePercent}%`);
       }
     }

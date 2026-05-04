@@ -358,7 +358,40 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
 
     if (this.canvasRenderer && data.levels.length > 0) {
       const level = data.levels[0];
-      this.canvasRenderer.configure(level.width, level.height);
+      const applyDims = (w: number, h: number) => {
+        if (!this.canvasRenderer || w <= 0 || h <= 0) return;
+        this.canvasRenderer.configure(w, h);
+        // configure() only sets the drawing-buffer size; CSS sizing
+        // (width/height: 100%) is only applied inside resize(). Without
+        // this, canvas stays at its default 0×0 layout until the next
+        // ResizeObserver tick — manifests as a black frame that clears
+        // only after the user resizes the window.
+        const canvas = this.canvasRenderer.getCanvas();
+        const parent = canvas instanceof HTMLCanvasElement ? canvas.parentElement : null;
+        const cw = parent?.clientWidth || w;
+        const ch = parent?.clientHeight || h;
+        if (cw > 0 && ch > 0) {
+          this.canvasRenderer.resize(cw, ch);
+        }
+      };
+
+      if (level.width > 0 && level.height > 0) {
+        applyDims(level.width, level.height);
+      } else {
+        // Manifest didn't include RESOLUTION — wait for the <video>
+        // element to surface real dimensions, otherwise we configure
+        // a 0×0 framebuffer and render black until the next resize.
+        Logger.info(TAG, "HLS manifest lacks RESOLUTION; deferring canvas configure to loadedmetadata");
+        const onMeta = () => {
+          this.videoElement.removeEventListener("loadedmetadata", onMeta);
+          applyDims(this.videoElement.videoWidth, this.videoElement.videoHeight);
+        };
+        if (this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0) {
+          applyDims(this.videoElement.videoWidth, this.videoElement.videoHeight);
+        } else {
+          this.videoElement.addEventListener("loadedmetadata", onMeta);
+        }
+      }
     }
   }
 
