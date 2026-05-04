@@ -1700,10 +1700,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
                 continue;
               }
 
-              // Skip actual decode when muted — seek sync timing is already captured above
-              if (this.muted) {
-                continue;
-              }
+              // Decode audio even when muted. AudioRenderer keeps gain at 0 so
+              // it stays silent, but the audio clock advances normally — without
+              // this, unmute pivots firstBufferMediaTime to wherever the demuxer
+              // is (~1-3s ahead of presentation due to video buffer), and the
+              // drift correction in CanvasRenderer judders the video to chase it.
 
               if (
                 this.seekTargetTime !== -1 &&
@@ -3307,7 +3308,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
   /**
    * Set muted state
-   * When muted, audio track processing is disabled to save CPU
    */
   setMuted(muted: boolean): void {
     if (this.muted === muted) return; // No change
@@ -3321,10 +3321,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (muted) {
       this.audioRenderer.mute();
     } else {
-      // Audio decode is dropped while muted, so getAudioClock() is frozen at
-      // the last scheduled time. Reset the desync cooldown so the resync
-      // check doesn't fire a corrective seek before the audio clock catches up.
-      this._lastDesyncSeekTime = performance.now();
       // unmute() is async (initializes AudioContext on first unmute)
       // but we don't await it to keep setMuted() synchronous
       this.audioRenderer.unmute().catch((err) => {
