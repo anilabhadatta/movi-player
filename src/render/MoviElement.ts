@@ -2764,16 +2764,16 @@ export class MoviElement extends HTMLElement {
         case "ArrowUp":
           // Up Arrow: Increase volume
           e.preventDefault();
-          // Only change volume if audio tracks exist
-          if (this.player && this.player.getAudioTracks().length > 0) {
+          // Allow volume change when in-container audio tracks OR a separate
+          // native <audio> element is present (split video/audio sources).
+          if (this.player && (this.player.getAudioTracks().length > 0 || this.player.hasNativeAudio())) {
             this.volume = Math.min(1, this.volume + 0.1);
           }
           break;
         case "ArrowDown":
           // Down Arrow: Decrease volume
           e.preventDefault();
-          // Only change volume if audio tracks exist
-          if (this.player && this.player.getAudioTracks().length > 0) {
+          if (this.player && (this.player.getAudioTracks().length > 0 || this.player.hasNativeAudio())) {
             this.volume = Math.max(0, this.volume - 0.1);
           }
           break;
@@ -9074,7 +9074,7 @@ export class MoviElement extends HTMLElement {
       // We add a check for timestamp to avoid showing on initial page load if we had a persistent volume setter
       // For now, simpler is better: if connected and player is ready
       // AND checks if audio tracks exist before showing OSD
-      if (this.player && this.player.getAudioTracks().length > 0) {
+      if (this.player && (this.player.getAudioTracks().length > 0 || this.player.hasNativeAudio())) {
         this.showOSD(icon, `${volumePercent}%`);
       }
     }
