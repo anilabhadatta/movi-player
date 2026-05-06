@@ -379,9 +379,12 @@ export class MoviElement extends HTMLElement {
     // (scrolled to the current cue). The overlay itself stays
     // pointer-events:none so clicks elsewhere keep falling through to
     // the canvas / play-pause toggle; only the rendered .block opts in.
+    // Transcript is gated to file sources — streamed sources can't
+    // reliably hand back the full cue list.
     this.subtitleOverlay.addEventListener("click", (e) => {
       const target = e.target as HTMLElement | null;
       if (!target?.closest(".movi-subtitle-block")) return;
+      if (!this.player?.isFileSource()) return;
       e.stopPropagation();
       void this.openCuesPanel();
     });
@@ -3104,8 +3107,10 @@ export class MoviElement extends HTMLElement {
         case "X": {
           // Z / X: Subtitle delay — shift subs earlier (Z) or later (X) by
           // 100ms per press. mpv convention: positive value = subs later.
+          // File-source only — streamed sources don't expose the timing
+          // controls this nudge depends on.
           e.preventDefault();
-          if (this.player) {
+          if (this.player && this.player.isFileSource()) {
             const step = 0.1;
             const direction = e.key === "z" || e.key === "Z" ? -1 : 1;
             // Round to 3 decimals to keep the displayed value stable across
@@ -5526,7 +5531,9 @@ export class MoviElement extends HTMLElement {
     const kind = this.getActiveSubtitleKind();
     const showText = kind === "vtt" || kind === "text"; // size/color/edge
     const showBackdrop = kind === "vtt"; // backdrop only paints for VTT
-    const showShift = kind !== null; // shift applies to any active sub
+    // Subtitle delay only makes sense on file sources — streamed sources
+    // don't expose the timing surface this control nudges.
+    const showShift = kind !== null && !!this.player?.isFileSource();
     const currentDelay = this.player ? this.player.getSubtitleDelay() : 0;
 
     const edges: {
@@ -6325,7 +6332,10 @@ export class MoviElement extends HTMLElement {
       );
     }
     if (browseBtn) {
-      browseBtn.style.display = hasActiveSubtitle ? "" : "none";
+      // Transcript browser is file-source only — getAllSubtitleCues()
+      // can't yield a complete cue list for streamed sources.
+      const canBrowse = hasActiveSubtitle && !!this.player?.isFileSource();
+      browseBtn.style.display = canBrowse ? "" : "none";
     }
     // If the user had the customize panel open and then hit "Off",
     // bounce them back to the track list automatically.
