@@ -45,6 +45,8 @@ const OSD = {
   muted: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`,
   unmuted: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`,
   ambient: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>`,
+  seekBackward: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text></svg>`,
+  seekForward: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text></svg>`,
 } as const;
 
 export class MoviElement extends HTMLElement {
@@ -75,6 +77,12 @@ export class MoviElement extends HTMLElement {
   private lastSeekTime: number = 0; // Track last seek time to prevent accidental pauses
   private lastSeekSide: "left" | "right" | null = null;
   private cumulativeSeekAmount: number = 0;
+  // The last *target* asked for by a chained relative seek. Async seeks
+  // mean this.currentTime lags behind during a burst, so we chain off
+  // the previous target instead of re-reading the still-stale playback
+  // time — otherwise rapid presses count phantom seconds the playhead
+  // never travelled.
+  private _seekChainTarget: number | null = null;
   private _contextMenuVisible: boolean = false;
   private _contextMenuJustClosed: boolean = false;
   private lastTouchTime: number = 0;
@@ -1212,73 +1220,13 @@ export class MoviElement extends HTMLElement {
     // Seek Backward
     seekBackwardBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
-      const side = "left";
-      const currentTime = this.currentTime;
-      const newTime = Math.max(0, currentTime - 10);
-      // Can seek if currently more than 0.5s away from start
-      const canSeek = currentTime > 0.5;
-      Logger.debug(TAG, `Seek backward: ${currentTime}s -> ${newTime}s (canSeek: ${canSeek})`);
-
-      // Always perform the seek
-      this.currentTime = newTime;
-
-      // Only increment counter and show OSD if not at boundary
-      if (canSeek) {
-        if (this.lastSeekSide === side && Date.now() - this.lastSeekTime < 1000) {
-          this.cumulativeSeekAmount += 10;
-        } else {
-          this.cumulativeSeekAmount = 10;
-          this.lastSeekSide = side;
-        }
-        this.lastSeekTime = Date.now();
-        Logger.debug(TAG, `Counter updated: ${this.cumulativeSeekAmount}s`);
-        this.showOSD(
-          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-            <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-          </svg>`,
-          `- ${this.cumulativeSeekAmount}s`,
-        );
-      } else {
-        Logger.debug(TAG, `At boundary, skipping counter update`);
-      }
+      this.performRelativeSeek("left");
     });
 
     // Seek Forward
     seekForwardBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
-      const side = "right";
-      const currentTime = this.currentTime;
-      const newTime = Math.min(this.duration, currentTime + 10);
-      // Can seek if currently more than 0.5s away from end
-      const canSeek = currentTime < this.duration - 0.5;
-      Logger.debug(TAG, `Seek forward: ${currentTime}s -> ${newTime}s (duration: ${this.duration}s, canSeek: ${canSeek})`);
-
-      // Always perform the seek
-      this.currentTime = newTime;
-
-      // Only increment counter and show OSD if not at boundary
-      if (canSeek) {
-        if (this.lastSeekSide === side && Date.now() - this.lastSeekTime < 1000) {
-          this.cumulativeSeekAmount += 10;
-        } else {
-          this.cumulativeSeekAmount = 10;
-          this.lastSeekSide = side;
-        }
-        this.lastSeekTime = Date.now();
-        Logger.debug(TAG, `Counter updated: ${this.cumulativeSeekAmount}s`);
-        this.showOSD(
-          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-            <path d="M21 3v5h-5" />
-            <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-          </svg>`,
-          `+ ${this.cumulativeSeekAmount}s`,
-        );
-      } else {
-        Logger.debug(TAG, `At boundary, skipping counter update`);
-      }
+      this.performRelativeSeek("right");
     });
 
     hdrBtn?.addEventListener("click", (e) => {
@@ -1765,10 +1713,10 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation(); // Prevent triggering overlay click
       // Toggle menu visibility
       if (audioTrackMenu) {
-        const isVisible = audioTrackMenu.style.display !== "none";
-        if (!isVisible) this.closeAllBottomMenus(".movi-audio-track-menu");
-        audioTrackMenu.style.display = isVisible ? "none" : "block";
-        if (!isVisible) {
+        const willOpen = !this.isBottomMenuOpen(audioTrackMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-audio-track-menu");
+        this.setBottomMenuOpen(audioTrackMenu, willOpen);
+        if (willOpen) {
           this.updateAudioTrackMenu();
           this.updateSubtitleTrackMenu();
         }
@@ -1783,7 +1731,7 @@ export class MoviElement extends HTMLElement {
         !audioTrackMenu.contains(e.target as Node) &&
         !audioTrackBtn.contains(e.target as Node)
       ) {
-        audioTrackMenu.style.display = "none";
+        this.setBottomMenuOpen(audioTrackMenu, false);
       }
     };
     document.addEventListener("click", closeMenuHandler);
@@ -1800,10 +1748,10 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation(); // Prevent triggering overlay click
       // Toggle menu visibility
       if (subtitleTrackMenu) {
-        const isVisible = subtitleTrackMenu.style.display !== "none";
-        if (!isVisible) this.closeAllBottomMenus(".movi-subtitle-track-menu");
-        subtitleTrackMenu.style.display = isVisible ? "none" : "block";
-        if (!isVisible) {
+        const willOpen = !this.isBottomMenuOpen(subtitleTrackMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-subtitle-track-menu");
+        this.setBottomMenuOpen(subtitleTrackMenu, willOpen);
+        if (willOpen) {
           // Always open on the track list, never on the customize panel.
           this._showingSubtitleCustomize = false;
           this.updateSubtitleTrackMenu();
@@ -1832,7 +1780,7 @@ export class MoviElement extends HTMLElement {
       const subtitleMenu = this.shadowRoot?.querySelector(
         ".movi-subtitle-track-menu",
       ) as HTMLElement | null;
-      if (subtitleMenu) subtitleMenu.style.display = "none";
+      this.setBottomMenuOpen(subtitleMenu, false);
       void this.openCuesPanel();
     });
 
@@ -1848,7 +1796,7 @@ export class MoviElement extends HTMLElement {
       if (path.includes(subtitleTrackMenu) || path.includes(subtitleTrackBtn)) {
         return;
       }
-      subtitleTrackMenu.style.display = "none";
+      this.setBottomMenuOpen(subtitleTrackMenu, false);
     };
     document.addEventListener("click", closeSubtitleMenuHandler);
 
@@ -1891,27 +1839,19 @@ export class MoviElement extends HTMLElement {
     speedBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       if (speedMenu) {
-        // Close other menus
-        if (audioTrackMenu) audioTrackMenu.style.display = "none";
-        if (subtitleTrackMenu) subtitleTrackMenu.style.display = "none";
-        if (qualityMenu) qualityMenu.style.display = "none";
-
-        const isVisible = speedMenu.style.display !== "none";
-        speedMenu.style.display = isVisible ? "none" : "block";
+        const willOpen = !this.isBottomMenuOpen(speedMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-speed-menu");
+        this.setBottomMenuOpen(speedMenu, willOpen);
       }
     });
 
     qualityBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       if (qualityMenu) {
-        // Close other menus
-        if (audioTrackMenu) audioTrackMenu.style.display = "none";
-        if (subtitleTrackMenu) subtitleTrackMenu.style.display = "none";
-        if (speedMenu) speedMenu.style.display = "none";
-
-        const isVisible = qualityMenu.style.display !== "none";
-        qualityMenu.style.display = isVisible ? "none" : "block";
-        if (!isVisible) this.updateQualityMenu();
+        const willOpen = !this.isBottomMenuOpen(qualityMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-quality-menu");
+        this.setBottomMenuOpen(qualityMenu, willOpen);
+        if (willOpen) this.updateQualityMenu();
       }
     });
 
@@ -1925,7 +1865,7 @@ export class MoviElement extends HTMLElement {
           OSD.speed,
           `Speed ${speed}x`,
         );
-        if (speedMenu) speedMenu.style.display = "none";
+        this.setBottomMenuOpen(speedMenu, false);
       });
     });
 
@@ -1939,7 +1879,7 @@ export class MoviElement extends HTMLElement {
         !speedMenu.contains(target) &&
         !speedBtn.contains(target)
       ) {
-        speedMenu.style.display = "none";
+        this.setBottomMenuOpen(speedMenu, false);
       }
       if (
         qualityMenu &&
@@ -1947,7 +1887,7 @@ export class MoviElement extends HTMLElement {
         !qualityMenu.contains(target) &&
         !qualityBtn.contains(target)
       ) {
-        qualityMenu.style.display = "none";
+        this.setBottomMenuOpen(qualityMenu, false);
       }
     });
 
@@ -2437,36 +2377,10 @@ export class MoviElement extends HTMLElement {
         // Check if fast seek is enabled
         if (this._fastSeek) {
           if (xPos < width * 0.3) {
-            // Rewind
-            this.cumulativeSeekAmount = (this.lastSeekSide === "left" && now - this.lastSeekTime < 1000)
-              ? this.cumulativeSeekAmount + 10 : 10;
-            this.lastSeekSide = "left";
-            this.lastSeekTime = now;
-            this.currentTime = Math.max(0, this.currentTime - 10);
-            this.showOSD(
-              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                <path d="M3 3v5h5" />
-                <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-              </svg>`,
-              `- ${this.cumulativeSeekAmount}s`,
-            );
+            this.performRelativeSeek("left");
             didSeek = true;
           } else if (xPos > width * 0.7) {
-            // Forward
-            this.cumulativeSeekAmount = (this.lastSeekSide === "right" && now - this.lastSeekTime < 1000)
-              ? this.cumulativeSeekAmount + 10 : 10;
-            this.lastSeekSide = "right";
-            this.lastSeekTime = now;
-            this.currentTime = Math.min(this.duration, this.currentTime + 10);
-            this.showOSD(
-              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                <path d="M21 3v5h-5" />
-                <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-              </svg>`,
-              `+ ${this.cumulativeSeekAmount}s`,
-            );
+            this.performRelativeSeek("right");
             didSeek = true;
           } else {
             this.toggleFullscreen();
@@ -2836,54 +2750,21 @@ export class MoviElement extends HTMLElement {
           if (!this._fastSeek) break;
 
           e.preventDefault();
-          {
-            const side = "left";
-            if (e.ctrlKey || e.metaKey) {
-              // Frame backward - only work if paused (auto-pause if playing)
-              if (this.player?.getState() === "playing") {
-                this.pause();
-              }
-              const vTrack = this.player?.getVideoTracks()?.[0];
-              const fps = vTrack?.frameRate || 24;
-              const frameTime = 1 / fps;
-              this.currentTime = Math.max(0, this.currentTime - frameTime);
-              this.showOSD(
-                `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>`,
-                `-1 Frame`,
-              );
-            } else {
-              const currentTime = this.currentTime;
-              const newTime = Math.max(0, currentTime - 10);
-              // Can seek if currently more than 0.5s away from start
-              const canSeek = currentTime > 0.5;
-
-              // Always perform the seek
-              this.currentTime = newTime;
-
-              // Only increment counter and show OSD if not at boundary
-              if (canSeek) {
-                // Increase cumulative amount if pressing same direction quickly (or holding key)
-                if (
-                  this.lastSeekSide === side &&
-                  Date.now() - this.lastSeekTime < 1000
-                ) {
-                  this.cumulativeSeekAmount += 10;
-                } else {
-                  this.cumulativeSeekAmount = 10;
-                  this.lastSeekSide = side;
-                }
-                this.lastSeekTime = Date.now();
-
-                this.showOSD(
-                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                    <path d="M3 3v5h5" />
-                    <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-                  </svg>`,
-                  `- ${this.cumulativeSeekAmount}s`,
-                );
-              }
+          if (e.ctrlKey || e.metaKey) {
+            // Frame backward - only work if paused (auto-pause if playing)
+            if (this.player?.getState() === "playing") {
+              this.pause();
             }
+            const vTrack = this.player?.getVideoTracks()?.[0];
+            const fps = vTrack?.frameRate || 24;
+            const frameTime = 1 / fps;
+            this.currentTime = Math.max(0, this.currentTime - frameTime);
+            this.showOSD(
+              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>`,
+              `-1 Frame`,
+            );
+          } else {
+            this.performRelativeSeek("left");
           }
           break;
         case "ArrowRight":
@@ -2893,7 +2774,6 @@ export class MoviElement extends HTMLElement {
 
           e.preventDefault();
           {
-            const side = "right";
             if (e.ctrlKey || e.metaKey) {
               // Frame forward - only work if paused (auto-pause if playing)
               if (this.player?.getState() === "playing") {
@@ -2911,36 +2791,7 @@ export class MoviElement extends HTMLElement {
                 `+1 Frame`,
               );
             } else {
-              const currentTime = this.currentTime;
-              const newTime = Math.min(this.duration, currentTime + 10);
-              // Can seek if currently more than 0.5s away from end
-              const canSeek = currentTime < this.duration - 0.5;
-
-              // Always perform the seek
-              this.currentTime = newTime;
-
-              // Only increment counter and show OSD if not at boundary
-              if (canSeek) {
-                if (
-                  this.lastSeekSide === side &&
-                  Date.now() - this.lastSeekTime < 1000
-                ) {
-                  this.cumulativeSeekAmount += 10;
-                } else {
-                  this.cumulativeSeekAmount = 10;
-                  this.lastSeekSide = side;
-                }
-                this.lastSeekTime = Date.now();
-
-                this.showOSD(
-                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                    <path d="M21 3v5h-5" />
-                    <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-                  </svg>`,
-                  `+ ${this.cumulativeSeekAmount}s`,
-                );
-              }
+              this.performRelativeSeek("right");
             }
           }
           break;
@@ -5320,6 +5171,7 @@ export class MoviElement extends HTMLElement {
       // Reset seek counter once OSD is hidden
       this.cumulativeSeekAmount = 0;
       this.lastSeekSide = null;
+      this._seekChainTarget = null;
 
       setTimeout(() => {
         if (!osdContainer.classList.contains("visible")) {
@@ -5529,7 +5381,11 @@ export class MoviElement extends HTMLElement {
   private renderSubtitleCustomizePanel(): string {
     const s = this._subtitleSettings;
     const kind = this.getActiveSubtitleKind();
-    const showText = kind === "vtt" || kind === "text"; // size/color/edge
+    const showText = kind === "vtt" || kind === "text"; // color/edge
+    // Font size applies to image subs too — the renderer multiplies the
+    // bitmap's uniformScale by --movi-sub-size-mult, so PGS/VOBSUB respect
+    // the same slider that resizes text/vtt cues.
+    const showSize = kind !== null;
     const showBackdrop = kind === "vtt"; // backdrop only paints for VTT
     // Subtitle delay only makes sense on file sources — streamed sources
     // don't expose the timing surface this control nudges.
@@ -5591,7 +5447,7 @@ export class MoviElement extends HTMLElement {
     const sizePct = Math.round(s.sizeMult * 100);
     const bgPct = Math.round(s.bgAlpha * 100);
 
-    const fontSizeSection = showText
+    const fontSizeSection = showSize
       ? `
       <div class="movi-sub-cust-section">
         <div class="movi-sub-cust-section-head">
@@ -5835,8 +5691,8 @@ export class MoviElement extends HTMLElement {
     // about to replace the click target before bubbling completes (the
     // path captured at dispatch time is fine, but some browsers retarget).
     // stopImmediatePropagation + preventDefault belt-and-suspenders the
-    // path; the explicit display:block restore guarantees the menu stays
-    // visible even if some other listener slips through.
+    // path; the explicit re-open guarantees the menu stays visible even
+    // if some other listener slips through.
     const backBtn = root.querySelector<HTMLElement>(".movi-sub-cust-back");
     backBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -5847,7 +5703,7 @@ export class MoviElement extends HTMLElement {
       const menu = this.shadowRoot?.querySelector(
         ".movi-subtitle-track-menu",
       ) as HTMLElement | null;
-      if (menu) menu.style.display = "block";
+      this.setBottomMenuOpen(menu, true);
     });
 
     // Subtitle shift (timing nudge). Preset buttons (±0.1s / ±1s / 0)
@@ -6353,6 +6209,7 @@ export class MoviElement extends HTMLElement {
     if (this._showingSubtitleCustomize) {
       subtitleTrackList.innerHTML = this.renderSubtitleCustomizePanel();
       this.wireSubtitleCustomizePanel(subtitleTrackList);
+      this.flashSubtitleListFade(subtitleTrackList);
       const subtitleFooter = this.shadowRoot?.querySelector(
         ".movi-subtitle-track-footer",
       ) as HTMLElement | null;
@@ -6427,6 +6284,7 @@ export class MoviElement extends HTMLElement {
       .join("");
 
     subtitleTrackList.innerHTML = menuHTML;
+    this.flashSubtitleListFade(subtitleTrackList);
 
     // Footer count
     const subtitleFooter = this.shadowRoot?.querySelector(
@@ -6573,18 +6431,178 @@ export class MoviElement extends HTMLElement {
    */
   private closeAllBottomMenus(keep?: string): void {
     if (!this.shadowRoot) return;
-    const selectors = [
+    const animatedSelectors = [
       ".movi-speed-menu",
       ".movi-audio-track-menu",
       ".movi-subtitle-track-menu",
       ".movi-quality-menu",
-      ".movi-context-menu",
     ];
-    for (const sel of selectors) {
+    for (const sel of animatedSelectors) {
       if (sel === keep) continue;
       const el = this.shadowRoot.querySelector(sel) as HTMLElement | null;
-      if (el && el.style.display !== "none") el.style.display = "none";
+      this.setBottomMenuOpen(el, false);
     }
+    if (keep !== ".movi-context-menu") {
+      const ctx = this.shadowRoot.querySelector(
+        ".movi-context-menu",
+      ) as HTMLElement | null;
+      if (ctx && ctx.style.display !== "none") ctx.style.display = "none";
+    }
+  }
+
+  /**
+   * Toggle a bottom-bar dropdown with a pop-in / pop-out animation.
+   * Inline display:none stays the truly-hidden terminal state so the
+   * existing dom-presence checks elsewhere keep working — we just clear
+   * it on open, run the CSS transition, and restore it once the exit
+   * transition finishes.
+   */
+  private setBottomMenuOpen(
+    el: HTMLElement | null,
+    open: boolean,
+  ): void {
+    if (!el) return;
+    if (open) {
+      if (el.classList.contains("is-open")) return;
+      el.style.display = ""; // revert to CSS default (flex/block)
+      void el.getBoundingClientRect(); // flush layout so transition starts
+      el.classList.add("is-open");
+      return;
+    }
+    if (!el.classList.contains("is-open") && el.style.display === "none") {
+      return;
+    }
+    el.classList.remove("is-open");
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      // If the menu was reopened during the exit transition, leave it.
+      if (el.classList.contains("is-open")) return;
+      el.style.display = "none";
+    };
+    el.addEventListener("transitionend", finish, { once: true });
+    setTimeout(finish, 240); // safety net if transitionend doesn't fire
+  }
+
+  private isBottomMenuOpen(el: HTMLElement | null): boolean {
+    return !!el && el.classList.contains("is-open");
+  }
+
+  /**
+   * Restart the subtle fade-in on the subtitle dropdown's content area so
+   * toggling between the track list and the customize panel feels like a
+   * crossfade rather than a snap. Removing + re-adding the class with a
+   * forced reflow restarts the CSS animation; without the reflow the
+   * browser deduplicates the class change and the animation never replays.
+   */
+  private flashSubtitleListFade(el: HTMLElement | null): void {
+    if (!el) return;
+    el.classList.remove("movi-fade-in");
+    void el.offsetWidth;
+    el.classList.add("movi-fade-in");
+  }
+
+  /**
+   * Hide the seek OSD pill immediately and reset the chain state.
+   * Used when a relative-seek press lands on the boundary (delta 0)
+   * so the previous chain's "- 25s" cue doesn't keep reading like the
+   * playhead has gone past zero — the cue had served its purpose
+   * before the boundary press, but holding it on screen with no
+   * forward movement is what the user sees as "minus".
+   */
+  private dismissSeekOSD(): void {
+    if (this.osdTimeout) {
+      clearTimeout(this.osdTimeout);
+      this.osdTimeout = null;
+    }
+    const osdContainer = this.shadowRoot?.querySelector(
+      ".movi-osd-container",
+    ) as HTMLElement | null;
+    if (osdContainer) {
+      osdContainer.classList.remove("visible");
+      window.setTimeout(() => {
+        if (!osdContainer.classList.contains("visible")) {
+          osdContainer.style.display = "none";
+        }
+      }, 300);
+    }
+    this.cumulativeSeekAmount = 0;
+    this.lastSeekSide = null;
+    this._seekChainTarget = null;
+  }
+
+  /**
+   * Run a relative seek (button / key / double-tap) and surface it
+   * through the OSD. The OSD label tracks the *actual* delta between
+   * the pre-seek time and the clamped target — so pressing left at 5s
+   * with a 10s step shows "- 5s", not "- 10s", and a follow-up press
+   * at 0s suppresses the OSD entirely instead of accumulating phantom
+   * seconds the playhead never travelled. Same on the duration end.
+   *
+   * For rapid chained presses we anchor "before" on the previous
+   * target rather than the (still-stale) playback time, so the cue
+   * tracks where the playhead is *headed* even mid-seek.
+   */
+  private performRelativeSeek(direction: "left" | "right", step = 10): void {
+    const now = Date.now();
+    const continuing =
+      this.lastSeekSide === direction &&
+      now - this.lastSeekTime < 1000;
+    const dur = this.duration;
+    // Sanitise the dur cap. Infinity (live) and NaN/0 (not yet loaded)
+    // both leave Math.min producing values that bypass clamping; pin
+    // forward seeks to a sane upper bound so target never lands above
+    // the playable range.
+    const safeDur =
+      Number.isFinite(dur) && dur > 0 ? dur : Number.POSITIVE_INFINITY;
+    // Anchor chained presses on the previous *target* (where the
+    // playhead is headed) instead of this.currentTime, since the
+    // setter is async and a burst of presses would otherwise read the
+    // same stale time and double-count the delta. Clamp to [0, dur]
+    // so a stale chain (e.g. duration shrank on a live stream cap)
+    // can't anchor outside the playable range.
+    const rawBefore =
+      continuing && this._seekChainTarget !== null
+        ? this._seekChainTarget
+        : this.currentTime;
+    const before = Math.max(
+      0,
+      Math.min(safeDur, Number.isFinite(rawBefore) ? rawBefore : 0),
+    );
+    const target = direction === "left"
+      ? Math.max(0, before - step)
+      : Math.min(safeDur, before + step);
+    this.currentTime = target;
+    this._seekChainTarget = target;
+    const delta =
+      direction === "left" ? before - target : target - before;
+
+    const nextCum =
+      continuing && delta > 0
+        ? this.cumulativeSeekAmount + delta
+        : delta;
+    // cum should be ≥ 0 by construction, but Math.max guards against
+    // any weird state (NaN, transient float negatives) leaking into
+    // the display.
+    const safeCum = Math.max(0, Number.isFinite(nextCum) ? nextCum : 0);
+    const rounded = Math.round(safeCum);
+    // If the rounded amount is 0 (boundary hit, sub-second move, or
+    // float noise) the OSD would read "- 0s" / "+ 0s" — which the
+    // user reads as the playhead having gone past zero. Dismiss any
+    // lingering chain cue and bail without re-showing the pill.
+    if (rounded <= 0) {
+      this.dismissSeekOSD();
+      return;
+    }
+
+    this.cumulativeSeekAmount = safeCum;
+    this.lastSeekSide = direction;
+    this.lastSeekTime = now;
+
+    const label = `${direction === "left" ? "-" : "+"} ${rounded}s`;
+    const icon = direction === "left" ? OSD.seekBackward : OSD.seekForward;
+    this.showOSD(icon, label);
   }
 
   private isAnyMenuOpen(): boolean {
@@ -6597,10 +6615,10 @@ export class MoviElement extends HTMLElement {
     const contextMenu = this.shadowRoot.querySelector(".movi-context-menu") as HTMLElement;
 
     return (
-      (speedMenu && speedMenu.style.display === "block") ||
-      (audioMenu && audioMenu.style.display === "block") ||
-      (subtitleMenu && subtitleMenu.style.display === "block") ||
-      (qualityMenu && qualityMenu.style.display === "block") ||
+      this.isBottomMenuOpen(speedMenu) ||
+      this.isBottomMenuOpen(audioMenu) ||
+      this.isBottomMenuOpen(subtitleMenu) ||
+      this.isBottomMenuOpen(qualityMenu) ||
       (contextMenu && (contextMenu.style.display === "block" || contextMenu.style.display === "flex"))
     );
   }
@@ -7549,7 +7567,52 @@ export class MoviElement extends HTMLElement {
         flex-direction: column;
         box-shadow: var(--movi-shadow-lg);
         z-index: 1000;
+      }
+
+      /* Pop-in animation shared by all bottom-bar dropdowns. The default
+         (no .is-open) state is the "closed" rest position; setBottomMenuOpen
+         in MoviElement adds .is-open to play the entrance and removes it to
+         play the exit. inline display:none stays the truly-hidden terminal
+         state — toggled around the transition by the helper.
+         Transform is composed from custom props so other layers (e.g.
+         the mobile media query, which centres the menu via translateX
+         on its own --movi-menu-tx axis) can stack with the animation
+         instead of fighting !important against it. */
+      .movi-audio-track-menu,
+      .movi-subtitle-track-menu,
+      .movi-quality-menu,
+      .movi-speed-menu {
+        --movi-menu-tx: 0px;
+        --movi-menu-ty: 8px;
+        --movi-menu-scale: 0.97;
+        opacity: 0;
+        transform: translateX(var(--movi-menu-tx)) translateY(var(--movi-menu-ty)) scale(var(--movi-menu-scale));
+        transform-origin: bottom right;
+        transition:
+          opacity 180ms cubic-bezier(0.16, 1, 0.3, 1),
+          transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+        pointer-events: none !important;
+        will-change: opacity, transform;
+      }
+
+      .movi-audio-track-menu.is-open,
+      .movi-subtitle-track-menu.is-open,
+      .movi-quality-menu.is-open,
+      .movi-speed-menu.is-open {
+        --movi-menu-ty: 0px;
+        --movi-menu-scale: 1;
+        opacity: 1;
         pointer-events: auto !important;
+      }
+
+      /* Fade the customize panel's content swap so toggling the gear
+         doesn't snap between the track list and the settings UI. */
+      @keyframes movi-sub-list-fade {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: none; }
+      }
+      .movi-subtitle-track-list.movi-fade-in {
+        animation: movi-sub-list-fade 160ms cubic-bezier(0.16, 1, 0.3, 1);
       }
 
       .movi-track-menu-header {
@@ -7787,7 +7850,10 @@ export class MoviElement extends HTMLElement {
         padding: 14px 14px 12px;
       }
 
-      /* Back-to-list pill at the top of the customize panel. */
+      /* Back-to-list pill at the top of the customize panel. The negative
+         left margin pulls the chevron flush with the section content's
+         left edge — without it, the pill's own padding shifts the icon
+         ~8px right of every other label below and reads as misaligned. */
       .movi-sub-cust-back {
         all: unset;
         cursor: pointer;
@@ -7795,7 +7861,8 @@ export class MoviElement extends HTMLElement {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        padding: 6px 10px 6px 8px;
+        padding: 6px 10px;
+        margin-left: -10px;
         margin-bottom: -8px;
         font-size: 12px;
         font-weight: 600;
@@ -9390,16 +9457,21 @@ export class MoviElement extends HTMLElement {
              position: static !important;
         }
 
-        /* Position menus correctly on mobile */
+        /* Position menus correctly on mobile. Centering goes through
+           --movi-menu-tx so it composes with the animation's translateY
+           + scale instead of overriding them — without the custom-prop
+           split, the .is-open rule's transform reset would knock the
+           menu off-centre the moment it opens. */
         .movi-audio-track-menu,
         .movi-subtitle-track-menu,
         .movi-quality-menu,
         .movi-speed-menu {
+          --movi-menu-tx: -50%;
           position: absolute !important;
           bottom: 100% !important;
           margin-bottom: 15px !important;
           left: 50% !important;
-          transform: translateX(-50%) !important;
+          transform-origin: bottom center !important;
           width: 90% !important;
           max-width: 300px !important;
           /* Constrain height: min of 60% viewport height OR 30% viewport width (fits ~108px on 360px wide 16:9 player, strictly avoiding top clip) */
@@ -9422,11 +9494,17 @@ export class MoviElement extends HTMLElement {
         /* On mobile the menu itself scrolls (see overflow-y above) —
            so the inner list shouldn't carry its own bounded scroll
            area; collapsing the desktop max-height lets the menu's
-           single scrollbar handle long lists. */
+           single scrollbar handle long lists. flex: 0 0 auto stops
+           the list from shrinking inside the column — without it the
+           desktop's flex 1 1 auto + min-height 0 shrunk the list
+           below its content height, and overflow visible then let
+           the items spill past the list box, sitting on top of the
+           footer ("4 audio tracks available" appearing mid-list). */
         .movi-audio-track-list,
         .movi-subtitle-track-list {
           max-height: none !important;
           overflow-y: visible !important;
+          flex: 0 0 auto !important;
         }
 
         /* Subtitle customize panel — compact layout for narrow players. */
@@ -9821,12 +9899,24 @@ export class MoviElement extends HTMLElement {
         /* Edge style is user-selectable: drop shadow, outline, raised,
            or none. Defaults to a single soft shadow. */
         text-shadow: var(--movi-sub-edge, 0 0 4px rgba(0, 0, 0, 0.85));
-        text-align: left;
+        /* Centre each line within the block. For dialogue cues like
+           "- Long sentence...\n- Short reply." the shorter line otherwise
+           sits flush-left of the wider one and reads as visually
+           unbalanced. VTT karaoke needs a stable left edge for the
+           incremental word reveal — overridden below. */
+        text-align: center;
         white-space: pre-wrap;
         word-wrap: break-word;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         text-rendering: optimizeLegibility;
+      }
+
+      /* VTT karaoke grows static + new word spans inside a single line;
+         centring would wobble the existing words on every reveal. Keep
+         left-aligned so the karaoke types in from a stable edge. */
+      .movi-subtitle-overlay.movi-subtitle-format-vtt .movi-subtitle-line {
+        text-align: left;
       }
 
       /* Words already on screen from the previous cue — paint instantly. */
@@ -10712,6 +10802,21 @@ export class MoviElement extends HTMLElement {
           width: 26px !important;
           height: 26px !important;
         }
+
+        /* Tighter OSD on very narrow viewports — at 480px the 16px base
+           font wraps the track label across two lines and the pill grows
+           taller than the video. */
+        .movi-osd-container {
+          padding: 5px 12px;
+          gap: 6px;
+        }
+        .movi-osd-icon svg {
+          width: 16px;
+          height: 16px;
+        }
+        .movi-osd-text {
+          font-size: 12px;
+        }
       }
 
       /* Mobile Responsiveness for Context Menu */
@@ -10736,7 +10841,22 @@ export class MoviElement extends HTMLElement {
         }
         
         .movi-osd-container {
-            top: 20px; 
+            top: 20px;
+            /* Scale the OSD pill so a multi-line label like "HDHub4u.Tv
+               [ENG]" doesn't end up taller than a small embed's video
+               area. Default sizing assumes a desktop viewport. */
+            padding: 6px 14px;
+            gap: 8px;
+            border-radius: 22px;
+            max-width: calc(100% - 32px);
+        }
+        .movi-osd-icon svg {
+            width: 18px;
+            height: 18px;
+        }
+        .movi-osd-text {
+            font-size: 13px;
+            line-height: 1.25;
         }
       }
     `;

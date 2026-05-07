@@ -86,6 +86,12 @@ export class CanvasRenderer {
   private _subtitleMeasureCanvas: HTMLCanvasElement | null = null;
   private _subtitleFontCache: { viewport: number; font: string } | null =
     null;
+  // rAF handle that coalesces resize-driven subtitle re-renders. A
+  // window drag fires ResizeObserver ~60×/s — running the full layout
+  // pass (probe getComputedStyle, canvas measureText, innerHTML rewrite)
+  // on every tick burns the main thread enough to stall the
+  // presentation loop. One re-render per frame is plenty.
+  private _subtitleRerenderRafId: number | null = null;
   private subtitleCues: SubtitleCue[] = [];
   private subtitleOverlay: HTMLElement | null = null;
   private subtitleControlsPadding: number = 0; // Extra padding when controls visible
@@ -807,8 +813,8 @@ export class CanvasRenderer {
         const canvasHeight = height;
 
         // Calculate responsive bottom padding
-        const minPadding = Math.min(80, canvasHeight * 0.1);
-        const bottomPadding = Math.max(minPadding, 60);
+        const bottomPadding =
+          CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
 
         // Reset overlay positioning to ensure it stays aligned with canvas
         this.subtitleOverlay.style.position = "absolute";
@@ -829,9 +835,14 @@ export class CanvasRenderer {
         this.subtitleOverlay.style.transform = "none";
         this.subtitleOverlay.style.boxSizing = "border-box";
 
-        // Re-render subtitles to update positions with new dimensions
-        if (this.activeSubtitleCue) {
-          this.renderSubtitles();
+        // Schedule a re-render so the on-screen subtitle picks up the
+        // new dimensions. Coalesce via rAF — a window drag bursts
+        // resize events, and re-running the full subtitle layout each
+        // tick blocks the main thread long enough to stall the
+        // presentation loop (player ends up "stuck" with a running
+        // timer once the burst settles).
+        if (this.activeSubtitleCue && bufferChanged) {
+          this.scheduleSubtitleRerender();
         }
       }
     }
@@ -1625,9 +1636,11 @@ export class CanvasRenderer {
       if (padding > 0) {
         this.subtitleOverlay.style.paddingBottom = `${padding}px`;
       } else {
-        const h = this.height || 672;
-        const minPad = Math.min(80, h * 0.1);
-        this.subtitleOverlay.style.paddingBottom = `${Math.max(minPad, 60)}px`;
+        // containerHeight is CSS pixels; this.height is the dpr-scaled
+        // backbuffer and would inflate the padding 2× on retina.
+        const h = this.containerHeight || 672;
+        this.subtitleOverlay.style.paddingBottom =
+          `${CanvasRenderer.computeSubtitleBottomPadding(h)}px`;
       }
     }
   }
@@ -1784,29 +1797,56 @@ export class CanvasRenderer {
       const scaleX = canvasWidth / subtitleVideoWidth;
       const scaleY = canvasHeight / subtitleVideoHeight;
 
-      // Use uniform scale to preserve aspect ratio (prevent stretching)
-      // Use the smaller scale to ensure image fits within canvas
-      const uniformScale = Math.min(scaleX, scaleY);
+      // Honour the user's font-size multiplier from the customize panel.
+      // Text subs read --movi-sub-size-mult via CSS; image subs are sized
+      // in JS, so we pick the same var off the host's computed style and
+      // bake it into the bitmap scale so 150% means a visibly larger cue.
+      let userSizeMult = 1;
+      if (typeof window !== "undefined" && this.subtitleOverlay) {
+        const raw = window
+          .getComputedStyle(this.subtitleOverlay)
+          .getPropertyValue("--movi-sub-size-mult")
+          .trim();
+        const parsed = parseFloat(raw);
+        if (Number.isFinite(parsed) && parsed > 0) userSizeMult = parsed;
+      }
+
+      // baseScale is the geometric mapping from PGS source space (1920x1080)
+      // into canvas pixels — this is what positions belong in. uniformScale
+      // additionally bakes in the user's font-size multiplier so the bitmap
+      // grows/shrinks. Mixing the two would let sizeMult drift the cue's
+      // anchor (PGS x is the LEFT edge, so scaling it up shoves the bitmap
+      // right of its original centre); keep them separate.
+      const baseScale = Math.min(scaleX, scaleY);
+      const uniformScale = baseScale * userSizeMult;
 
       // Calculate scaled dimensions preserving aspect ratio
       const scaledWidth = cue.image.width * uniformScale;
       const scaledHeight = cue.image.height * uniformScale;
 
-      // Calculate bottom padding (responsive - adjust based on screen size)
-      // Use 80px on larger screens, but scale down proportionally on smaller screens
-      const minPadding = Math.min(80, canvasHeight * 0.1); // At least 10% of height, max 80px
-      const bottomPadding = Math.max(minPadding, 60); // Minimum 60px
+      const bottomPadding =
+        CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
 
       // Position at bottom center (above controls), similar to text subtitles
-      // For image subtitles, always position at bottom if no explicit position
-      let x = cue.position?.x
-        ? cue.position.x * uniformScale
-        : (canvasWidth - scaledWidth) / 2;
+      // For image subtitles, always position at bottom if no explicit position.
+      // When an explicit PGS position is given, anchor on the cue's *centre*
+      // in source space so growing the bitmap stays visually centred there.
+      let x: number;
+      if (cue.position?.x !== undefined) {
+        const sourceCentreX =
+          (cue.position.x + cue.image.width / 2) * baseScale;
+        x = sourceCentreX - scaledWidth / 2;
+      } else {
+        x = (canvasWidth - scaledWidth) / 2;
+      }
       let y: number;
 
       if (cue.position?.y) {
-        // Use explicit Y position but ensure it doesn't go above top
-        y = cue.position.y * uniformScale;
+        // Use explicit Y position (anchored on source centre, see x above)
+        // but ensure it doesn't go above top.
+        const sourceCentreY =
+          (cue.position.y + cue.image.height / 2) * baseScale;
+        y = sourceCentreY - scaledHeight / 2;
         y = Math.max(0, Math.min(y, canvasHeight - scaledHeight));
       } else {
         // Default: Position at bottom with padding above controls (same as text subtitles)
@@ -1849,9 +1889,8 @@ export class CanvasRenderer {
       this.subtitleOverlay.style.alignItems = "center";
       this.subtitleOverlay.style.overflow = "hidden"; // Prevent overflow outside canvas
       this.subtitleOverlay.style.padding = "0";
-      // Calculate responsive bottom padding for image subtitles
-      const minPaddingImg = Math.min(80, canvasHeight * 0.1); // At least 10% of height, max 80px
-      const bottomPaddingImg = Math.max(minPaddingImg, 60); // Minimum 60px
+      const bottomPaddingImg =
+        CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
       const effectivePaddingImg = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPaddingImg;
       this.subtitleOverlay.style.paddingBottom = `${effectivePaddingImg}px`;
       this.subtitleOverlay.style.textAlign = "center";
@@ -1931,6 +1970,38 @@ export class CanvasRenderer {
     if (this.subtitleOverlay) {
       this.subtitleOverlay.innerHTML = "";
     }
+  }
+
+  /**
+   * Default bottom padding for the subtitle overlay, in CSS pixels. The
+   * 60px floor we used to carry was a desktop-era guess at "above the
+   * controls bar"; on a 250-pixel-tall embed it pinned the cue 24% up
+   * the frame and made small-screen subtitles look like they were
+   * floating mid-screen. Scale primarily with overlay height (≈ 8%),
+   * cap at 80px on large players, and only floor at a low value so
+   * tiny embeds still keep a few pixels of breathing room from the
+   * very edge.
+   */
+  private static computeSubtitleBottomPadding(overlayHeight: number): number {
+    if (!Number.isFinite(overlayHeight) || overlayHeight <= 0) return 24;
+    return Math.max(Math.min(80, overlayHeight * 0.08), 24);
+  }
+
+  /**
+   * Coalesce subtitle re-render requests onto a single rAF tick. Used
+   * by resize() so a window drag (which bursts ResizeObserver at
+   * monitor-refresh rate) re-lays out the on-screen cue at most once
+   * per frame instead of dozens of times.
+   */
+  private scheduleSubtitleRerender(): void {
+    if (this._subtitleRerenderRafId !== null) return;
+    this._subtitleRerenderRafId = requestAnimationFrame(() => {
+      this._subtitleRerenderRafId = null;
+      if (!this.activeSubtitleCue) return;
+      this._lastRenderedSubtitleKey = "";
+      this._subtitleFontCache = null;
+      this.renderSubtitles();
+    });
   }
 
   /**
@@ -2083,8 +2154,8 @@ export class CanvasRenderer {
       const rect = canvasEl?.getBoundingClientRect();
       const overlayW = rect?.width || displayWidth;
       const overlayH = rect?.height || displayHeight;
-      const minPadding = Math.min(80, overlayH * 0.1);
-      const bottomPadding = Math.max(minPadding, 60);
+      const bottomPadding =
+        CanvasRenderer.computeSubtitleBottomPadding(overlayH);
 
       this.subtitleOverlay.style.position = "absolute";
       this.subtitleOverlay.style.top = "0";
@@ -2202,16 +2273,25 @@ export class CanvasRenderer {
       // so the line can be sized to it from the very first cue. Strip
       // any HTML formatting tags first — they don't affect width
       // meaningfully for sans-serif at this size.
-      const plainFull = stripGhost(ultimateText)
-        .replace(/<[^>]*>/g, "")
-        .replace(/\n/g, " ");
+      // For multi-line SRT cues we take the WIDEST line, not the
+      // joined-line width. Joining "You've turned this house\ninto a
+      // tomb of her memorial." into one line measures ~600px and
+      // calibrates the anchor padding-left for that imaginary single
+      // line — but the actual block hugs the widest *real* line
+      // (~330px), so the block ends up left-shifted in the player.
+      // Per-line max gives the correct anchor offset; karaoke cues
+      // (typically no \n) collapse to the same single measurement.
+      const plainFull = stripGhost(ultimateText).replace(/<[^>]*>/g, "");
       const measureCanvas = (this._subtitleMeasureCanvas ||=
         document.createElement("canvas"));
       const mctx = measureCanvas.getContext("2d");
       let fullWidth = 0;
       if (mctx) {
         mctx.font = fontSig;
-        fullWidth = Math.ceil(mctx.measureText(plainFull).width);
+        for (const ln of plainFull.split("\n")) {
+          const w = Math.ceil(mctx.measureText(ln).width);
+          if (w > fullWidth) fullWidth = w;
+        }
       }
 
       // Update HTML overlay with subtitle text
