@@ -11,7 +11,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/MrUjjwalG/movi-player?style=flat-square&color=yellow&logo=github)](https://github.com/MrUjjwalG/movi-player/stargazers)
 
-**[Documentation](https://mrujjwalg.github.io/movi-player/)** &nbsp;·&nbsp; **[Live Demo](https://movi-player-examples.vercel.app/element.html)** &nbsp;·&nbsp; **[Examples](https://github.com/MrUjjwalG/movi-player-examples)** &nbsp;·&nbsp; **[Changelog](CHANGELOG.md)**
+**[Web App](https://moviplayer.com)** &nbsp;·&nbsp; **[Documentation](https://mrujjwalg.github.io/movi-player/)** &nbsp;·&nbsp; **[Live Demo](https://movi-player-examples.vercel.app/element.html)** &nbsp;·&nbsp; **[Examples](https://github.com/MrUjjwalG/movi-player-examples)** &nbsp;·&nbsp; **[Changelog](CHANGELOG.md)**
 
 ![Movi Player](docs/images/element.gif)
 

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-05-08
+
+### Added
+- **VS Code extension — URL streaming via host fetch (closes CORS)**: `Movi: Open Video from URL` now probes + streams the remote URL through the extension host (Node.js `fetch`) instead of feeding it directly to a webview `<video>`. Bypasses webview CORS entirely — works on any server that supports HTTP Range, no proxy needed. The extension probes the URL once for size + mime + post-redirect target, then services the player's `slice().arrayBuffer()` calls by streaming Range chunks back via `postMessage`. AbortController cancels in-flight chunk fetches when the panel closes.
+- **VS Code extension — URL multi-window commands**: `Movi: Open URL to the Side` and `Movi: Open URL in New Window` mirror the file-side multi-window flow for remote URLs. Beside-column variant lets you watch a stream while coding; new-window variant uses the auxiliary-window + compact mode flow (Movi fullscreen disabled there since Zen-mode chrome targets the main window).
+- **VS Code extension — Activity Bar entry**: dedicated Movi Player icon in the activity bar opens a "Quick Actions" view with one-click access to Open Video File / Open URL / Open URL to the Side / Open URL in New Window / Play Active Editor's File. Built on VS Code's `viewsWelcome` so no custom TreeDataProvider — buttons are direct command links.
+
+### Changed
+- **README redesigned**: centered hero banner image, expanded badge row (npm version, monthly downloads, bundle size, license, GitHub stars), and quick-link bullets to Web App / Documentation / Live Demo / Examples / Changelog.
+- **Browser support updated**: Firefox 130+ now listed with WebCodecs `Yes` and HDR `Limited` (was `No` / `No`).
+- **Author spelling**: `Ujjwal` → `Ujjawal` in README, `package.json`, and outreach docs.
+
 ## [0.2.3] - 2026-05-07
 
 ### Added

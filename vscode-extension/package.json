@@ -2,7 +2,7 @@
   "name": "movi-player-vscode",
   "displayName": "Movi Player",
   "description": "A modern video player that handles formats and codecs VS Code can't play natively — right inside your editor.",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "publisher": "mrujjwalg",
   "engines": {
     "vscode": "^1.80.0"
@@ -96,6 +96,16 @@
         "category": "Movi"
       },
       {
+        "command": "movi.openFileToSide",
+        "title": "Movi: Open Video File to the Side",
+        "category": "Movi"
+      },
+      {
+        "command": "movi.openFileInNewWindow",
+        "title": "Movi: Open Video File in New Window",
+        "category": "Movi"
+      },
+      {
         "command": "movi.openCurrentFile",
         "title": "Movi: Play with Movi Player",
         "category": "Movi"
@@ -113,6 +123,16 @@
       {
         "command": "movi.openUrl",
         "title": "Movi: Open Video from URL",
+        "category": "Movi"
+      },
+      {
+        "command": "movi.openUrlToSide",
+        "title": "Movi: Open URL to the Side",
+        "category": "Movi"
+      },
+      {
+        "command": "movi.openUrlInNewWindow",
+        "title": "Movi: Open URL in New Window",
         "category": "Movi"
       }
     ],
@@ -163,6 +183,24 @@
           "description": "Resume playback from last position"
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "moviPlayer",
+          "title": "Movi Player",
+          "icon": "icons/movi-sidebar.svg"
+        }
+      ]
+    },
+    "views": {
+      "moviPlayer": [
+        {
+          "id": "moviPlayer.actions",
+          "name": "Quick Actions",
+          "icon": "icons/movi-sidebar.svg"
+        }
+      ]
     }
   },
   "scripts": {
