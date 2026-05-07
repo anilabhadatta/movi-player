@@ -471,6 +471,33 @@ Switch between muxed-in audio and a separately-loaded native audio element (the 
 
 ---
 
+#### `hasAudibleSource(): boolean`
+
+Unified gate that returns `true` when the player has *any* audible output — covers muxed audio tracks, a separate native `<audio>` element (split source), **and** HLS audio that lives inside the hidden native `<video>`. Use this instead of `getAudioTracks().length` when deciding whether to show a mute button or accept volume hotkeys.
+
+```typescript
+if (player.hasAudibleSource()) {
+  showVolumeButton();
+}
+```
+
+---
+
+#### `setSubtitleDelay(seconds: number): void` / `getSubtitleDelay(): number`
+
+Shifts subtitle timing relative to video. Sign matches VLC and mpv: **positive** values shift subtitles **later**, negative shifts them earlier. Applied at the renderer's active-cue check, so the same offset works for text and image (PGS/DVB) cues without re-decoding.
+
+```typescript
+player.setSubtitleDelay(0.5);   // Subtitles 500ms later
+console.log(player.getSubtitleDelay()); // 0.5
+```
+
+::: tip Persistence
+The offset is **not** persisted to `SettingsStorage` — sync drift is per-source, so a global value would mis-shift unrelated videos.
+:::
+
+---
+
 ### Track Selection
 
 #### `selectAudioTrack(trackId: number): boolean`
@@ -710,8 +737,15 @@ interface PlayerEventMap {
   frame: DecodedVideoFrame;
   audio: DecodedAudioFrame;
   subtitle: SubtitleCue;
+
+  // Source recovery
+  filerevoked: { offset: number; length: number; reason: string };
 }
 ```
+
+::: tip `filerevoked`
+Mobile browsers (iOS Safari, Android Chrome) silently revoke `File` handles after long backgrounding or memory pressure, leaving the demuxer hung forever. `FileSource` races each chunk read against an 8s timeout and fires `filerevoked` once so app code can prompt the user to re-pick the file. The `<movi-player>` element re-dispatches this as a DOM `filerevoked` CustomEvent.
+:::
 
 ### Event Subscription
 

@@ -109,9 +109,11 @@ Because Movi-Player uses **WebAssembly** and **SharedArrayBuffer** for high-perf
 
 1.  **Range Requests:** Required for seeking in large files.
 2.  **CORS Headers:** If your video is on a different domain.
-3.  **COI Headers (Optional):** For maximum performance (Zero-copy), set:
+3.  **COI Headers (Required):** Movi-Player **hard-blocks** without cross-origin isolation — you'll see a "Security Headers Missing" diagnostic on load. Set on every HTML response:
     - `Cross-Origin-Opener-Policy: same-origin`
     - `Cross-Origin-Embedder-Policy: require-corp`
+
+Verify with `console.log(crossOriginIsolated)` — it must be `true`.
 
 **Can't modify server headers?** Use a **Service Worker** to inject COI headers client-side:
 
@@ -138,8 +140,10 @@ if ('serviceWorker' in navigator) {
 }
 ```
 
+Or drop in [`coi-serviceworker`](https://github.com/gzuidhof/coi-serviceworker) which does this for you (one extra page reload on first visit).
+
 ::: tip Local Files
-If you are playing local files using `FileSource` (drag & drop), you do **not** need to worry about CORS!
+If you are playing local files using `FileSource` (drag & drop), you do **not** need to worry about CORS — but you still need COOP/COEP set on the host page.
 :::
 
 ## 🚀 Next Steps

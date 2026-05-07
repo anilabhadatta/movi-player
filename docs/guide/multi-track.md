@@ -238,6 +238,36 @@ trackManager.autoSelectByPreferences({
 });
 ```
 
+## Declarative Children (`<source>` + `<track>`)
+
+The custom element parses `<source>` and `<track>` children at connect time, so you can ship full multi-track configurations as plain HTML — no JS source setter required. Use this for **external** files (parallel audio renditions, sidecar subtitles); muxed multi-track files keep using the regular `getAudioTracks()` / `getSubtitleTracks()` APIs above.
+
+```html
+<movi-player controls>
+  <!-- Premuxed quality picker -->
+  <source src="video-1080p.mp4" type="video/mp4" data-height="1080" data-default>
+  <source src="video-720p.mp4"  type="video/mp4" data-height="720">
+
+  <!-- Multi-language audio (parallel renditions) -->
+  <source src="audio-en.m4a" type="audio/mp4" kind="audio" srclang="en" label="English" default>
+  <source src="audio-hi.m4a" type="audio/mp4" kind="audio" srclang="hi" label="Hindi">
+  <source src="audio-ja.m4a" type="audio/mp4" kind="audio" srclang="ja" label="Japanese">
+
+  <!-- Sidecar subtitles -->
+  <track src="subs-en.vtt" srclang="en" label="English" kind="subtitles" default>
+  <track src="subs-hi.vtt" srclang="hi" label="Hindi"   kind="subtitles">
+  <track src="subs-jp.srt" srclang="ja" label="Japanese" kind="subtitles" data-format="srt">
+</movi-player>
+```
+
+**Audio default-pick order:** explicit `default` / `data-default` → first track matching `navigator.language` (two-letter prefix) → first track.
+
+**`<track>` recognition:** `kind="subtitles"`, `kind="captions"`, or no `kind`. Defaults to VTT; pass `data-format="srt"` for SRT files.
+
+See the [Custom Element attribute reference](../api/element.md#declarative-children-source-and-track) for the full list of supported attributes (`data-fps`, `data-badge`, etc.).
+
+---
+
 ## Using with the Custom Element
 
 The `<movi-player>` element exposes language-keyed helpers — there is no numeric track-selection on the element itself.

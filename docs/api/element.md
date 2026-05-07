@@ -550,6 +550,43 @@ Toggle at runtime via the UI button or context menu.
 
 ---
 
+#### `subtitledelay`
+
+Shifts subtitle timing relative to video, in seconds. Sign matches VLC and mpv: **positive** values shift subtitles **later**, negative shifts them earlier.
+
+```html
+<!-- Subtitles are 200ms ahead of dialogue — push them later -->
+<movi-player src="video.mkv" subtitledelay="0.2" controls></movi-player>
+```
+
+**Hotkeys:** `Z` shifts earlier, `X` shifts later, by 100ms per press. The OSD shows the current offset.
+
+**Notes:**
+- Applies live without re-decoding — shift is computed at the active-cue check, so the same offset works for text and image (PGS/DVB) subtitles.
+- **Not** persisted to `SettingsStorage` — sync drift is per-source, so a global value would mis-shift unrelated videos.
+- File-source only. Streamed sources (HLS) don't expose the timing surface this control depends on, so the UI hides it.
+
+---
+
+#### `subtitlesize` / `subtitlecolor` / `subtitlebg` / `subtitleedge`
+
+Customize subtitle rendering. All four are also exposed in the in-player customize panel under the subtitle menu and persist to localStorage when changed there.
+
+```html
+<movi-player
+  src="video.mkv"
+  subtitlesize="1.2"      <!-- size multiplier; default 1 -->
+  subtitlecolor="#FFFF00"  <!-- text color -->
+  subtitlebg="0.5"         <!-- background opacity 0..1 -->
+  subtitleedge="outline"   <!-- none | shadow | outline | raised -->
+  controls
+></movi-player>
+```
+
+The size multiplier drives both text (SRT/ASS/VTT) and image (PGS/VOBSUB) subtitles. Edge style applies to text subs only.
+
+---
+
 #### `encrypted`
 
 Enables encrypted video playback. Requires `tokenurl` and `videourl` attributes.
@@ -931,6 +968,25 @@ player.postertime = null;    // Disable
 
 ---
 
+#### `subtitleDelay: number`
+
+Gets/sets the subtitle offset in seconds. Setter fires a `subtitledelaychange` CustomEvent on the element. See the [`subtitledelay` attribute](#subtitledelay) for sign convention.
+
+```typescript
+player.subtitleDelay = 0.5;   // Subtitles 500ms later
+player.subtitleDelay = -0.3;  // Subtitles 300ms earlier
+player.subtitleDelay = 0;     // Reset
+```
+
+VLC-compatible aliases are also exposed:
+
+```typescript
+player.setSubtitleDelay(0.5);
+const offset = player.getSubtitleDelay();
+```
+
+---
+
 ## Methods
 
 ### Playback Control
@@ -1087,6 +1143,72 @@ player.audioSrc = "audio-only.m4a";
 
 ---
 
+### Declarative Children (`<source>` and `<track>`)
+
+The element parses `<source>` and `<track>` children at connect time so integrators can ship full track configurations as plain HTML — no JS source setter required.
+
+**Split video + single audio file** — pair a video `<source>` with one `<source kind="audio">`:
+
+```html
+<movi-player controls>
+  <source src="video-only.mp4" type="video/mp4">
+  <source src="audio-only.m4a" type="audio/mp4" kind="audio">
+</movi-player>
+```
+
+**Premuxed quality menu** — multiple video `<source>` tags with `data-height` (and optional `data-label`, `data-fps`, `data-badge`, `data-default`) populate a YouTube-style quality picker. Without `data-height` the player just falls back to the first playable source via `canPlayType`.
+
+```html
+<movi-player controls>
+  <source src="video-1080p.mp4" type="video/mp4" data-height="1080" data-label="1080p" data-default>
+  <source src="video-720p.mp4"  type="video/mp4" data-height="720"  data-label="720p">
+  <source src="video-480p.mp4"  type="video/mp4" data-height="480"  data-label="480p">
+</movi-player>
+```
+
+**Multi-language audio** — two or more `<source kind="audio">` tags with `srclang` (or `label`) become parallel language tracks and the player exposes an audio-language menu. Initial pick: explicit `default` / `data-default` → first locale match (`navigator.language` two-letter prefix) → first track.
+
+```html
+<movi-player controls>
+  <source src="video.mp4" type="video/mp4">
+  <source src="audio-en.m4a" type="audio/mp4" kind="audio" srclang="en" label="English" default>
+  <source src="audio-hi.m4a" type="audio/mp4" kind="audio" srclang="hi" label="Hindi">
+  <source src="audio-ja.m4a" type="audio/mp4" kind="audio" srclang="ja" label="Japanese">
+</movi-player>
+```
+
+**External subtitles via `<track>`** — standard `<video>`-style markup. Recognized when `kind` is `subtitles`, `captions`, or omitted. Defaults to VTT; set `data-format="srt"` for SRT files.
+
+```html
+<movi-player controls>
+  <source src="video.mp4" type="video/mp4">
+  <track src="subs-en.vtt" srclang="en" label="English" kind="subtitles" default>
+  <track src="subs-hi.vtt" srclang="hi" label="Hindi"   kind="subtitles">
+  <track src="subs-jp.srt" srclang="ja" label="Japanese" kind="subtitles" data-format="srt">
+</movi-player>
+```
+
+**Attribute reference**
+
+| Element              | Attribute       | Purpose                                                              |
+|----------------------|-----------------|----------------------------------------------------------------------|
+| `<source>`           | `src`           | URL of the video/audio file                                          |
+| `<source>`           | `type`          | MIME type — used by `canPlayType` to pick the first playable source  |
+| `<source>`           | `kind="audio"`  | Marks the file as an audio-only track (split source / multi-language) |
+| `<source>`           | `srclang`       | BCP-47 language code (alias: `lang`) — required for the language menu |
+| `<source>`           | `label`         | Human-readable label shown in the menu                                |
+| `<source>`           | `data-height`   | Resolution height in pixels — populates the quality picker            |
+| `<source>`           | `data-label`    | Override label for the quality picker                                 |
+| `<source>`           | `data-fps`      | Frame-rate hint shown in the quality picker                          |
+| `<source>`           | `data-badge`    | Free-form chip (e.g. `"HDR"`) shown next to the label                |
+| `<source>` / `<track>`| `default`      | Marks this entry as the initial pick (alias: `data-default`)         |
+| `<track>`            | `kind`          | `subtitles`, `captions`, or omit                                      |
+| `<track>`            | `srclang`       | BCP-47 language code (alias: `lang`)                                  |
+| `<track>`            | `label`         | Human-readable label                                                  |
+| `<track>`            | `data-format`   | `vtt` (default) or `srt`                                              |
+
+---
+
 ### Track Helpers (language-keyed)
 
 When you prefer language codes over numeric track IDs, the element exposes a parallel set of helpers.
@@ -1156,6 +1278,25 @@ The element does **not** expose a `requestPictureInPicture()` method (it extends
 
 ---
 
+#### `setHostFullscreen(active: boolean): void`
+
+Tells the element that the **host** has taken over fullscreen instead of `requestFullscreen()`. The player's UI (toolbar icon, context-menu label, OSD) keeps its fullscreen state in sync without triggering the browser's native fullscreen API.
+
+```typescript
+player.addEventListener("movi-fullscreen-request", (e) => {
+  e.preventDefault();           // Block the player's requestFullscreen
+  myHostShellEnterFullscreen(); // VS Code webview, custom app shell, etc.
+  player.setHostFullscreen(true);
+});
+
+// And on exit:
+myHostShellOnExit(() => player.setHostFullscreen(false));
+```
+
+**Use Case:** VS Code webviews (where `requestFullscreen` is blocked by Permissions-Policy), embedded app shells, or any host that wants to drive fullscreen with its own chrome instead of the browser's.
+
+---
+
 ### Static Utilities
 
 #### `MoviElement.cleanVideoTitle(filename: string): string`
@@ -1194,8 +1335,11 @@ The element re-exposes player activity as DOM events so you can wire `addEventLi
 | `subtitleTrackChange`  | —                                    | Active subtitle track switched (note camelCase)    |
 | `trackschange`         | `Track[]`                            | Available tracks list updated                      |
 | `fullscreenchange`     | `{ fullscreen: boolean }`            | Player entered/exited fullscreen                   |
+| `movi-fullscreen-request` | —                                 | **Cancelable** — fired before `requestFullscreen()` so a host can take over (call `setHostFullscreen()`) |
 | `pipchange`            | `{ pip: boolean }`                   | Picture-in-Picture window opened/closed            |
 | `qualitychange`        | `{ trackId: number }`                | Active video quality / track switched              |
+| `subtitledelaychange`  | `{ subtitleDelay: number }`          | Subtitle offset changed via property/attr          |
+| `filerevoked`          | `{ offset, length, reason }`         | Underlying `File` handle was revoked by the browser (mobile background / memory pressure) |
 
 ::: tip Casing note
 `subtitleTrackChange` keeps camelCase for backward compatibility while every other custom event uses lowercase. If you're listening for both `audiotrackchange` and subtitle changes, mind the casing.
@@ -1335,6 +1479,11 @@ Press `?` during playback to view the shortcuts panel.
 | `T` | Timeline thumbnails | `Ctrl+Right` | Next frame (when paused) |
 | `S` | Snapshot | `Up` | Volume up |
 | `?` | Shortcuts panel | `Down` | Volume down |
+| `V` | Cycle subtitle track | `B` | Cycle audio track |
+| `A` | Cycle aspect ratio | `L` | Toggle loop |
+| `U` | Toggle stable volume | `G` | Toggle ambient mode |
+| `H` | Toggle HDR | `P` | Picture-in-Picture |
+| `+` / `-` | Speed up / down | `Z` / `X` | Subtitle delay -/+ 100ms |
 
 ---
 

@@ -42,6 +42,37 @@ Check your `tsconfig.json`:
 }
 ```
 
+## Cross-Origin Isolation
+
+### "Security Headers Missing" Screen
+
+**Symptom:** The player refuses to initialize and shows a "Security Headers Missing" diagnostic.
+
+**Cause:** Movi Player needs `SharedArrayBuffer` for FFmpeg WASM threading, which is gated behind cross-origin isolation. Without these two headers, the API is unavailable and the player hard-blocks instead of crashing later with a cryptic decode error.
+
+**Solution:** Send these on every HTML response (and worker/wasm responses) from your origin:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Verify with:
+
+```javascript
+console.log(crossOriginIsolated); // must be true
+```
+
+::: tip Static hosts (GitHub Pages, Netlify free tier, etc.)
+If you can't set response headers on your host, drop in [`coi-serviceworker`](https://github.com/gzuidhof/coi-serviceworker) — it injects the headers client-side via a service worker on the *second* page load (the first load registers the SW and reloads). The Movi docs site itself uses this approach.
+:::
+
+::: warning Cross-origin assets
+With `COEP: require-corp` set, every `<img>`, `<script>`, font, and `<video>` from a different origin must serve `Cross-Origin-Resource-Policy: cross-origin` *or* be loaded with `crossorigin="anonymous"`. Otherwise the browser blocks them silently and the player can't read pixel data for ambient mode / snapshots.
+:::
+
+---
+
 ## Playback Issues
 
 ### Video Not Playing

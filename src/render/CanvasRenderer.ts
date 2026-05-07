@@ -70,13 +70,43 @@ export class CanvasRenderer {
 
   // Subtitle rendering
   private activeSubtitleCue: SubtitleCue | null = null;
+  // Cached text/cue used in the last innerHTML write. renderSubtitles() runs
+  // every animation frame; without this guard we re-write innerHTML 60×/sec
+  // even when the cue text hasn't changed, restarting the fade-in animation
+  // each time and leaving the subtitle perpetually invisible during playback.
+  private _lastRenderedSubtitleKey: string = "";
+  // Plain text of what's currently on screen — used to find the suffix
+  // delta of the next karaoke cue so only the new word fades in, instead
+  // of the whole line re-animating each tick.
+  private _lastRenderedSubtitlePlain: string = "";
+  // Canvas + cached font string used to measure a karaoke cue's full
+  // final-sentence width so the line can hold a stable min-width
+  // anchor. The font cache is keyed by viewport width because the
+  // subtitle font-size uses clamp() against vw.
+  private _subtitleMeasureCanvas: HTMLCanvasElement | null = null;
+  private _subtitleFontCache: { viewport: number; font: string } | null =
+    null;
+  // rAF handle that coalesces resize-driven subtitle re-renders. A
+  // window drag fires ResizeObserver ~60×/s — running the full layout
+  // pass (probe getComputedStyle, canvas measureText, innerHTML rewrite)
+  // on every tick burns the main thread enough to stall the
+  // presentation loop. One re-render per frame is plenty.
+  private _subtitleRerenderRafId: number | null = null;
   private subtitleCues: SubtitleCue[] = [];
   private subtitleOverlay: HTMLElement | null = null;
   private subtitleControlsPadding: number = 0; // Extra padding when controls visible
+  // Subtitle delay in seconds. VLC/mpv convention: positive = subs appear
+  // later, negative = earlier. Applied at the active-cue check so it works
+  // uniformly for text and image subtitles and can be adjusted live without
+  // invalidating buffered cues.
+  private subtitleDelay: number = 0;
 
   // Animation state for object-fit transitions
   private currentScaleX: number = 0;
   private currentScaleY: number = 0;
+  private lastTargetScaleX: number = 0;
+  private lastTargetScaleY: number = 0;
+  private fitAnimRafId: number | null = null;
 
   // Persist last rendered frame for redrawing on resize during pause
   /**
@@ -663,10 +693,30 @@ export class CanvasRenderer {
       const targetWidth = isRotated90 ? height : width;
       const targetHeight = isRotated90 ? width : height;
 
-      this.width = targetWidth;
-      this.height = targetHeight;
-      this.canvas.width = targetWidth;
-      this.canvas.height = targetHeight;
+      // Backbuffer scales with devicePixelRatio so we don't lose detail
+      // when downsampling high-resolution sources (4K/8K). Capped at 2x —
+      // 3x retina screens get the same backbuffer as 2x, which keeps the
+      // GPU cost reasonable while still delivering a visibly sharper
+      // image. CSS dimensions stay at logical pixels (handled below).
+      const dpr = Math.min(
+        typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
+        2,
+      );
+      const bufferWidth = Math.round(targetWidth * dpr);
+      const bufferHeight = Math.round(targetHeight * dpr);
+
+      // Track whether the drawing-buffer actually changed. When the caller
+      // resizes with the same dims (e.g. the fit-mode toggle's pre-flip
+      // refresh in MoviElement.updateFitMode), we must NOT reset the
+      // smoothing state — doing so makes drawFrame snap to the new fit's
+      // target on the very first tick, which kills the fit animation.
+      const bufferChanged =
+        this.width !== bufferWidth || this.height !== bufferHeight;
+
+      this.width = bufferWidth;
+      this.height = bufferHeight;
+      this.canvas.width = bufferWidth;
+      this.canvas.height = bufferHeight;
 
       // Apply CSS sizing
       if (this.canvas instanceof HTMLCanvasElement) {
@@ -674,6 +724,7 @@ export class CanvasRenderer {
           // Explicit pixel size is needed to override percentage stretching
           // so the buffer aspect ratio (HxW) is preserved in layout before rotation
           // We use !important to ensure this overrides any fullscreen CSS that forces 100vw/100vh
+          // CSS uses logical pixels (targetWidth/Height); backbuffer is dpr-scaled.
           this.canvas.style.setProperty(
             "width",
             `${targetWidth}px`,
@@ -734,16 +785,21 @@ export class CanvasRenderer {
         // Trigger a redraw
       }
 
-      // Immediately redraw without smoothing to avoid black flicker
+      // Immediately redraw without smoothing to avoid black flicker, but
+      // only force-snap when the buffer dims genuinely changed. Same-size
+      // resizes (fit-mode pre-flip refresh) must keep the existing scale
+      // so the next drawFrame can lerp toward the new fit's target.
       try {
-        // Reset smoothing state so it doesn't interpolate from old dimensions
-        this.currentScaleX = 0;
-        this.currentScaleY = 0;
+        if (bufferChanged) {
+          // Reset smoothing state so it doesn't interpolate from old dimensions
+          this.currentScaleX = 0;
+          this.currentScaleY = 0;
 
-        if (this.frameQueue.length > 0) {
-          this.drawFrame(this.frameQueue[0], true);
-        } else if (this.lastRenderedFrame) {
-          this.drawFrame(this.lastRenderedFrame, true);
+          if (this.frameQueue.length > 0) {
+            this.drawFrame(this.frameQueue[0], true);
+          } else if (this.lastRenderedFrame) {
+            this.drawFrame(this.lastRenderedFrame, true);
+          }
         }
       } catch (error) {
         Logger.error(TAG, "Error redrawing frame after resize", error);
@@ -757,8 +813,8 @@ export class CanvasRenderer {
         const canvasHeight = height;
 
         // Calculate responsive bottom padding
-        const minPadding = Math.min(80, canvasHeight * 0.1);
-        const bottomPadding = Math.max(minPadding, 60);
+        const bottomPadding =
+          CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
 
         // Reset overlay positioning to ensure it stays aligned with canvas
         this.subtitleOverlay.style.position = "absolute";
@@ -779,9 +835,14 @@ export class CanvasRenderer {
         this.subtitleOverlay.style.transform = "none";
         this.subtitleOverlay.style.boxSizing = "border-box";
 
-        // Re-render subtitles to update positions with new dimensions
-        if (this.activeSubtitleCue) {
-          this.renderSubtitles();
+        // Schedule a re-render so the on-screen subtitle picks up the
+        // new dimensions. Coalesce via rAF — a window drag bursts
+        // resize events, and re-running the full subtitle layout each
+        // tick blocks the main thread long enough to stall the
+        // presentation loop (player ends up "stuck" with a running
+        // timer once the burst settles).
+        if (this.activeSubtitleCue && bufferChanged) {
+          this.scheduleSubtitleRerender();
         }
       }
     }
@@ -813,10 +874,31 @@ export class CanvasRenderer {
       }
     }
 
-    // Re-render last frame if paused to show fit mode change immediately
-    if (!this.isPlaying && this.lastRenderedFrame) {
-      this.drawFrame(this.lastRenderedFrame, true);
+    // Re-render last frame to show fit mode change immediately. Cannot gate on
+    // !isPlaying — after a seek-to-paused, the presentation loop is still
+    // running but no new frames arrive, so the loop alone won't repaint.
+    // Drive an RAF loop so drawFrame runs without `force`, letting the scale
+    // interpolation animate toward the new target.
+    if (this.lastRenderedFrame) {
+      this.startFitAnimation();
     }
+  }
+
+  private startFitAnimation(): void {
+    if (this.fitAnimRafId !== null) return;
+    const tick = () => {
+      this.fitAnimRafId = null;
+      if (!this.lastRenderedFrame) return;
+      this.drawFrame(this.lastRenderedFrame, false);
+      // Stop once scale has effectively converged (drawFrame snaps within 1e-4)
+      const settled =
+        Math.abs(this.currentScaleX - this.lastTargetScaleX) < 1e-4 &&
+        Math.abs(this.currentScaleY - this.lastTargetScaleY) < 1e-4;
+      if (!settled) {
+        this.fitAnimRafId = requestAnimationFrame(tick);
+      }
+    };
+    this.fitAnimRafId = requestAnimationFrame(tick);
   }
 
   /**
@@ -886,6 +968,17 @@ export class CanvasRenderer {
    */
   render(frame: VideoFrame): void {
     this.drawFrame(frame);
+    // Retain a clone so paused redraws (resize, fit-mode change via
+    // startFitAnimation) have a frame to lerp against. The presentation-
+    // loop path stores this on every present; this direct-render path
+    // (used by HLSPlayerWrapper) was missing the clone, leaving the
+    // fit-mode animation as a hard snap on HLS streams.
+    if (this.lastRenderedFrame) this.lastRenderedFrame.close();
+    try {
+      this.lastRenderedFrame = frame.clone();
+    } catch {
+      this.lastRenderedFrame = null;
+    }
   }
 
   /**
@@ -988,8 +1081,14 @@ export class CanvasRenderer {
       const firstFrame = this.frameQueue[0];
       const frameTime = firstFrame.timestamp / 1_000_000;
       const frameInterval = 1.0 / this.videoFrameRate;
-      // Only use it if it's not too far behind (more than 2 frame intervals)
-      if (currentPlaybackTime - frameTime <= frameInterval * 2) {
+      // Reject frames that are too far ahead OR too far behind. Without the
+      // upper cap, hardware decoders that emit 8K frames in bursts queue
+      // many future-PTS frames; on >60Hz displays this fallback then drains
+      // them faster than wall-clock, advancing currentTime past the audio
+      // clock and tripping the audio-desync resync seek loop.
+      const ahead = frameTime - currentPlaybackTime;
+      const behind = currentPlaybackTime - frameTime;
+      if (ahead <= frameInterval && behind <= frameInterval * 2) {
         this.drawFrame(firstFrame);
 
         // Retain for resize redraws
@@ -1046,6 +1145,19 @@ export class CanvasRenderer {
    * This ensures smooth 60fps video playback while maintaining A/V sync
    */
   private getCurrentPlaybackTime(): number {
+    // When the presentation loop is stopped (player paused), the
+    // wall-clock formula below would advance time forever — but no one
+    // is consuming frames, so updateActiveSubtitle (called from
+    // setSubtitleCues during prefetch / track switches while paused)
+    // would pick increasingly-out-of-sync cues and the in-video
+    // subtitle would silently swap underneath the user. Return the last
+    // actually-presented PTS (or, before the first frame, the anchor
+    // pts) so the active cue stays pinned to the visible frame.
+    if (!this.isPlaying) {
+      if (this.lastPresentedPts >= 0) return this.lastPresentedPts;
+      if (this.presentationStartPts > 0) return this.presentationStartPts;
+      return -1;
+    }
     // Always use wall clock for video timing (smooth 60fps)
     let videoTime = -1;
     if (this.presentationStartTime > 0) {
@@ -1127,8 +1239,31 @@ export class CanvasRenderer {
 
     const frameInterval = 1.0 / this.videoFrameRate;
 
-    // First frame special case - present immediately
+    // First frame special case - present immediately.
     if (this.lastPresentedPts < 0 && this.frameQueue.length > 0) {
+      // Open-GOP recovery after seek can leave the decoder backing up to an
+      // earlier reference frame (e.g. seek to 1067s but the decoder's first
+      // usable frame is the GOP keyframe at 1066s). Presenting that as-is
+      // makes video play 1-2s behind audio for several seconds. If audio
+      // is already ahead, skip stale frames so the first-presented frame
+      // is near the current playback position.
+      if (this.getAudioTime) {
+        const audioTime = this.getAudioTime();
+        if (audioTime >= 0) {
+          const tolerance = 0.2; // 200ms — beyond this and the lag is visible
+          while (this.frameQueue.length > 1) {
+            const head = this.frameQueue[0];
+            const headSec = head.timestamp / 1_000_000;
+            if (headSec < audioTime - tolerance) {
+              head.close();
+              this.frameQueue.shift();
+            } else {
+              break;
+            }
+          }
+        }
+      }
+
       const firstFrame = this.frameQueue.shift()!;
       this.lastPresentedPts = firstFrame.timestamp / 1_000_000;
       this.currentTime = this.lastPresentedPts;
@@ -1318,6 +1453,9 @@ export class CanvasRenderer {
         targetScaleY = scale;
       }
 
+      this.lastTargetScaleX = targetScaleX;
+      this.lastTargetScaleY = targetScaleY;
+
       if (this.currentScaleX === 0 || this.currentScaleY === 0 || force) {
         this.currentScaleX = targetScaleX;
         this.currentScaleY = targetScaleY;
@@ -1423,6 +1561,38 @@ export class CanvasRenderer {
   }
 
   /**
+   * Tag the subtitle overlay with the source format. The styled black
+   * backdrop is opt-in and only painted for WebVTT cues — that's the
+   * karaoke-paced format from our YouTube proxy where the box reads as
+   * a stable anchor for word-by-word reveal.
+   *
+   * All other formats render plain (text + shadow only):
+   *   - Text-based: srt / ass / ssa / ttml — traditional movie subs;
+   *     a backdrop reads as noise here.
+   *   - Image-based: pgs / dvd / dvb (vobsub, hdmv, dvb_subtitle) —
+   *     rendered through the cue.image path, untouched by this class.
+   */
+  setSubtitleFormat(
+    format:
+      | "vtt"
+      | "srt"
+      | "ass"
+      | "ssa"
+      | "ttml"
+      | "pgs"
+      | "dvd"
+      | "dvb"
+      | string
+      | null,
+  ): void {
+    if (!this.subtitleOverlay) return;
+    this.subtitleOverlay.classList.toggle(
+      "movi-subtitle-format-vtt",
+      format === "vtt",
+    );
+  }
+
+  /**
    * Rotate video by 90 degrees clockwise
    */
   rotate90(): number {
@@ -1466,9 +1636,11 @@ export class CanvasRenderer {
       if (padding > 0) {
         this.subtitleOverlay.style.paddingBottom = `${padding}px`;
       } else {
-        const h = this.height || 672;
-        const minPad = Math.min(80, h * 0.1);
-        this.subtitleOverlay.style.paddingBottom = `${Math.max(minPad, 60)}px`;
+        // containerHeight is CSS pixels; this.height is the dpr-scaled
+        // backbuffer and would inflate the padding 2× on retina.
+        const h = this.containerHeight || 672;
+        this.subtitleOverlay.style.paddingBottom =
+          `${CanvasRenderer.computeSubtitleBottomPadding(h)}px`;
       }
     }
   }
@@ -1502,12 +1674,15 @@ export class CanvasRenderer {
     } else if (cues.length === 1) {
       // Add single cue to list, but remove old cues that have already ended
       const newCue = cues[0];
-      const currentTime = this.getCurrentPlaybackTime();
+      // Match the offset semantics in updateActiveSubtitle so a positive
+      // subtitleDelay doesn't prematurely evict cues whose display window is
+      // still in the future.
+      const adjustedTime = this.getCurrentPlaybackTime() - this.subtitleDelay;
 
       // Remove cues that have ended (with some tolerance)
       this.subtitleCues = this.subtitleCues.filter((cue) => {
         // Keep cues that haven't ended yet (with 500ms tolerance for safety)
-        return currentTime <= cue.end + 0.5;
+        return adjustedTime <= cue.end + 0.5;
       });
 
       // Check if this cue already exists (same start time)
@@ -1534,6 +1709,43 @@ export class CanvasRenderer {
     this.updateActiveSubtitle();
     // Also trigger render to update display
     this.renderSubtitles();
+  }
+
+  /**
+   * Set subtitle delay in seconds (VLC/mpv convention).
+   * Positive value: subtitles appear later than their original timing.
+   * Negative value: subtitles appear earlier.
+   */
+  setSubtitleDelay(seconds: number): void {
+    if (!Number.isFinite(seconds)) return;
+    if (seconds === this.subtitleDelay) return;
+    this.subtitleDelay = seconds;
+    Logger.debug(TAG, `Subtitle delay set to ${seconds.toFixed(3)}s`);
+    // Re-evaluate the active cue against the new offset and repaint so the
+    // user sees the change immediately even when paused.
+    this.updateActiveSubtitle();
+    this.renderSubtitles();
+  }
+
+  /** Get current subtitle delay in seconds. */
+  getSubtitleDelay(): number {
+    return this.subtitleDelay;
+  }
+
+  /**
+   * Snapshot every cue currently in the cache as a plain array. Used by
+   * the all-cues browser UI; we strip image cues since the browser is
+   * text-only.
+   */
+  getAllCues(): { start: number; end: number; text: string }[] {
+    const out: { start: number; end: number; text: string }[] = [];
+    for (const cue of this.subtitleCues) {
+      const text = cue.text;
+      if (typeof text === "string" && text.length > 0) {
+        out.push({ start: cue.start, end: cue.end, text });
+      }
+    }
+    return out;
   }
 
   /**
@@ -1565,14 +1777,18 @@ export class CanvasRenderer {
       // Convert to data URL
       const dataUrl = tempCanvas.toDataURL("image/png");
 
-      // Get display dimensions (not buffer dimensions) for overlay
-      // If rotated 90/270, the buffer dimensions (this.width/height) are swapped relative to the screen
-      const isRotated90 = this.rotation % 180 !== 0;
-      const displayWidth = isRotated90 ? this.height : this.width;
-      const displayHeight = isRotated90 ? this.width : this.height;
-
-      const canvasWidth = displayWidth;
-      const canvasHeight = displayHeight;
+      // Use CSS-pixel dimensions of the visible canvas, not the dpr-scaled
+      // backbuffer. this.width/height live in buffer space (target × dpr) and
+      // sizing the overlay with those values blows it up to 2× on retina,
+      // pushing the bottom-anchored flex child off-screen below the canvas.
+      // Mirrors the rect-based sizing the text-subtitle path already uses.
+      const canvasEl =
+        this.canvas instanceof HTMLCanvasElement ? this.canvas : null;
+      const rect = canvasEl?.getBoundingClientRect();
+      const canvasWidth =
+        rect?.width || this.containerWidth || this.width;
+      const canvasHeight =
+        rect?.height || this.containerHeight || this.height;
 
       // Scale position based on video dimensions vs subtitle dimensions
       // PGS subtitle positions are typically relative to video resolution (1920x1080, etc.)
@@ -1581,29 +1797,56 @@ export class CanvasRenderer {
       const scaleX = canvasWidth / subtitleVideoWidth;
       const scaleY = canvasHeight / subtitleVideoHeight;
 
-      // Use uniform scale to preserve aspect ratio (prevent stretching)
-      // Use the smaller scale to ensure image fits within canvas
-      const uniformScale = Math.min(scaleX, scaleY);
+      // Honour the user's font-size multiplier from the customize panel.
+      // Text subs read --movi-sub-size-mult via CSS; image subs are sized
+      // in JS, so we pick the same var off the host's computed style and
+      // bake it into the bitmap scale so 150% means a visibly larger cue.
+      let userSizeMult = 1;
+      if (typeof window !== "undefined" && this.subtitleOverlay) {
+        const raw = window
+          .getComputedStyle(this.subtitleOverlay)
+          .getPropertyValue("--movi-sub-size-mult")
+          .trim();
+        const parsed = parseFloat(raw);
+        if (Number.isFinite(parsed) && parsed > 0) userSizeMult = parsed;
+      }
+
+      // baseScale is the geometric mapping from PGS source space (1920x1080)
+      // into canvas pixels — this is what positions belong in. uniformScale
+      // additionally bakes in the user's font-size multiplier so the bitmap
+      // grows/shrinks. Mixing the two would let sizeMult drift the cue's
+      // anchor (PGS x is the LEFT edge, so scaling it up shoves the bitmap
+      // right of its original centre); keep them separate.
+      const baseScale = Math.min(scaleX, scaleY);
+      const uniformScale = baseScale * userSizeMult;
 
       // Calculate scaled dimensions preserving aspect ratio
       const scaledWidth = cue.image.width * uniformScale;
       const scaledHeight = cue.image.height * uniformScale;
 
-      // Calculate bottom padding (responsive - adjust based on screen size)
-      // Use 80px on larger screens, but scale down proportionally on smaller screens
-      const minPadding = Math.min(80, canvasHeight * 0.1); // At least 10% of height, max 80px
-      const bottomPadding = Math.max(minPadding, 60); // Minimum 60px
+      const bottomPadding =
+        CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
 
       // Position at bottom center (above controls), similar to text subtitles
-      // For image subtitles, always position at bottom if no explicit position
-      let x = cue.position?.x
-        ? cue.position.x * uniformScale
-        : (canvasWidth - scaledWidth) / 2;
+      // For image subtitles, always position at bottom if no explicit position.
+      // When an explicit PGS position is given, anchor on the cue's *centre*
+      // in source space so growing the bitmap stays visually centred there.
+      let x: number;
+      if (cue.position?.x !== undefined) {
+        const sourceCentreX =
+          (cue.position.x + cue.image.width / 2) * baseScale;
+        x = sourceCentreX - scaledWidth / 2;
+      } else {
+        x = (canvasWidth - scaledWidth) / 2;
+      }
       let y: number;
 
       if (cue.position?.y) {
-        // Use explicit Y position but ensure it doesn't go above top
-        y = cue.position.y * uniformScale;
+        // Use explicit Y position (anchored on source centre, see x above)
+        // but ensure it doesn't go above top.
+        const sourceCentreY =
+          (cue.position.y + cue.image.height / 2) * baseScale;
+        y = sourceCentreY - scaledHeight / 2;
         y = Math.max(0, Math.min(y, canvasHeight - scaledHeight));
       } else {
         // Default: Position at bottom with padding above controls (same as text subtitles)
@@ -1646,9 +1889,8 @@ export class CanvasRenderer {
       this.subtitleOverlay.style.alignItems = "center";
       this.subtitleOverlay.style.overflow = "hidden"; // Prevent overflow outside canvas
       this.subtitleOverlay.style.padding = "0";
-      // Calculate responsive bottom padding for image subtitles
-      const minPaddingImg = Math.min(80, canvasHeight * 0.1); // At least 10% of height, max 80px
-      const bottomPaddingImg = Math.max(minPaddingImg, 60); // Minimum 60px
+      const bottomPaddingImg =
+        CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
       const effectivePaddingImg = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPaddingImg;
       this.subtitleOverlay.style.paddingBottom = `${effectivePaddingImg}px`;
       this.subtitleOverlay.style.textAlign = "center";
@@ -1722,10 +1964,44 @@ export class CanvasRenderer {
   clearSubtitles(): void {
     this.subtitleCues = [];
     this.activeSubtitleCue = null;
+    this._lastRenderedSubtitleKey = "";
+    this._lastRenderedSubtitlePlain = "";
     // Clear all subtitle elements from overlay if it exists
     if (this.subtitleOverlay) {
       this.subtitleOverlay.innerHTML = "";
     }
+  }
+
+  /**
+   * Default bottom padding for the subtitle overlay, in CSS pixels. The
+   * 60px floor we used to carry was a desktop-era guess at "above the
+   * controls bar"; on a 250-pixel-tall embed it pinned the cue 24% up
+   * the frame and made small-screen subtitles look like they were
+   * floating mid-screen. Scale primarily with overlay height (≈ 8%),
+   * cap at 80px on large players, and only floor at a low value so
+   * tiny embeds still keep a few pixels of breathing room from the
+   * very edge.
+   */
+  private static computeSubtitleBottomPadding(overlayHeight: number): number {
+    if (!Number.isFinite(overlayHeight) || overlayHeight <= 0) return 24;
+    return Math.max(Math.min(80, overlayHeight * 0.08), 24);
+  }
+
+  /**
+   * Coalesce subtitle re-render requests onto a single rAF tick. Used
+   * by resize() so a window drag (which bursts ResizeObserver at
+   * monitor-refresh rate) re-lays out the on-screen cue at most once
+   * per frame instead of dozens of times.
+   */
+  private scheduleSubtitleRerender(): void {
+    if (this._subtitleRerenderRafId !== null) return;
+    this._subtitleRerenderRafId = requestAnimationFrame(() => {
+      this._subtitleRerenderRafId = null;
+      if (!this.activeSubtitleCue) return;
+      this._lastRenderedSubtitleKey = "";
+      this._subtitleFontCache = null;
+      this.renderSubtitles();
+    });
   }
 
   /**
@@ -1735,6 +2011,11 @@ export class CanvasRenderer {
     // Use getCurrentPlaybackTime() instead of this.currentTime to ensure accurate timing
     // this.currentTime is only updated when frames are drawn, but subtitles need real-time updates
     const currentTime = this.getCurrentPlaybackTime();
+    // Apply subtitle delay by shifting the comparison time. Positive delay
+    // means subs should appear later, so we match cues against an earlier
+    // adjusted time. Cues retain their original PTS in subtitleCues so the
+    // offset can be changed mid-playback without re-decoding.
+    const adjustedTime = currentTime - this.subtitleDelay;
     const previousCue = this.activeSubtitleCue;
     this.activeSubtitleCue = null;
 
@@ -1751,13 +2032,13 @@ export class CanvasRenderer {
     for (const cue of this.subtitleCues) {
       // Check if current time is within the subtitle's time range (with tolerance)
       const isInRange =
-        currentTime >= cue.start - startTolerance &&
-        currentTime <= cue.end + endTolerance;
+        adjustedTime >= cue.start - startTolerance &&
+        adjustedTime <= cue.end + endTolerance;
 
       if (isInRange) {
         // Calculate a score - prefer cues that are more centered in their time range
         const cueCenter = (cue.start + cue.end) / 2;
-        const distanceFromCenter = Math.abs(currentTime - cueCenter);
+        const distanceFromCenter = Math.abs(adjustedTime - cueCenter);
         const score = distanceFromCenter;
 
         // If this cue is better (closer to center), use it
@@ -1789,8 +2070,8 @@ export class CanvasRenderer {
       // Keep showing previous cue if we're still within extended tolerance
       const extendedEndTolerance = 0.3; // 300ms extended tolerance
       if (
-        currentTime >= previousCue.start - startTolerance &&
-        currentTime <= previousCue.end + extendedEndTolerance
+        adjustedTime >= previousCue.start - startTolerance &&
+        adjustedTime <= previousCue.end + extendedEndTolerance
       ) {
         // Keep showing previous cue a bit longer
         this.activeSubtitleCue = previousCue;
@@ -1829,8 +2110,12 @@ export class CanvasRenderer {
     if (!this.activeSubtitleCue) {
       // Clear overlay if no active cue
       if (this.subtitleOverlay) {
-        this.subtitleOverlay.textContent = "";
-        this.subtitleOverlay.innerHTML = ""; // Clear any image elements too
+        if (this._lastRenderedSubtitleKey !== "") {
+          this.subtitleOverlay.textContent = "";
+          this.subtitleOverlay.innerHTML = ""; // Clear any image elements too
+          this._lastRenderedSubtitleKey = "";
+          this._lastRenderedSubtitlePlain = "";
+        }
         this.subtitleOverlay.style.display = "none";
       }
       return;
@@ -1859,17 +2144,26 @@ export class CanvasRenderer {
         return;
       }
 
-      // Position overlay at bottom center (above controls)
-      const minPadding = Math.min(80, displayHeight * 0.1);
-      const bottomPadding = Math.max(minPadding, 60);
+      // Size the overlay to the visible canvas rect (CSS pixels), not the
+      // internal buffer dimensions. For 4K/8K content the buffer is much
+      // larger than the rendered area, and pinning the overlay to buffer
+      // pixels parks the subtitle thousands of pixels below the viewport
+      // (where the host's overflow:hidden swallows it).
+      const canvasEl =
+        this.canvas instanceof HTMLCanvasElement ? this.canvas : null;
+      const rect = canvasEl?.getBoundingClientRect();
+      const overlayW = rect?.width || displayWidth;
+      const overlayH = rect?.height || displayHeight;
+      const bottomPadding =
+        CanvasRenderer.computeSubtitleBottomPadding(overlayH);
 
       this.subtitleOverlay.style.position = "absolute";
       this.subtitleOverlay.style.top = "0";
       this.subtitleOverlay.style.left = "0";
       this.subtitleOverlay.style.right = "auto";
       this.subtitleOverlay.style.bottom = "auto";
-      this.subtitleOverlay.style.width = `${displayWidth}px`;
-      this.subtitleOverlay.style.height = `${displayHeight}px`;
+      this.subtitleOverlay.style.width = `${overlayW}px`;
+      this.subtitleOverlay.style.height = `${overlayH}px`;
       this.subtitleOverlay.style.margin = "0";
       this.subtitleOverlay.style.padding = "0";
       const effectivePad = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPadding;
@@ -1879,20 +2173,166 @@ export class CanvasRenderer {
       this.subtitleOverlay.style.display = "flex";
       this.subtitleOverlay.style.flexDirection = "column";
       this.subtitleOverlay.style.justifyContent = "flex-end";
+      // Block stays horizontally centred in the player; text inside the
+      // line block flows left → right so the karaoke type-out reads
+      // naturally. Existing words don't re-animate (see word-static
+      // class) so the gentle re-center as a new word appends is barely
+      // perceptible.
       this.subtitleOverlay.style.alignItems = "center";
-      this.subtitleOverlay.style.textAlign = "center";
+      this.subtitleOverlay.style.textAlign = "left";
       this.subtitleOverlay.style.pointerEvents = "none";
       // zIndex controlled by CSS (.movi-subtitle-overlay)
 
+      // Skip re-rendering if the same cue text is already on screen — the
+      // presentation loop calls renderSubtitles() ~60×/sec, and overwriting
+      // innerHTML each tick recreates DOM nodes (restarting the
+      // movi-subtitle-fade keyframes in a tight loop). Result: subtitle
+      // never finishes fading in during playback and only becomes visible
+      // when the loop pauses.
+      const renderKey = `${cue.start.toFixed(3)}|${cue.text}`;
+      if (renderKey === this._lastRenderedSubtitleKey) {
+        return;
+      }
+      this._lastRenderedSubtitleKey = renderKey;
+
+      // Karaoke cues from the proxy embed the FULL final sentence after
+      // a `⟨⟨GHOST⟩⟩` delimiter. Only the *visible* portion goes into
+      // the DOM — the full sentence's width is measured offscreen via a
+      // 2D canvas and applied as `min-width` on the line. This anchors
+      // the box at full-sentence width from cue #1 without putting any
+      // ghost text into the DOM where it could leak through.
+      const KARAOKE_DELIM = "⟨⟨GHOST⟩⟩";
+      const delimIdx = cue.text.indexOf(KARAOKE_DELIM);
+      const visibleText =
+        delimIdx >= 0 ? cue.text.slice(0, delimIdx) : cue.text;
+      const renderText =
+        delimIdx >= 0
+          ? cue.text.slice(delimIdx + KARAOKE_DELIM.length)
+          : cue.text;
+
+      // Resolve the line's actual font (clamp() depends on viewport)
+      // by reading computed style off a temporary probe in the shadow
+      // root. Cached per-render-pass via `_subtitleFontCache`.
+      const fontSig = (() => {
+        const cached = this._subtitleFontCache;
+        if (cached && cached.viewport === window.innerWidth) {
+          return cached.font;
+        }
+        const probe = document.createElement("div");
+        probe.className = "movi-subtitle-line";
+        probe.style.position = "absolute";
+        probe.style.left = "-99999px";
+        probe.style.top = "-99999px";
+        probe.style.visibility = "hidden";
+        probe.textContent = "M";
+        this.subtitleOverlay.parentNode?.appendChild(probe);
+        const cs = window.getComputedStyle(probe);
+        const f = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+        probe.remove();
+        this._subtitleFontCache = {
+          viewport: window.innerWidth,
+          font: f,
+        };
+        return f;
+      })();
+
+      // Walk forward through the cue list to find the longest cumulative
+      // extension of the current cue's text — covers normal WebVTT
+      // karaoke streams (no GHOST delimiter) where each subsequent cue
+      // simply adds more words. Without this lookahead the box would
+      // grow with every word reveal; with it, the box is sized to the
+      // final sentence from cue #1.
+      const stripGhost = (t: string) => {
+        const idx = t.indexOf(KARAOKE_DELIM);
+        return idx >= 0 ? t.slice(0, idx) : t;
+      };
+      let ultimateText = renderText;
+      const activeIndex = this.subtitleCues.indexOf(this.activeSubtitleCue);
+      if (activeIndex >= 0) {
+        let chainTail = visibleText;
+        for (let i = activeIndex + 1; i < this.subtitleCues.length; i++) {
+          const next = this.subtitleCues[i];
+          if (!next?.text) break;
+          const nextVisible = stripGhost(next.text);
+          if (
+            nextVisible.length > chainTail.length &&
+            nextVisible.startsWith(chainTail)
+          ) {
+            chainTail = nextVisible;
+            // Prefer the GHOST-resolved variant if the next cue carries
+            // its own GHOST tail (longer than the visible portion).
+            ultimateText =
+              next.text.length > nextVisible.length ? next.text : nextVisible;
+          } else if (!nextVisible.startsWith(chainTail)) {
+            break; // chain ended — different sentence starts here
+          }
+        }
+      }
+
+      // Measure the FULL final sentence's width once (per ultimateText),
+      // so the line can be sized to it from the very first cue. Strip
+      // any HTML formatting tags first — they don't affect width
+      // meaningfully for sans-serif at this size.
+      // For multi-line SRT cues we take the WIDEST line, not the
+      // joined-line width. Joining "You've turned this house\ninto a
+      // tomb of her memorial." into one line measures ~600px and
+      // calibrates the anchor padding-left for that imaginary single
+      // line — but the actual block hugs the widest *real* line
+      // (~330px), so the block ends up left-shifted in the player.
+      // Per-line max gives the correct anchor offset; karaoke cues
+      // (typically no \n) collapse to the same single measurement.
+      const plainFull = stripGhost(ultimateText).replace(/<[^>]*>/g, "");
+      const measureCanvas = (this._subtitleMeasureCanvas ||=
+        document.createElement("canvas"));
+      const mctx = measureCanvas.getContext("2d");
+      let fullWidth = 0;
+      if (mctx) {
+        mctx.font = fontSig;
+        for (const ln of plainFull.split("\n")) {
+          const w = Math.ceil(mctx.measureText(ln).width);
+          if (w > fullWidth) fullWidth = w;
+        }
+      }
+
       // Update HTML overlay with subtitle text
-      // Split text into lines and create HTML
-      const lines = cue.text.split("\n");
-      this.subtitleOverlay.innerHTML = lines
+      // Split full (renderable) text into lines and create HTML
+      const lines = visibleText.split("\n");
+      // Word index across all lines of this cue; drives staggered
+      // typing-style reveal via per-word animation-delay.
+      let wordIdx = 0;
+      // Word-count split point: the first N tokens of the new cue match
+      // what's already on screen (karaoke cumulative growth). Render those
+      // statically and animate only the suffix — otherwise the whole line
+      // re-fades on every word and looks flickery.
+      const previousPlain = this._lastRenderedSubtitlePlain;
+      const isCumulativeGrowth =
+        !!previousPlain &&
+        visibleText.startsWith(previousPlain) &&
+        visibleText.length > previousPlain.length;
+      const staticWordCount = isCumulativeGrowth
+        ? previousPlain.split(/\s+/).filter(Boolean).length
+        : 0;
+      this._lastRenderedSubtitlePlain = visibleText;
+      let cumulativeWordCount = 0;
+      const linesHtml = lines
         .map((line) => {
           // Allow safe HTML formatting tags (<i>, <b>, <u>, <font>) while escaping other content
           // First, protect safe formatting tags by replacing them with placeholders
           const placeholders: string[] = [];
-          let textWithPlaceholders = line;
+          // YouTube's WebVTT for auto-captions often arrives with text
+          // chars already entity-encoded (e.g. ">>" written as the
+          // literal "&gt;&gt;" speaker-change indicator). Without
+          // decoding first, our own escape pass below would double-
+          // encode the leading "&" to "&amp;", and the browser would
+          // render the entity name as text instead of the character.
+          let textWithPlaceholders = line
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&quot;/g, '"')
+            .replace(/&#0?39;/g, "'")
+            .replace(/&#x27;/g, "'")
+            .replace(/&nbsp;/g, " ")
+            .replace(/&amp;/g, "&"); // amp last so the rest don't double-decode
 
           // Protect <i> tags
           textWithPlaceholders = textWithPlaceholders.replace(
@@ -1957,9 +2397,138 @@ export class CanvasRenderer {
             escaped = escaped.replace(`__PLACEHOLDER_${index}__`, placeholder);
           });
 
-          return `<div class="movi-subtitle-line">${escaped}</div>`;
+          // Tokenize on whitespace. YouTube auto-CC sprinkles formatting
+          // tags (`<i>`, `<b>`, `<font>`) around words; after escaping
+          // these survive in some tokens. Tokens that contain ONLY tags
+          // (no real text) shouldn't get their own `<span>` — that would
+          // render an empty inline-block which still triggers the
+          // surrounding inter-element whitespace, producing visible gaps
+          // between adjacent words. We fold tag-only tokens into the
+          // adjacent real-word token so the styling is preserved without
+          // creating an empty span between words.
+          const rawTokens = escaped.split(/(\s+)/).filter(Boolean);
+          const isWhitespace = (t: string) => /^\s+$/.test(t);
+          const isTagOnly = (t: string) =>
+            !!t && !t.replace(/<[^>]*>/g, "").trim();
+
+          // Forward-merge orphan opening tags into the next real word.
+          // Walk the tokens once, accumulate any tag-only token seen,
+          // attach it as a prefix to the next real word.
+          type Tok = { kind: "word" | "ws"; text: string };
+          const merged: Tok[] = [];
+          let pendingPrefix = "";
+          for (const t of rawTokens) {
+            if (isWhitespace(t)) {
+              if (pendingPrefix) {
+                // Whitespace between pending opening-tag glob and the
+                // next word — drop it; the tag should hug the word it
+                // styles, not introduce its own gap.
+                continue;
+              }
+              merged.push({ kind: "ws", text: t });
+              continue;
+            }
+            if (isTagOnly(t)) {
+              pendingPrefix += t;
+              continue;
+            }
+            merged.push({ kind: "word", text: pendingPrefix + t });
+            pendingPrefix = "";
+          }
+          // Trailing closing tags glue onto the last word so styling
+          // wraps correctly.
+          if (pendingPrefix && merged.length) {
+            const last = merged[merged.length - 1];
+            if (last.kind === "word") last.text = last.text + pendingPrefix;
+          }
+
+          // Split tokens into 2 inline groups: STATIC (already on screen
+          // from the previous cue) and NEW (the diff this cue introduces).
+          // No ghost span — the line's width is locked via `min-width`
+          // computed from a canvas measurement of the full sentence, so
+          // there is *no* trailing text in the DOM that could leak out.
+          const staticParts: string[] = [];
+          const newParts: string[] = [];
+          for (const tok of merged) {
+            const groupForCount = (count: number) =>
+              count < staticWordCount ? staticParts : newParts;
+            if (tok.kind === "ws") {
+              const target = groupForCount(cumulativeWordCount);
+              if (
+                target === staticParts &&
+                staticParts.length === 0 &&
+                cumulativeWordCount === 0
+              ) {
+                continue;
+              }
+              target.push(tok.text);
+              continue;
+            }
+            const target = groupForCount(cumulativeWordCount);
+            if (
+              target === newParts &&
+              newParts.length === 0 &&
+              staticParts.length > 0
+            ) {
+              const lastStatic = staticParts[staticParts.length - 1];
+              if (!/\s$/.test(lastStatic)) staticParts.push(" ");
+            }
+            target.push(tok.text);
+            cumulativeWordCount += 1;
+          }
+
+          wordIdx += 1;
+
+          const staticHtml = staticParts.join("").replace(/\s+$/, " ");
+          const newHtml = newParts.join("");
+
+          // The min-width anchor lives on the outer .movi-subtitle-block
+          // wrapper now, so individual lines just hug their content (and
+          // expand to the wrapper's width because they're block-level).
+          const lineParts: string[] = [
+            `<div class="movi-subtitle-line">`,
+          ];
+          if (staticHtml)
+            lineParts.push(
+              `<span class="movi-subtitle-static">${staticHtml}</span>`,
+            );
+          if (newHtml)
+            lineParts.push(
+              `<span class="movi-subtitle-new">${newHtml}</span>`,
+            );
+          lineParts.push(`</div>`);
+          return lineParts.join("");
         })
         .join("");
+
+      // Layout:
+      //   .anchor  — full-width container.
+      //              When the full sentence FITS in the player's usable
+      //              width (≤ 92% of overlay), we left-anchor it via
+      //              padding-left so karaoke types in from a stable
+      //              left edge. When the sentence is WIDER than the
+      //              player (large user font, narrow embed), we fall
+      //              back to text-align:center so the block stays
+      //              centred and doesn't clip the right edge.
+      //   .block   — inline-block backdrop (single rounded rectangle)
+      //              that hugs the widest visible line.
+      //   .line    — plain text row, no own background.
+      const overlayPxW = parseFloat(this.subtitleOverlay.style.width) || 0;
+      const usableW = overlayPxW * 0.92; // matches .movi-subtitle-block max-width
+      const fitsInPlayer =
+        overlayPxW > 0 && fullWidth > 0 && fullWidth <= usableW;
+      const leftPad = fitsInPlayer
+        ? Math.max(0, Math.floor((overlayPxW - fullWidth) / 2))
+        : 0;
+      const anchorStyle = fitsInPlayer
+        ? leftPad > 0
+          ? ` style="padding-left:${leftPad}px"`
+          : ""
+        : ` style="text-align:center"`;
+      this.subtitleOverlay.innerHTML =
+        `<div class="movi-subtitle-anchor"${anchorStyle}>` +
+        `<div class="movi-subtitle-block">${linesHtml}</div>` +
+        `</div>`;
 
       return;
     }
@@ -2020,6 +2589,41 @@ export class CanvasRenderer {
       resolution: this.width > 0 ? `${this.width}x${this.height}` : "N/A",
       syncedToAudio: this.syncedToAudio,
     };
+  }
+
+  /**
+   * Drop frames whose pts is more than `toleranceSec` behind `targetTimeSec`.
+   * Used on resume from pause to discard frames that became stale while the
+   * audio clock advanced (e.g. mid-decode-warmup when the user fullscreens or
+   * toggles tracks, causing the queue to retain pre-resume frames).
+   * Returns the number of frames dropped.
+   */
+  dropStaleFrames(targetTimeSec: number, toleranceSec: number = 0.2): number {
+    let dropped = 0;
+    while (this.frameQueue.length > 0) {
+      const frame = this.frameQueue[0];
+      const frameTime = frame.timestamp / 1_000_000;
+      if (frameTime < targetTimeSec - toleranceSec) {
+        frame.close();
+        this.frameQueue.shift();
+        dropped++;
+      } else {
+        break;
+      }
+    }
+    if (dropped > 0) {
+      // Reset presentation anchors so the next surviving frame starts cleanly
+      // against the new clock position.
+      this.presentationStartTime = 0;
+      this.presentationStartPts = 0;
+      this.lastPresentedPts = -1;
+      this.syncedToAudio = false;
+      Logger.debug(
+        TAG,
+        `Dropped ${dropped} stale frames before ${targetTimeSec.toFixed(3)}s (tolerance ${toleranceSec.toFixed(2)}s)`,
+      );
+    }
+    return dropped;
   }
 
   /**

@@ -150,6 +150,39 @@ const source = new FileSource(file);
 | 100MB - 1GB | ~100-200MB     | Partial cache  |
 | > 1GB       | ~200-400MB     | Smart chunking |
 
+## Handle Revocation (Mobile)
+
+iOS Safari and Android Chrome silently revoke `File` handles after long backgrounding or memory pressure. Without recovery, the demuxer hangs forever waiting on a read that will never complete.
+
+`FileSource` races each chunk read against an 8s timeout. When a read fails, it surfaces the failure as a one-shot event so the app can prompt the user to re-pick the file.
+
+```html
+<movi-player id="player" controls></movi-player>
+
+<script type="module">
+  import "movi-player";
+
+  const player = document.getElementById("player");
+  let lastFile = null;
+
+  player.addEventListener("filerevoked", (e) => {
+    // e.detail = { offset, length, reason }
+    console.warn("File handle revoked:", e.detail);
+
+    // Show the user a "Pick again" prompt — there is no way to recover
+    // the original handle, so they must re-select the file from disk.
+    showRepickDialog(lastFile?.name).then((newFile) => {
+      if (newFile) {
+        lastFile = newFile;
+        player.src = newFile;
+      }
+    });
+  });
+</script>
+```
+
+For programmatic use, listen to `filerevoked` on `MoviPlayer` instead — same payload.
+
 ## Drag & Drop Support
 
 ```html

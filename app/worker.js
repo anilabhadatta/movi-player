@@ -348,6 +348,37 @@ function handleEmbed(url) {
 html,body{width:100%;height:100%;overflow:hidden;background:#000}
 movi-player{width:100%;height:100%;display:block}
 </style>
+<script>
+// Minimal __movilog shim for the embed. The bundled player is built
+// with terser drop_console:true, so any diagnostics it wants to emit
+// go through window.__movilog (the name survives minification). In
+// the embed we route them straight to the iframe's DevTools console
+// so users debugging an embed can still see player logs — and we
+// keep a small ring buffer for postMessage/inspection from the
+// parent. No on-page panel here (embed is meant to be invisible
+// chrome).
+(function () {
+  var MAX = 200;
+  var buf = [];
+  function push(level, args) {
+    var entry = { level: level, args: Array.prototype.slice.call(args), t: Date.now() };
+    buf.push(entry);
+    if (buf.length > MAX) buf.splice(0, buf.length - MAX);
+    try { (console[level] || console.log).apply(console, args); } catch (e) {}
+  }
+  function makeLogger(level) {
+    return function () { push(level, arguments); };
+  }
+  var movilog = makeLogger("log");
+  movilog.log = makeLogger("log");
+  movilog.info = makeLogger("info");
+  movilog.warn = makeLogger("warn");
+  movilog.error = makeLogger("error");
+  movilog.debug = makeLogger("debug");
+  window.__movilog = movilog;
+  window.__moviDevLog = { buffer: buf };
+})();
+</script>
 </head>
 <body>
 <movi-player id="p" renderer="canvas" controls objectfit="control" gesturefs fastseek stablevolume${autoplay ? " autoplay" : ""}></movi-player>

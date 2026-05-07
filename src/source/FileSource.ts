@@ -33,12 +33,26 @@ export class FileSource implements SourceAdapter {
   private currentReadSpeed: number = 0; // bytes per second
   private readStartTime: number = 0;
 
+  // Notified when a file read times out — the underlying File handle has likely
+  // been revoked by the browser (mobile background, memory pressure). Fired
+  // once per source; subsequent reads continue to throw.
+  private onRevokedCallback: ((info: { offset: number; length: number; reason: string }) => void) | null = null;
+  private revokedFired: boolean = false;
+
   constructor(file: File, cache: LRUCache | null = null) {
     this.file = file;
     this.size = file.size;
     // Use provided cache or create a default one
     this.cache = cache || new LRUCache(100); // Default 100MB cache
     this.sourceKey = this.getKey();
+  }
+
+  /**
+   * Register a callback fired the first time a file read times out (likely
+   * revocation by mobile browser). Lets the host surface a re-pick UI.
+   */
+  setOnRevoked(cb: (info: { offset: number; length: number; reason: string }) => void): void {
+    this.onRevokedCallback = cb;
   }
 
   /**
@@ -285,13 +299,39 @@ export class FileSource implements SourceAdapter {
 
   /**
    * Read a chunk from file and cache it
+   *
+   * Mobile browsers (iOS Safari, Android Chrome) can revoke the underlying File
+   * handle after long backgrounding or under memory pressure. The Blob then
+   * silently hangs on read instead of rejecting, which stalls the demuxer
+   * forever. Race against a timeout and surface a clear error so the UI can
+   * prompt the user to re-pick the file.
    */
   private async readChunkFromFile(
     offset: number,
     length: number,
   ): Promise<ArrayBuffer> {
     const blob = this.file.slice(offset, offset + length);
-    const arrayBuffer = await blob.arrayBuffer();
+    const READ_TIMEOUT_MS = 8000;
+    const reason = `FileSource read timeout (${READ_TIMEOUT_MS}ms) at offset=${offset} length=${length} — file handle likely revoked by browser; user must re-pick the file`;
+    let arrayBuffer: ArrayBuffer;
+    try {
+      arrayBuffer = await Promise.race([
+        blob.arrayBuffer(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error(reason)), READ_TIMEOUT_MS),
+        ),
+      ]);
+    } catch (err) {
+      if (!this.revokedFired && this.onRevokedCallback) {
+        this.revokedFired = true;
+        try {
+          this.onRevokedCallback({ offset, length, reason });
+        } catch {
+          // Don't let listener errors mask the original read failure
+        }
+      }
+      throw err;
+    }
 
     // Track disk read stats
     if (this.readStartTime === 0) {

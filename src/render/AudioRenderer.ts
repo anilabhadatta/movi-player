@@ -54,8 +54,84 @@ export class AudioRenderer {
   private isStarved: boolean = false;
   private static readonly STARVATION_THRESHOLD = 2000; // ms without new audio data before considered starved
 
+  // Bluetooth keepalive: silent <audio> element played during pause to hold the
+  // OS audio session so A2DP devices don't drop and re-pair. AudioContext.suspend()
+  // alone releases the output route on iOS/Android; an HTMLMediaElement keeps
+  // the session claimed without affecting our scheduled buffers.
+  private keepaliveEl: HTMLAudioElement | null = null;
+  private keepaliveUrl: string | null = null;
+
   constructor() {
     Logger.debug(TAG, "Created");
+  }
+
+  /**
+   * Lazily create a near-silent looping <audio> element used to keep the
+   * OS audio session alive while AudioContext is suspended. Uses a tiny
+   * generated WAV blob so resume from pause stays seamless and Bluetooth
+   * speakers/headphones don't drop the connection.
+   */
+  private ensureKeepalive(): HTMLAudioElement | null {
+    if (this.keepaliveEl) return this.keepaliveEl;
+    try {
+      // 0.5s of 8kHz mono 8-bit silence (4044 bytes including 44-byte WAV header)
+      const sampleRate = 8000;
+      const numSamples = sampleRate / 2;
+      const buf = new ArrayBuffer(44 + numSamples);
+      const view = new DataView(buf);
+      const writeStr = (off: number, s: string) => {
+        for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+      };
+      writeStr(0, "RIFF");
+      view.setUint32(4, 36 + numSamples, true);
+      writeStr(8, "WAVE");
+      writeStr(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);          // PCM
+      view.setUint16(22, 1, true);          // mono
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate, true); // byte rate (8-bit mono)
+      view.setUint16(32, 1, true);          // block align
+      view.setUint16(34, 8, true);          // bits per sample
+      writeStr(36, "data");
+      view.setUint32(40, numSamples, true);
+      // 8-bit unsigned PCM silence is 0x80
+      const samples = new Uint8Array(buf, 44, numSamples);
+      samples.fill(0x80);
+
+      const blob = new Blob([buf], { type: "audio/wav" });
+      this.keepaliveUrl = URL.createObjectURL(blob);
+      const el = new Audio();
+      el.src = this.keepaliveUrl;
+      el.loop = true;
+      el.preload = "auto";
+      el.volume = 0.0001; // inaudible but enough to hold the audio session
+      this.keepaliveEl = el;
+    } catch (err) {
+      Logger.warn(TAG, "Failed to create BT keepalive element", err);
+      return null;
+    }
+    return this.keepaliveEl;
+  }
+
+  private startKeepalive(): void {
+    const el = this.ensureKeepalive();
+    if (!el) return;
+    el.play().catch(() => {
+      // Autoplay policies may block this without a user gesture; harmless —
+      // the user already interacted to start playback before they paused.
+    });
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveEl) {
+      try {
+        this.keepaliveEl.pause();
+        this.keepaliveEl.currentTime = 0;
+      } catch {
+        /* noop */
+      }
+    }
   }
 
   /**
@@ -375,6 +451,9 @@ export class AudioRenderer {
       }
     }
 
+    // Stop the BT keepalive — main context is taking the audio session back.
+    this.stopKeepalive();
+
     // Warmup context (Safari fix) - only if not muted
     if (!this._muted && this.audioContext) {
       this.warmupContext();
@@ -505,6 +584,10 @@ export class AudioRenderer {
     // If we clear sources, we lose the buffered audio (e.g. 2 seconds worth), causing the
     // player to jump forward by that amount on resume.
     if (this.audioContext && this.audioContext.state === "running") {
+      // Start silent <audio> keepalive BEFORE suspending so the OS audio
+      // session never goes idle — without this, A2DP Bluetooth devices drop
+      // the connection on every pause/resume cycle.
+      this.startKeepalive();
       this.intentionalSuspend = true;
       this.audioContext.suspend().catch((err) => {
         Logger.error(TAG, "Failed to suspend audio context", err);
@@ -1063,6 +1146,21 @@ export class AudioRenderer {
   async destroy(): Promise<void> {
     this.isPlaying = false;
     this.reset();
+
+    // Tear down BT keepalive
+    this.stopKeepalive();
+    if (this.keepaliveEl) {
+      try {
+        this.keepaliveEl.src = "";
+      } catch {
+        /* noop */
+      }
+      this.keepaliveEl = null;
+    }
+    if (this.keepaliveUrl) {
+      URL.revokeObjectURL(this.keepaliveUrl);
+      this.keepaliveUrl = null;
+    }
 
     // Clean up context state monitoring
     if (this.audioContext && this.contextStateHandler) {

@@ -45,6 +45,8 @@ const OSD = {
   muted: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>`,
   unmuted: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>`,
   ambient: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>`,
+  seekBackward: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /><text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text></svg>`,
+  seekForward: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" /><path d="M21 3v5h-5" /><text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text></svg>`,
 } as const;
 
 export class MoviElement extends HTMLElement {
@@ -61,6 +63,7 @@ export class MoviElement extends HTMLElement {
   private controlsTimeout: number | null = null;
   private isOverControls: boolean = false;
   private isSeeking: boolean = false;
+  private pendingSeekTarget: number | null = null; // Coalesces rapid currentTime sets while a seek is in flight
   private isPosterSeek: boolean = false; // True during initial seek(0) to render first frame
   private isDragging: boolean = false;
   private isTouchDragging: boolean = false;
@@ -74,6 +77,12 @@ export class MoviElement extends HTMLElement {
   private lastSeekTime: number = 0; // Track last seek time to prevent accidental pauses
   private lastSeekSide: "left" | "right" | null = null;
   private cumulativeSeekAmount: number = 0;
+  // The last *target* asked for by a chained relative seek. Async seeks
+  // mean this.currentTime lags behind during a burst, so we chain off
+  // the previous target instead of re-reading the still-stale playback
+  // time — otherwise rapid presses count phantom seconds the playhead
+  // never travelled.
+  private _seekChainTarget: number | null = null;
   private _contextMenuVisible: boolean = false;
   private _contextMenuJustClosed: boolean = false;
   private lastTouchTime: number = 0;
@@ -92,6 +101,10 @@ export class MoviElement extends HTMLElement {
   // Internal state
   private _src: string | File | null = null;
   private _audioSrc: string | null = null; // Separate audio source URL
+  // Pre-muxed video qualities declared via multiple <source> tags with
+  // data-height / data-label. Lets the player drive a YouTube-style quality
+  // menu for plain MP4 sources (where there's no HLS manifest to enumerate).
+  private _videoQualities: { src: string; type?: string; height: number; label: string; fps?: number; badge?: string }[] = [];
   private _audioTracks: { src: string; type?: string; lang: string; label: string }[] = []; // Multi-language audio
   private _subtitleTracks: { src: string; lang: string; label: string; format?: string }[] = []; // External subtitles
   private _autoplay: boolean = false;
@@ -110,6 +123,24 @@ export class MoviElement extends HTMLElement {
   private _poster: string = "";
   private _volume: number = 1.0;
   private _playbackRate: number = 1.0;
+  // Subtitle delay in seconds (VLC/mpv sign convention). Not persisted to
+  // SettingsStorage — sync drift is per-source, so a global value would
+  // mis-shift unrelated videos.
+  private _subtitleDelay: number = 0;
+  // User-customizable subtitle appearance. Applied as CSS variables on the
+  // host element so the shadow-DOM subtitle CSS can read them. Persisted
+  // to localStorage so the user's choice survives reloads.
+  private _subtitleSettings: {
+    sizeMult: number;
+    color: string;
+    bgAlpha: number;
+    edge: "none" | "shadow" | "outline" | "raised";
+  } = {
+    sizeMult: 1,
+    color: "#FFFFFF",
+    bgAlpha: 0.75,
+    edge: "shadow",
+  };
   private _ambientMode: boolean = false;
   private _renderer: RendererType = "canvas";
   private _objectFit: "contain" | "cover" | "fill" | "zoom" | "control" =
@@ -167,6 +198,56 @@ export class MoviElement extends HTMLElement {
   // Context handling state
   private _contextLostTime: number = 0;
   private _contextLostPlaying: boolean = false;
+  private _lastFrameSnapshot: string = ""; // dataURL captured before backgrounding, used as poster during context-loss recovery
+  private _snapshotPosterActive: boolean = false;
+  private _snapshotPosterPrev: { src: string; display: string } | null = null;
+  private _showSnapshotPoster = () => {
+    if (!this._lastFrameSnapshot || !this.posterElement) return;
+    if (this._snapshotPosterActive) return;
+    this._snapshotPosterPrev = {
+      src: this.posterElement.src,
+      display: this.posterElement.style.display,
+    };
+    this.posterElement.src = this._lastFrameSnapshot;
+    this.posterElement.style.display = "block";
+    this._snapshotPosterActive = true;
+  };
+
+  private _hideSnapshotPoster = () => {
+    if (!this._snapshotPosterActive || !this.posterElement) return;
+    const prev = this._snapshotPosterPrev;
+    this.posterElement.src = prev?.src ?? "";
+    this.posterElement.style.display = prev?.display ?? "none";
+    this._snapshotPosterActive = false;
+    this._snapshotPosterPrev = null;
+  };
+
+  private _onVisibilityChange = () => {
+    if (document.visibilityState === "hidden") {
+      // Capture last visible frame BEFORE the OS may kill the GL context.
+      if (this.canvas) {
+        try {
+          const dataUrl = this.canvas.toDataURL("image/jpeg", 0.85);
+          if (dataUrl && dataUrl.length > 32) {
+            this._lastFrameSnapshot = dataUrl;
+          }
+        } catch { /* tainted canvas */ }
+      }
+      // Pre-emptively show the snapshot as a poster overlay. This way, when
+      // the user returns the browser can't briefly paint a corrupt canvas
+      // frame between visibility-visible and webglcontextlost firing.
+      this._showSnapshotPoster();
+    } else {
+      // Visible again. If the GL context is still alive, hide the snapshot
+      // immediately. If it was lost, leave the snapshot up — handleContextLost
+      // / handleContextRestored own the recovery teardown.
+      const gl = this.canvas?.getContext("webgl2") as WebGL2RenderingContext | null;
+      const lost = gl?.isContextLost?.() ?? false;
+      if (!lost && this._contextLostTime === 0) {
+        this._hideSnapshotPoster();
+      }
+    }
+  };
 
   // Observed attributes (native video element attributes)
   static get observedAttributes() {
@@ -184,6 +265,11 @@ export class MoviElement extends HTMLElement {
       "crossorigin",
       "volume",
       "playbackrate",
+      "subtitledelay",
+      "subtitlesize",
+      "subtitlecolor",
+      "subtitlebg",
+      "subtitleedge",
       "ambientmode",
       "ambientwrapper",
       "renderer",
@@ -260,6 +346,25 @@ export class MoviElement extends HTMLElement {
     // Create poster image element (overlay on video/canvas)
     this.posterElement = document.createElement("img");
     this.posterElement.className = "movi-poster-overlay";
+    // Pages that ship Cross-Origin-Embedder-Policy: require-corp will block
+    // cross-origin images that aren't loaded with CORS. Without this, a host
+    // page that opts into COEP gets a silent black overlay instead of the
+    // poster.
+    this.posterElement.crossOrigin = "anonymous";
+    this.posterElement.referrerPolicy = "no-referrer";
+    this.posterElement.decoding = "async";
+    // YouTube's `maxresdefault.jpg` 404s for videos that never had a 720p
+    // thumbnail uploaded; fall back to `hqdefault.jpg` (always present) so
+    // the overlay never sits as silent black.
+    this.posterElement.addEventListener("error", () => {
+      const url = this.posterElement.src;
+      const m = url.match(/\/vi\/([\w-]+)\/maxresdefault\.jpg/);
+      if (m) {
+        this.posterElement.src = `https://i.ytimg.com/vi/${m[1]}/hqdefault.jpg`;
+      } else {
+        this.posterElement.style.display = "none";
+      }
+    });
     this.posterElement.style.position = "absolute";
     this.posterElement.style.top = "0";
     this.posterElement.style.left = "0";
@@ -268,12 +373,29 @@ export class MoviElement extends HTMLElement {
     this.posterElement.style.objectFit = "contain";
     this.posterElement.style.display = "none";
     this.posterElement.style.zIndex = "1";
+    // Pure visual overlay — let click/dblclick/gesture events pass through to
+    // the canvas/video underneath where the player's handlers are attached.
+    this.posterElement.style.pointerEvents = "none";
     shadowRoot.appendChild(this.posterElement);
 
     // Create subtitle overlay element
     this.subtitleOverlay = document.createElement("div");
     this.subtitleOverlay.className = "movi-subtitle-overlay";
     shadowRoot.appendChild(this.subtitleOverlay);
+
+    // Click on the live caption text → open the transcript browser
+    // (scrolled to the current cue). The overlay itself stays
+    // pointer-events:none so clicks elsewhere keep falling through to
+    // the canvas / play-pause toggle; only the rendered .block opts in.
+    // Transcript is gated to file sources — streamed sources can't
+    // reliably hand back the full cue list.
+    this.subtitleOverlay.addEventListener("click", (e) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest(".movi-subtitle-block")) return;
+      if (!this.player?.isFileSource()) return;
+      e.stopPropagation();
+      void this.openCuesPanel();
+    });
 
     // Create loading indicator (positioned over video area)
     const loadingIndicator = document.createElement("div");
@@ -741,12 +863,34 @@ export class MoviElement extends HTMLElement {
                   </svg>
                 </button>
                 <div class="movi-subtitle-track-menu" style="display: none;">
-                  <div class="movi-track-menu-header">
+                  <div class="movi-track-menu-header movi-subtitle-track-header">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                       <rect width="20" height="16" x="2" y="4" rx="2" ry="2"></rect>
                       <path d="M10 8.5H8a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2 M18 8.5h-2a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2"></path>
                     </svg>
                     <span>Subtitles</span>
+                    <button type="button"
+                            class="movi-subtitle-browse-btn"
+                            aria-label="Open transcript"
+                            title="Transcript">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                        <line x1="8" y1="6" x2="21" y2="6"/>
+                        <line x1="8" y1="12" x2="21" y2="12"/>
+                        <line x1="8" y1="18" x2="21" y2="18"/>
+                        <circle cx="3.5" cy="6" r="1"/>
+                        <circle cx="3.5" cy="12" r="1"/>
+                        <circle cx="3.5" cy="18" r="1"/>
+                      </svg>
+                    </button>
+                    <button type="button"
+                            class="movi-subtitle-customize-btn"
+                            aria-label="Customize captions"
+                            title="Customize captions">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16">
+                        <circle cx="12" cy="12" r="3"></circle>
+                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                      </svg>
+                    </button>
                   </div>
                   <div class="movi-subtitle-track-list"></div>
                   <div class="movi-track-menu-footer movi-subtitle-track-footer"></div>
@@ -759,6 +903,7 @@ export class MoviElement extends HTMLElement {
                     <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.1a2 2 0 0 1-1-1.72v-.51a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
                     <circle cx="12" cy="12" r="3"></circle>
                   </svg>
+                  <span class="movi-quality-btn-badge" style="display: none;"></span>
                 </button>
                 <div class="movi-quality-menu" style="display: none;">
                   <div class="movi-quality-list"></div>
@@ -972,6 +1117,7 @@ export class MoviElement extends HTMLElement {
           <div class="movi-shortcut-row"><kbd>Ctrl+&larr;/&rarr;</kbd><span>Frame Step</span></div>
           <div class="movi-shortcut-row"><kbd>+/-</kbd><span>Speed Up/Down</span></div>
           <div class="movi-shortcut-row"><kbd>V</kbd><span>Cycle Subtitles</span></div>
+          <div class="movi-shortcut-row"><kbd>Z / X</kbd><span>Subtitle Delay</span></div>
           <div class="movi-shortcut-row"><kbd>B</kbd><span>Cycle Audio</span></div>
         </div>
         <div class="movi-shortcuts-col">
@@ -992,6 +1138,35 @@ export class MoviElement extends HTMLElement {
     shortcutsPanel.querySelector(".movi-shortcuts-close")?.addEventListener("click", (e) => {
       e.stopPropagation();
       shortcutsPanel.style.display = "none";
+    });
+
+    // Subtitle Cues Browser — full-cover modal listing every cue, with
+    // search + click-to-seek. Useful for finding the exact dialogue
+    // anchor when subs are out of sync against the audio (calculate
+    // offset from a known line) and for skimming non-native dialogue.
+    const cuesPanel = document.createElement("div");
+    cuesPanel.className = "movi-cues-panel";
+    cuesPanel.style.display = "none";
+    cuesPanel.innerHTML = `
+      <div class="movi-cues-header">
+        <span class="movi-cues-title">Transcript</span>
+        <div class="movi-cues-search-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="m21 21-4.3-4.3"/>
+          </svg>
+          <input type="search" class="movi-cues-search" placeholder="Search transcript…" aria-label="Search transcript">
+        </div>
+        <button class="movi-cues-close" aria-label="Close">&times;</button>
+      </div>
+      <div class="movi-cues-meta"><span class="movi-cues-meta-count">—</span></div>
+      <div class="movi-cues-list" role="listbox"></div>
+    `;
+    shadowRoot.appendChild(cuesPanel);
+
+    cuesPanel.querySelector(".movi-cues-close")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.closeCuesPanel();
     });
 
     // Setup control handlers
@@ -1045,73 +1220,13 @@ export class MoviElement extends HTMLElement {
     // Seek Backward
     seekBackwardBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
-      const side = "left";
-      const currentTime = this.currentTime;
-      const newTime = Math.max(0, currentTime - 10);
-      // Can seek if currently more than 0.5s away from start
-      const canSeek = currentTime > 0.5;
-      Logger.debug(TAG, `Seek backward: ${currentTime}s -> ${newTime}s (canSeek: ${canSeek})`);
-
-      // Always perform the seek
-      this.currentTime = newTime;
-
-      // Only increment counter and show OSD if not at boundary
-      if (canSeek) {
-        if (this.lastSeekSide === side && Date.now() - this.lastSeekTime < 1000) {
-          this.cumulativeSeekAmount += 10;
-        } else {
-          this.cumulativeSeekAmount = 10;
-          this.lastSeekSide = side;
-        }
-        this.lastSeekTime = Date.now();
-        Logger.debug(TAG, `Counter updated: ${this.cumulativeSeekAmount}s`);
-        this.showOSD(
-          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-            <path d="M3 3v5h5" />
-            <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-          </svg>`,
-          `- ${this.cumulativeSeekAmount}s`,
-        );
-      } else {
-        Logger.debug(TAG, `At boundary, skipping counter update`);
-      }
+      this.performRelativeSeek("left");
     });
 
     // Seek Forward
     seekForwardBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
-      const side = "right";
-      const currentTime = this.currentTime;
-      const newTime = Math.min(this.duration, currentTime + 10);
-      // Can seek if currently more than 0.5s away from end
-      const canSeek = currentTime < this.duration - 0.5;
-      Logger.debug(TAG, `Seek forward: ${currentTime}s -> ${newTime}s (duration: ${this.duration}s, canSeek: ${canSeek})`);
-
-      // Always perform the seek
-      this.currentTime = newTime;
-
-      // Only increment counter and show OSD if not at boundary
-      if (canSeek) {
-        if (this.lastSeekSide === side && Date.now() - this.lastSeekTime < 1000) {
-          this.cumulativeSeekAmount += 10;
-        } else {
-          this.cumulativeSeekAmount = 10;
-          this.lastSeekSide = side;
-        }
-        this.lastSeekTime = Date.now();
-        Logger.debug(TAG, `Counter updated: ${this.cumulativeSeekAmount}s`);
-        this.showOSD(
-          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-            <path d="M21 3v5h-5" />
-            <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-          </svg>`,
-          `+ ${this.cumulativeSeekAmount}s`,
-        );
-      } else {
-        Logger.debug(TAG, `At boundary, skipping counter update`);
-      }
+      this.performRelativeSeek("right");
     });
 
     hdrBtn?.addEventListener("click", (e) => {
@@ -1269,7 +1384,7 @@ export class MoviElement extends HTMLElement {
           ".movi-progress-handle",
         ) as HTMLElement;
         if (progressFilled) progressFilled.style.width = `${percent * 100}%`;
-        if (progressHandle) progressHandle.style.left = `${Math.max(1, percent * 100)}%`;
+        if (progressHandle) progressHandle.style.left = `${percent * 100}%`;
       }
 
       if (duration <= 0) return;
@@ -1497,52 +1612,44 @@ export class MoviElement extends HTMLElement {
     volumeBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
 
-      // Determine if interaction is touch-based
-      const pEvent = e as PointerEvent;
-      const isTouch = pEvent.pointerType === "touch";
-      const isMouse = pEvent.pointerType === "mouse";
+      // matchMedia is reliable across browsers; pointerType on click events is
+      // not (Android Chrome can synthesize click with pointerType="mouse" from
+      // a touch tap, which previously fell through to mute on the first tap).
       const noHover = window.matchMedia("(hover: none)").matches;
-
       const volumeContainer = shadowRoot.querySelector(
         ".movi-volume-container",
-      );
+      ) as HTMLElement | null;
 
-      // If explicit mouse interaction -> Just Mute (Desktop)
-      if (isMouse) {
-        this.muted = !this.muted;
-        return;
-      }
-
-      // If on mobile/touch, prioritize opening slider
-      if (volumeContainer && (isTouch || noHover)) {
-        // If slider is NOT active, open it
+      // Touch / mobile: first tap opens the slider, second tap mutes.
+      if (noHover && volumeContainer) {
         if (!volumeContainer.classList.contains("active")) {
           volumeContainer.classList.add("active");
 
           const closeVolume = (evt: Event) => {
-            const target = evt.target as Node;
-            // If click outside container and button
+            // composedPath crosses shadow boundaries; evt.target alone gets
+            // retargeted to the host, which makes every click look "outside".
+            const path = evt.composedPath();
             if (
-              volumeContainer &&
-              !volumeContainer.contains(target) &&
-              target !== volumeBtn &&
-              !volumeBtn.contains(target)
+              !path.includes(volumeContainer) &&
+              !path.includes(volumeBtn)
             ) {
               volumeContainer.classList.remove("active");
               document.removeEventListener("click", closeVolume);
             }
           };
 
-          // Defer listener
           setTimeout(() => {
             document.addEventListener("click", closeVolume);
           }, 10);
 
-          return; // Capture event, do NOT mute
+          return;
         }
+        // Slider already open -> second tap mutes
+        this.muted = !this.muted;
+        return;
       }
 
-      // Default behavior (Desktop click OR Touch second click): Toggle mute
+      // Desktop (hover-capable): tap toggles mute, slider opens on hover
       this.muted = !this.muted;
     });
     volumeSlider?.addEventListener("input", (e) => {
@@ -1606,9 +1713,10 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation(); // Prevent triggering overlay click
       // Toggle menu visibility
       if (audioTrackMenu) {
-        const isVisible = audioTrackMenu.style.display !== "none";
-        audioTrackMenu.style.display = isVisible ? "none" : "block";
-        if (!isVisible) {
+        const willOpen = !this.isBottomMenuOpen(audioTrackMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-audio-track-menu");
+        this.setBottomMenuOpen(audioTrackMenu, willOpen);
+        if (willOpen) {
           this.updateAudioTrackMenu();
           this.updateSubtitleTrackMenu();
         }
@@ -1623,7 +1731,7 @@ export class MoviElement extends HTMLElement {
         !audioTrackMenu.contains(e.target as Node) &&
         !audioTrackBtn.contains(e.target as Node)
       ) {
-        audioTrackMenu.style.display = "none";
+        this.setBottomMenuOpen(audioTrackMenu, false);
       }
     };
     document.addEventListener("click", closeMenuHandler);
@@ -1640,24 +1748,55 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation(); // Prevent triggering overlay click
       // Toggle menu visibility
       if (subtitleTrackMenu) {
-        const isVisible = subtitleTrackMenu.style.display !== "none";
-        subtitleTrackMenu.style.display = isVisible ? "none" : "block";
-        if (!isVisible) {
+        const willOpen = !this.isBottomMenuOpen(subtitleTrackMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-subtitle-track-menu");
+        this.setBottomMenuOpen(subtitleTrackMenu, willOpen);
+        if (willOpen) {
+          // Always open on the track list, never on the customize panel.
+          this._showingSubtitleCustomize = false;
           this.updateSubtitleTrackMenu();
         }
       }
     });
 
-    // Close subtitle menu when clicking outside
+    // Header gear → toggle the customize panel inside the same dropdown.
+    const subtitleCustomizeBtn = shadowRoot.querySelector(
+      ".movi-subtitle-customize-btn",
+    ) as HTMLElement | null;
+    subtitleCustomizeBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._showingSubtitleCustomize = !this._showingSubtitleCustomize;
+      this.updateSubtitleTrackMenu();
+    });
+
+    // Header list icon → open full-cover cues browser.
+    const subtitleBrowseBtn = shadowRoot.querySelector(
+      ".movi-subtitle-browse-btn",
+    ) as HTMLElement | null;
+    subtitleBrowseBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Close the dropdown first — the cues panel covers the player and
+      // any leftover dropdown stacked above it just looks broken.
+      const subtitleMenu = this.shadowRoot?.querySelector(
+        ".movi-subtitle-track-menu",
+      ) as HTMLElement | null;
+      this.setBottomMenuOpen(subtitleMenu, false);
+      void this.openCuesPanel();
+    });
+
+    // Close subtitle menu when clicking outside. Uses composedPath()
+    // instead of contains() so a click that originates inside the
+    // menu's shadow tree still counts as "inside" — important for the
+    // customize-panel's range sliders, where releasing the thumb past
+    // the menu's bounding box used to land the click target outside
+    // the menu and slam the panel shut mid-drag.
     const closeSubtitleMenuHandler = (e: MouseEvent) => {
-      if (
-        subtitleTrackMenu &&
-        subtitleTrackBtn &&
-        !subtitleTrackMenu.contains(e.target as Node) &&
-        !subtitleTrackBtn.contains(e.target as Node)
-      ) {
-        subtitleTrackMenu.style.display = "none";
+      if (!subtitleTrackMenu || !subtitleTrackBtn) return;
+      const path = e.composedPath();
+      if (path.includes(subtitleTrackMenu) || path.includes(subtitleTrackBtn)) {
+        return;
       }
+      this.setBottomMenuOpen(subtitleTrackMenu, false);
     };
     document.addEventListener("click", closeSubtitleMenuHandler);
 
@@ -1700,27 +1839,19 @@ export class MoviElement extends HTMLElement {
     speedBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       if (speedMenu) {
-        // Close other menus
-        if (audioTrackMenu) audioTrackMenu.style.display = "none";
-        if (subtitleTrackMenu) subtitleTrackMenu.style.display = "none";
-        if (qualityMenu) qualityMenu.style.display = "none";
-
-        const isVisible = speedMenu.style.display !== "none";
-        speedMenu.style.display = isVisible ? "none" : "block";
+        const willOpen = !this.isBottomMenuOpen(speedMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-speed-menu");
+        this.setBottomMenuOpen(speedMenu, willOpen);
       }
     });
 
     qualityBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       if (qualityMenu) {
-        // Close other menus
-        if (audioTrackMenu) audioTrackMenu.style.display = "none";
-        if (subtitleTrackMenu) subtitleTrackMenu.style.display = "none";
-        if (speedMenu) speedMenu.style.display = "none";
-
-        const isVisible = qualityMenu.style.display !== "none";
-        qualityMenu.style.display = isVisible ? "none" : "block";
-        if (!isVisible) this.updateQualityMenu();
+        const willOpen = !this.isBottomMenuOpen(qualityMenu);
+        if (willOpen) this.closeAllBottomMenus(".movi-quality-menu");
+        this.setBottomMenuOpen(qualityMenu, willOpen);
+        if (willOpen) this.updateQualityMenu();
       }
     });
 
@@ -1734,7 +1865,7 @@ export class MoviElement extends HTMLElement {
           OSD.speed,
           `Speed ${speed}x`,
         );
-        if (speedMenu) speedMenu.style.display = "none";
+        this.setBottomMenuOpen(speedMenu, false);
       });
     });
 
@@ -1748,7 +1879,7 @@ export class MoviElement extends HTMLElement {
         !speedMenu.contains(target) &&
         !speedBtn.contains(target)
       ) {
-        speedMenu.style.display = "none";
+        this.setBottomMenuOpen(speedMenu, false);
       }
       if (
         qualityMenu &&
@@ -1756,7 +1887,7 @@ export class MoviElement extends HTMLElement {
         !qualityMenu.contains(target) &&
         !qualityBtn.contains(target)
       ) {
-        qualityMenu.style.display = "none";
+        this.setBottomMenuOpen(qualityMenu, false);
       }
     });
 
@@ -1887,6 +2018,16 @@ export class MoviElement extends HTMLElement {
         return; // Don't toggle if clicking on controls
       }
 
+      // If a bottom-controls menu is open, swallow this click to close
+      // it instead of toggling play/pause. The user wanted "click on
+      // player closes the panel, not play/pause" — a second click then
+      // toggles playback like normal.
+      if (this.isAnyMenuOpen()) {
+        this.closeAllBottomMenus();
+        e.stopPropagation();
+        return;
+      }
+
       // Mouse Triple Click logic removed to prevent accidental seeking
 
       // Delay single click to allow double click detection
@@ -1926,7 +2067,7 @@ export class MoviElement extends HTMLElement {
     // Fullscreen change listener
     document.addEventListener("fullscreenchange", () => {
       const isFullscreen = !!document.fullscreenElement;
-      this.updateFullscreenIcon(isFullscreen);
+      this.applyFullscreenUiState(isFullscreen);
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           this.updateCanvasSize();
@@ -1983,8 +2124,14 @@ export class MoviElement extends HTMLElement {
       }
 
       this.isOverControls = false;
-      // Only hide if not dragging
-      if (!this.isDragging) {
+      // Only hide if not dragging AND no menu is open. Without the menu
+      // check, switching from a tall customize panel to a shorter track
+      // list (via the panel's "Back" button) collapses the menu height
+      // — the mouse pointer that was on the Back button now sits above
+      // the new shorter list, fires mouseleave on the controls container,
+      // and the auto-hide animates the entire controls bar (including the
+      // open menu) to opacity 0.
+      if (!this.isDragging && !this.isAnyMenuOpen()) {
         this.hideControls();
       }
     });
@@ -2003,8 +2150,8 @@ export class MoviElement extends HTMLElement {
       if (relatedTarget && controlsContainer?.contains(relatedTarget)) {
         return;
       }
-      // Only hide if not over controls and not dragging
-      if (!this.isOverControls && !this.isDragging) {
+      // Only hide if not over controls and not dragging and no menu open
+      if (!this.isOverControls && !this.isDragging && !this.isAnyMenuOpen()) {
         this.hideControls();
       }
     });
@@ -2186,6 +2333,12 @@ export class MoviElement extends HTMLElement {
         if (tapTimer) clearTimeout(tapTimer);
         tapTimer = null;
 
+        // Tap on video area while a menu is open closes the menu first.
+        if (this.isAnyMenuOpen()) {
+          this.closeAllBottomMenus();
+          return;
+        }
+
         const controlsContainer = this.controlsContainer;
         const controlsHidden = controlsContainer?.classList.contains(
           "movi-controls-hidden",
@@ -2224,36 +2377,10 @@ export class MoviElement extends HTMLElement {
         // Check if fast seek is enabled
         if (this._fastSeek) {
           if (xPos < width * 0.3) {
-            // Rewind
-            this.cumulativeSeekAmount = (this.lastSeekSide === "left" && now - this.lastSeekTime < 1000)
-              ? this.cumulativeSeekAmount + 10 : 10;
-            this.lastSeekSide = "left";
-            this.lastSeekTime = now;
-            this.currentTime = Math.max(0, this.currentTime - 10);
-            this.showOSD(
-              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                <path d="M3 3v5h5" />
-                <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-              </svg>`,
-              `- ${this.cumulativeSeekAmount}s`,
-            );
+            this.performRelativeSeek("left");
             didSeek = true;
           } else if (xPos > width * 0.7) {
-            // Forward
-            this.cumulativeSeekAmount = (this.lastSeekSide === "right" && now - this.lastSeekTime < 1000)
-              ? this.cumulativeSeekAmount + 10 : 10;
-            this.lastSeekSide = "right";
-            this.lastSeekTime = now;
-            this.currentTime = Math.min(this.duration, this.currentTime + 10);
-            this.showOSD(
-              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                <path d="M21 3v5h-5" />
-                <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-              </svg>`,
-              `+ ${this.cumulativeSeekAmount}s`,
-            );
+            this.performRelativeSeek("right");
             didSeek = true;
           } else {
             this.toggleFullscreen();
@@ -2271,6 +2398,13 @@ export class MoviElement extends HTMLElement {
 
         tapTimer = window.setTimeout(() => {
           // Single tap action (show controls or toggle play)
+          // Tap closes any open bottom-controls menu first.
+          if (this.isAnyMenuOpen()) {
+            this.closeAllBottomMenus();
+            lastTap = 0;
+            return;
+          }
+
           const controlsContainer = this.controlsContainer;
           const controlsHidden = controlsContainer?.classList.contains(
             "movi-controls-hidden",
@@ -2514,6 +2648,20 @@ export class MoviElement extends HTMLElement {
       // Only handle if player exists (content loaded)
       if (!this.player) return;
 
+      // Don't fire shortcuts when the user is typing into a text field
+      // — the event's target gets retargeted to the host element when it
+      // bubbles out of shadow DOM, so check composedPath() to see the
+      // real focus target. Without this, typing "p" in the transcript
+      // search would pause playback, "f" would fullscreen, etc.
+      const path = e.composedPath();
+      for (const node of path) {
+        if (!(node instanceof HTMLElement)) continue;
+        const tag = node.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || node.isContentEditable) {
+          return;
+        }
+      }
+
       // Resume dialog keyboard navigation
       const resumeDialog = this.shadowRoot?.querySelector(".movi-resume-dialog") as HTMLElement;
       if (resumeDialog && resumeDialog.style.display !== "none") {
@@ -2602,54 +2750,21 @@ export class MoviElement extends HTMLElement {
           if (!this._fastSeek) break;
 
           e.preventDefault();
-          {
-            const side = "left";
-            if (e.ctrlKey || e.metaKey) {
-              // Frame backward - only work if paused (auto-pause if playing)
-              if (this.player?.getState() === "playing") {
-                this.pause();
-              }
-              const vTrack = this.player?.getVideoTracks()?.[0];
-              const fps = vTrack?.frameRate || 24;
-              const frameTime = 1 / fps;
-              this.currentTime = Math.max(0, this.currentTime - frameTime);
-              this.showOSD(
-                `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>`,
-                `-1 Frame`,
-              );
-            } else {
-              const currentTime = this.currentTime;
-              const newTime = Math.max(0, currentTime - 10);
-              // Can seek if currently more than 0.5s away from start
-              const canSeek = currentTime > 0.5;
-
-              // Always perform the seek
-              this.currentTime = newTime;
-
-              // Only increment counter and show OSD if not at boundary
-              if (canSeek) {
-                // Increase cumulative amount if pressing same direction quickly (or holding key)
-                if (
-                  this.lastSeekSide === side &&
-                  Date.now() - this.lastSeekTime < 1000
-                ) {
-                  this.cumulativeSeekAmount += 10;
-                } else {
-                  this.cumulativeSeekAmount = 10;
-                  this.lastSeekSide = side;
-                }
-                this.lastSeekTime = Date.now();
-
-                this.showOSD(
-                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                    <path d="M3 3v5h5" />
-                    <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-                  </svg>`,
-                  `- ${this.cumulativeSeekAmount}s`,
-                );
-              }
+          if (e.ctrlKey || e.metaKey) {
+            // Frame backward - only work if paused (auto-pause if playing)
+            if (this.player?.getState() === "playing") {
+              this.pause();
             }
+            const vTrack = this.player?.getVideoTracks()?.[0];
+            const fps = vTrack?.frameRate || 24;
+            const frameTime = 1 / fps;
+            this.currentTime = Math.max(0, this.currentTime - frameTime);
+            this.showOSD(
+              `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 17l-5-5 5-5M18 17l-5-5 5-5"/></svg>`,
+              `-1 Frame`,
+            );
+          } else {
+            this.performRelativeSeek("left");
           }
           break;
         case "ArrowRight":
@@ -2659,7 +2774,6 @@ export class MoviElement extends HTMLElement {
 
           e.preventDefault();
           {
-            const side = "right";
             if (e.ctrlKey || e.metaKey) {
               // Frame forward - only work if paused (auto-pause if playing)
               if (this.player?.getState() === "playing") {
@@ -2677,52 +2791,21 @@ export class MoviElement extends HTMLElement {
                 `+1 Frame`,
               );
             } else {
-              const currentTime = this.currentTime;
-              const newTime = Math.min(this.duration, currentTime + 10);
-              // Can seek if currently more than 0.5s away from end
-              const canSeek = currentTime < this.duration - 0.5;
-
-              // Always perform the seek
-              this.currentTime = newTime;
-
-              // Only increment counter and show OSD if not at boundary
-              if (canSeek) {
-                if (
-                  this.lastSeekSide === side &&
-                  Date.now() - this.lastSeekTime < 1000
-                ) {
-                  this.cumulativeSeekAmount += 10;
-                } else {
-                  this.cumulativeSeekAmount = 10;
-                  this.lastSeekSide = side;
-                }
-                this.lastSeekTime = Date.now();
-
-                this.showOSD(
-                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-                    <path d="M21 3v5h-5" />
-                    <text x="50%" y="54%" font-size="7" font-family="sans-serif" font-weight="bold" fill="currentColor" text-anchor="middle" dominant-baseline="middle" stroke="none">10</text>
-                  </svg>`,
-                  `+ ${this.cumulativeSeekAmount}s`,
-                );
-              }
+              this.performRelativeSeek("right");
             }
           }
           break;
         case "ArrowUp":
           // Up Arrow: Increase volume
           e.preventDefault();
-          // Only change volume if audio tracks exist
-          if (this.player && this.player.getAudioTracks().length > 0) {
+          if (this.player && this.player.hasAudibleSource()) {
             this.volume = Math.min(1, this.volume + 0.1);
           }
           break;
         case "ArrowDown":
           // Down Arrow: Decrease volume
           e.preventDefault();
-          // Only change volume if audio tracks exist
-          if (this.player && this.player.getAudioTracks().length > 0) {
+          if (this.player && this.player.hasAudibleSource()) {
             this.volume = Math.max(0, this.volume - 0.1);
           }
           break;
@@ -2869,6 +2952,28 @@ export class MoviElement extends HTMLElement {
             }
           }
           break;
+        case "z":
+        case "Z":
+        case "x":
+        case "X": {
+          // Z / X: Subtitle delay — shift subs earlier (Z) or later (X) by
+          // 100ms per press. mpv convention: positive value = subs later.
+          // File-source only — streamed sources don't expose the timing
+          // controls this nudge depends on.
+          e.preventDefault();
+          if (this.player && this.player.isFileSource()) {
+            const step = 0.1;
+            const direction = e.key === "z" || e.key === "Z" ? -1 : 1;
+            // Round to 3 decimals to keep the displayed value stable across
+            // many presses despite floating-point accumulation.
+            const next = Math.round((this._subtitleDelay + direction * step) * 1000) / 1000;
+            this.subtitleDelay = next;
+            const formatted =
+              next === 0 ? "0s" : `${next > 0 ? "+" : ""}${next.toFixed(2)}s`;
+            this.showOSD(OSD.subOn, `Subtitle Delay: ${formatted}`);
+          }
+          break;
+        }
         case "b":
         case "B":
           // B: Cycle audio track — muxed + external combined
@@ -3012,9 +3117,11 @@ export class MoviElement extends HTMLElement {
       this.setAttribute("tabindex", "0");
     }
 
-    // Auto-focus on mouse enter so keyboard shortcuts work without clicking
+    // Auto-focus on mouse enter so keyboard shortcuts work without clicking.
+    // preventScroll: focus() would otherwise scroll the player into view,
+    // which yanks the page mid-hover when the player is partly off-screen.
     this.addEventListener("mouseenter", () => {
-      this.focus();
+      this.focus({ preventScroll: true });
     });
   }
 
@@ -4006,13 +4113,30 @@ export class MoviElement extends HTMLElement {
     if (this.isLoading || this._isUnsupported || !this.player) {
       return;
     }
+
+    // Give the host a chance to take over (e.g. VS Code webviews where
+    // requestFullscreen is blocked, or embedded apps that drive their own
+    // fullscreen layout). Hosts call event.preventDefault() and then drive
+    // setHostFullscreen() themselves to keep the UI in sync.
+    const currentlyActive = !!document.fullscreenElement || this._hostFullscreen;
+    const requestEvent = new CustomEvent("movi-fullscreen-request", {
+      cancelable: true,
+      bubbles: true,
+      composed: true,
+      detail: { active: currentlyActive },
+    });
+    this.dispatchEvent(requestEvent);
+    if (requestEvent.defaultPrevented) {
+      return;
+    }
+
     try {
       if (!document.fullscreenElement) {
         await this.requestFullscreen();
-        this.updateFullscreenIcon(true);
+        this.applyFullscreenUiState(true);
       } else {
         await document.exitFullscreen();
-        this.updateFullscreenIcon(false);
+        this.applyFullscreenUiState(false);
       }
     } catch (error) {
       Logger.error(TAG, "Failed to toggle fullscreen", error);
@@ -4046,6 +4170,16 @@ export class MoviElement extends HTMLElement {
     }
 
     Logger.info(TAG, `restorePiPCanvas: canvas isConnected=${canvas.isConnected}`);
+
+    // Invalidate the cached host dimensions so updateCanvasSize() actually
+    // re-runs the resize. While in PiP, resizeInPiP() set canvas.width to
+    // the small PiP window size (e.g. 400x225) directly, bypassing
+    // updateCanvasSize — so _lastCanvasW still matches the host's bounding
+    // rect from before we entered PiP. Without this reset, the coalescing
+    // guard at the top of updateCanvasSize early-returns and the buffer
+    // stays at PiP resolution → pixelated render at full size.
+    this._lastCanvasW = 0;
+    this._lastCanvasH = 0;
 
     // Restore original size
     requestAnimationFrame(() => {
@@ -4328,6 +4462,11 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  /** Tracks host-driven fullscreen so toggleFullscreen() and the
+   *  movi-fullscreen-request event can reflect it correctly even when
+   *  document.fullscreenElement is null. */
+  private _hostFullscreen = false;
+
   private updateFullscreenIcon(isFullscreen: boolean): void {
     const fullscreenIcon = this.shadowRoot?.querySelector(
       ".movi-icon-fullscreen",
@@ -4343,6 +4482,29 @@ export class MoviElement extends HTMLElement {
       fullscreenIcon?.style.setProperty("display", "block");
       fullscreenExitIcon?.style.setProperty("display", "none");
     }
+  }
+
+  private updateFullscreenContextMenu(isFullscreen: boolean): void {
+    const label = this.shadowRoot?.querySelector(
+      '.movi-context-menu-item[data-action="fullscreen"] .movi-context-menu-label',
+    ) as HTMLElement | null;
+    if (label) label.textContent = isFullscreen ? "Exit Fullscreen" : "Fullscreen";
+  }
+
+  private applyFullscreenUiState(isFullscreen: boolean): void {
+    this.updateFullscreenIcon(isFullscreen);
+    this.updateFullscreenContextMenu(isFullscreen);
+  }
+
+  /**
+   * Public hook for hosts (VS Code extension, embedded apps) that take over
+   * fullscreen via the cancelable `movi-fullscreen-request` event. Call this
+   * whenever the host enters/exits its custom fullscreen so the player's
+   * toolbar icon and right-click context menu reflect the correct state.
+   */
+  public setHostFullscreen(active: boolean): void {
+    this._hostFullscreen = active;
+    this.applyFullscreenUiState(active);
   }
 
   private static readonly ASPECT_ICONS: Record<string, string> = {
@@ -4368,6 +4530,13 @@ export class MoviElement extends HTMLElement {
 
   private formatAudioBadge(track: AudioTrack): string {
     const codec = (track.codec || "").toUpperCase();
+    const lang = track.language
+      ? track.language.length >= 2
+        ? track.language.substring(0, 3).toUpperCase()
+        : track.language.toUpperCase()
+      : "";
+
+    let main = "";
     if (track.channels) {
       const layout =
         track.channels === 1
@@ -4379,15 +4548,13 @@ export class MoviElement extends HTMLElement {
               : track.channels === 8
                 ? "7.1"
                 : `${track.channels}ch`;
-      return codec ? `${codec} ${layout}` : layout;
+      main = codec ? `${codec} ${layout}` : layout;
+    } else {
+      main = codec;
     }
-    if (track.language) {
-      const lang = track.language.length >= 2
-        ? track.language.substring(0, 3).toUpperCase()
-        : track.language.toUpperCase();
-      return codec ? `${codec} • ${lang}` : lang;
-    }
-    return codec;
+
+    if (lang && main) return `${lang} • ${main}`;
+    return main || lang;
   }
 
   private formatSubtitleBadge(track: SubtitleTrack): string {
@@ -4424,9 +4591,9 @@ export class MoviElement extends HTMLElement {
     const isNativeActive = this.player.isNativeAudioActive();
     const totalTracks = audioTracks.length + nativeLangs.length;
 
-    // Volume is always visible when any audio exists (muxed, multi-lang native,
-    // or single split-source native <audio>).
-    const hasAudio = totalTracks > 0 || this.player.hasNativeAudio();
+    // Volume is always visible when any audio exists (muxed, multi-lang
+    // native, single split-source <audio>, or HLS stream).
+    const hasAudio = this.player.hasAudibleSource();
     const volumeContainer = this.shadowRoot?.querySelector(
       ".movi-volume-container",
     ) as HTMLElement;
@@ -4557,6 +4724,17 @@ export class MoviElement extends HTMLElement {
     const isHLS =
       typeof this._src === "string" &&
       (this._src.includes(".m3u8") || this._src.toLowerCase().endsWith("m3u8"));
+
+    // Pre-muxed multi-quality path: build a virtual track list from the
+    // declarative <source> tags so the picker works without HLS.
+    if (!isHLS && this._videoQualities.length > 1) {
+      this.renderPremuxedQualityMenu(
+        qualityList,
+        qualityContainer,
+      );
+      return;
+    }
+
     if (!isHLS) {
       qualityContainer.style.display = "none";
       return;
@@ -4582,8 +4760,14 @@ export class MoviElement extends HTMLElement {
       return;
     }
 
+    // Filter out invalid tracks (e.g. audio-only HLS levels surface as 0×0
+    // entries which render as "0p" — useless to expose to the user)
+    const validTracks = tracks.filter(
+      (t) => t.id === -1 || (t.height && t.height > 0),
+    );
+
     // Sort tracks: Auto (-1) first, then by resolution descending, then by bitrate descending
-    const sortedTracks = [...tracks].sort((a, b) => {
+    const sortedTracks = [...validTracks].sort((a, b) => {
       if (a.id === -1) return -1;
       if (b.id === -1) return 1;
       const heightDiff = (b.height || 0) - (a.height || 0);
@@ -4631,15 +4815,40 @@ export class MoviElement extends HTMLElement {
       this.player as any
     ).trackManager?.getActiveVideoTrack();
 
+    // For HLS Auto mode, the active track id is -1 with height 0; surface the
+    // currently-playing level's badge instead so the gear stays informative.
+    // MoviPlayer exposes the wrapper as `hlsWrapper`; the previous `.hls`
+    // path silently resolved to undefined, leaving the badge blank in Auto.
+    let activeHeight = activeTrack?.height || 0;
+    if (!activeHeight && activeTrack?.id === -1) {
+      try {
+        const hls = (this.player as any).hlsWrapper?.hls
+        const hlsLevel = hls?.levels?.[hls?.currentLevel];
+        activeHeight = hlsLevel?.height || 0;
+      } catch {}
+    }
+    this._updateQualityBtnBadge(this._heightBadge(activeHeight));
+
     qualityList.innerHTML = uniqueTracks
       .map((track) => {
         const isActive = activeTrack?.id === track.id;
         const label =
           track.label || (track.height ? `${track.height}p` : "Auto");
+        const h = track.height || 0;
+        let badge = "";
+        if (h >= 4320) badge = "8K";
+        else if (h >= 2160) badge = "4K";
+        else if (h >= 1080) badge = "HD";
+        const badgeHtml = badge
+          ? `<span class="movi-quality-badge movi-quality-badge-${badge.toLowerCase()}">${badge}</span>`
+          : "";
 
         return `
          <div class="movi-quality-item ${isActive ? "movi-quality-active" : ""}" data-track-id="${track.id}">
-            <span class="movi-quality-label">${label}</span>
+            <span class="movi-quality-label-wrap">
+              <span class="movi-quality-label">${label}</span>
+              ${badgeHtml}
+            </span>
             ${
               isActive
                 ? `
@@ -4674,6 +4883,250 @@ export class MoviElement extends HTMLElement {
         }
       });
     });
+  }
+
+  /**
+   * Map a video height to its YouTube-style quality badge (HD/4K/8K) or
+   * empty string when the resolution doesn't qualify.
+   */
+  private _heightBadge(height: number): string {
+    if (height >= 4320) return "8K";
+    if (height >= 2160) return "4K";
+    if (height >= 1080) return "HD";
+    return "";
+  }
+
+  /**
+   * Paint or hide the small badge pill on the gear button itself so the
+   * user can see the active quality tier at a glance — same convention
+   * as YouTube's player.
+   */
+  private _updateQualityBtnBadge(badge: string): void {
+    const el = this.shadowRoot?.querySelector(
+      ".movi-quality-btn-badge",
+    ) as HTMLElement | null;
+    if (!el) return;
+    if (badge) {
+      el.textContent = badge;
+      el.className = `movi-quality-btn-badge movi-quality-badge-${badge.toLowerCase()}`;
+      el.style.display = "inline-flex";
+    } else {
+      el.textContent = "";
+      el.style.display = "none";
+    }
+  }
+
+  /**
+   * Render a quality menu for pre-muxed multi-source MP4s (no HLS manifest).
+   * Driven by the cached `_videoQualities` list; switching just swaps the
+   * active <source> URL and lets the existing src-change pipeline reload
+   * the player while preserving currentTime / paused state.
+   */
+  private renderPremuxedQualityMenu(
+    qualityList: HTMLElement,
+    qualityContainer: HTMLElement,
+  ): void {
+    qualityContainer.style.display = "flex";
+
+    const activeSrc = typeof this._src === "string" ? this._src : "";
+    const activeQuality = this._videoQualities.find((q) => q.src === activeSrc);
+    this._updateQualityBtnBadge(activeQuality?.badge || this._heightBadge(activeQuality?.height || 0));
+
+    qualityList.innerHTML = this._videoQualities
+      .map((q) => {
+        const isActive = q.src === activeSrc;
+        // Label may already include the fps suffix (e.g. "1080p60"). Only
+        // append fps if it isn't already present in the label.
+        const fpsSuffix =
+          q.fps && q.fps > 30 && !new RegExp(`${q.fps}$`).test(q.label)
+            ? q.fps
+            : "";
+        const label = `${q.label}${fpsSuffix}`;
+        const badgeHtml = q.badge
+          ? `<span class="movi-quality-badge movi-quality-badge-${q.badge.toLowerCase()}">${q.badge}</span>`
+          : "";
+        return `
+          <div class="movi-quality-item ${isActive ? "movi-quality-active" : ""}" data-src="${q.src.replace(/"/g, "&quot;")}">
+            <span class="movi-quality-label-wrap">
+              <span class="movi-quality-label">${label}</span>
+              ${badgeHtml}
+            </span>
+            ${
+              isActive
+                ? `<svg class="movi-quality-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                  </svg>`
+                : ""
+            }
+          </div>
+        `;
+      })
+      .join("");
+
+    qualityList.querySelectorAll(".movi-quality-item").forEach((item) => {
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const newSrc = (item as HTMLElement).dataset.src;
+        if (!newSrc || newSrc === activeSrc) return;
+        this.switchPremuxedQuality(newSrc);
+
+        const menu = this.shadowRoot?.querySelector(
+          ".movi-quality-menu",
+        ) as HTMLElement;
+        if (menu) menu.style.display = "none";
+      });
+    });
+  }
+
+  // Audio element preserved across a quality switch. Re-adopted by the new
+  // MoviPlayer instance so its already-activated play() context survives —
+  // creating a fresh <audio> from scratch would be blocked by autoplay
+  // policy because the user-gesture token doesn't propagate across the
+  // async destroy → init pipeline.
+  private _carryAudioEl: HTMLAudioElement | null = null;
+
+  // True between the start of a quality switch and the moment the new
+  // player resumes playback. Suppresses the poster overlay so the user
+  // sees a frozen last-frame instead of the static thumbnail flashing in.
+  private _qualitySwitchInProgress: boolean = false;
+  // Pre-switch playback position. Used as a fallback while the new player
+  // is initialising so the time-display doesn't flash 00:00.
+  private _switchResumeTime: number = 0;
+  // Pre-switch total duration. Cached for the same reason — duration is
+  // identical across quality variants, but the new player's mediaInfo
+  // isn't populated until the demuxer opens.
+  private _switchResumeDuration: number = 0;
+
+  /**
+   * Swap the active video source and resume playback at the same position.
+   * The src setter pipeline tears down the player; we re-seek once metadata
+   * is available on the new instance.
+   */
+  private switchPremuxedQuality(newSrc: string): void {
+    const wasPaused = this.player ? (this.player as any).getState?.() === "paused" : true;
+    let resumeTime = 0;
+    try {
+      resumeTime = this.player ? (this.player as any).getCurrentTime?.() || 0 : 0;
+    } catch {}
+
+    const target = this._videoQualities.find((q) => q.src === newSrc);
+
+    // Detach the currently-playing native audio element so it survives the
+    // teardown unmolested, then re-adopt it on the next player instance.
+    try {
+      this._carryAudioEl =
+        (this.player as any)?.releaseNativeAudio?.() || null;
+    } catch {
+      this._carryAudioEl = null;
+    }
+
+    // Mark in-flight so the src attribute change doesn't re-paint the poster
+    // overlay (which would flash the thumbnail in over the last video frame).
+    this._qualitySwitchInProgress = true;
+    this._switchResumeTime = resumeTime;
+    try {
+      this._switchResumeDuration = this.player ? (this.player as any).getDuration?.() || 0 : 0;
+    } catch {
+      this._switchResumeDuration = 0;
+    }
+
+    // Snapshot the current canvas frame and pin it as the poster overlay so
+    // the user sees a frozen last-frame instead of black during the swap.
+    // The WebGL context gets recreated on player teardown which wipes the
+    // canvas; the snapshot bridges that gap until the new instance starts
+    // pushing frames again.
+    try {
+      const snapshot = this.canvas?.toDataURL?.("image/jpeg", 0.85);
+      if (snapshot && snapshot.length > 32) {
+        this._lastFrameSnapshot = snapshot;
+        this._showSnapshotPoster();
+      }
+    } catch {
+      // tainted canvas — fall back to plain blank during switch
+    }
+
+    // Safety net: if the new player never reaches "playing" (e.g. autoplay
+    // blocked AND user never resumes), make sure we don't leave the poster
+    // permanently suppressed.
+    setTimeout(() => {
+      if (this._qualitySwitchInProgress) {
+        this._qualitySwitchInProgress = false;
+        this._switchResumeTime = 0;
+        this._switchResumeDuration = 0;
+        this._hideSnapshotPoster();
+        this.updatePoster();
+      }
+    }, 8000);
+
+    // Setting the attribute funnels through the existing observedAttributes
+    // path which destroys the player and reinitialises with the new src.
+    this._suppressSwReload = true;
+    this.setAttribute("src", newSrc);
+
+    let restored = false;
+    const restore = () => {
+      if (restored) return;
+      restored = true;
+      try {
+        if (resumeTime > 0 && this.player) {
+          (this.player as any).seek?.(resumeTime);
+        }
+        if (wasPaused) {
+          (this.player as any)?.pause?.();
+        } else {
+          // Explicit play() from within the user-gesture event chain.
+          // The default autoplay path attempts play() too, but its async
+          // distance from the gear-click can exceed the browser's user
+          // activation window — causing the freshly-created native <audio>
+          // element to be blocked. Calling play() here keeps the activation
+          // alive long enough for the audio element to start.
+          Promise.resolve().then(() => {
+            (this.player as any)?.play?.().catch(() => {});
+          });
+        }
+      } catch {}
+      this.removeEventListener("loadeddata", restore);
+      this.removeEventListener("canplay", restore);
+      this.removeEventListener("durationchange", restore);
+    };
+    // Different player wrappers fire different events first — listen to the
+    // earliest signals that the new instance is ready to seek.
+    this.addEventListener("loadeddata", restore);
+    this.addEventListener("canplay", restore);
+    this.addEventListener("durationchange", restore);
+    // Hard-fallback in case none of the events bubble up to the host element
+    // (e.g. when the wrapper proxies events differently): poll for readiness.
+    if (resumeTime > 0) {
+      const start = Date.now();
+      const poll = () => {
+        if (restored) return;
+        try {
+          const dur = (this.player as any)?.getDuration?.() || 0;
+          if (dur > 0) {
+            restore();
+            return;
+          }
+        } catch {}
+        if (Date.now() - start < 5000) {
+          requestAnimationFrame(poll);
+        }
+      };
+      requestAnimationFrame(poll);
+    }
+
+    this.dispatchEvent(
+      new CustomEvent("qualitychange", {
+        detail: {
+          src: newSrc,
+          height: target?.height || 0,
+          label: target?.label || "",
+          fps: target?.fps || null,
+        },
+      }),
+    );
+
+    // Re-render the menu shortly after so the active checkmark moves
+    setTimeout(() => this.updateQualityMenu(), 0);
   }
 
   /*
@@ -4718,6 +5171,7 @@ export class MoviElement extends HTMLElement {
       // Reset seek counter once OSD is hidden
       this.cumulativeSeekAmount = 0;
       this.lastSeekSide = null;
+      this._seekChainTarget = null;
 
       setTimeout(() => {
         if (!osdContainer.classList.contains("visible")) {
@@ -4725,6 +5179,965 @@ export class MoviElement extends HTMLElement {
         }
       }, 300); // Wait for fade out
     }, 2000);
+  }
+
+  // ── Subtitle appearance customization ──────────────────────────────
+  // YouTube-style settings panel. Settings are persisted under
+  // localStorage["movi.subtitleSettings"] and pushed onto the host
+  // element as CSS variables (--movi-sub-size-mult, --movi-sub-color,
+  // --movi-sub-bg-alpha, --movi-sub-edge) which the subtitle styles
+  // in the shadow DOM consume.
+
+  private static readonly SUBTITLE_SETTINGS_STORAGE_KEY = "movi.subtitleSettings";
+
+  /**
+   * Returns the kind of subtitle currently active so the customize
+   * panel can show only the options that apply.
+   *
+   *   - "vtt"   → WebVTT (karaoke-paced from YouTube proxy etc): all
+   *               text styling options apply, INCLUDING the backdrop.
+   *   - "text"  → SRT/ASS/SSA/TTML or muxed text subs: size/color/edge
+   *               and shift apply; backdrop doesn't (it's gated to VTT
+   *               in CSS).
+   *   - "image" → PGS/DVD/DVB or other muxed image subs: only the
+   *               subtitle-shift control applies; styling is baked
+   *               into the bitmap.
+   *   - null    → no subtitle selected → no customize gear shown.
+   */
+  private getActiveSubtitleKind(): "vtt" | "text" | "image" | null {
+    if (!this.player) return null;
+    // External (declared via <track> children) — has a `format` hint.
+    const ext = this.player.getSubtitleLangs().find((t) => t.active);
+    if (ext) {
+      const meta = this._subtitleTracks.find((t) => t.lang === ext.lang);
+      const fmt = (meta?.format || "").toLowerCase();
+      return fmt === "vtt" ? "vtt" : "text";
+    }
+    // Muxed — SubtitleTrack carries `subtitleType` ("text" | "image").
+    const mux = this.player.trackManager.getActiveSubtitleTrack();
+    if (mux) {
+      return mux.subtitleType === "image" ? "image" : "text";
+    }
+    return null;
+  }
+
+  private static readonly SUBTITLE_EDGE_STYLES: Record<
+    "none" | "shadow" | "outline" | "raised",
+    string
+  > = {
+    none: "none",
+    shadow: "0 0 4px rgba(0, 0, 0, 0.85)",
+    outline:
+      "-1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 2px rgba(0,0,0,0.9)",
+    raised:
+      "1px 1px 0 rgba(255,255,255,0.35), 2px 2px 4px rgba(0,0,0,0.85)",
+  };
+
+  private static readonly SUBTITLE_COLOR_PALETTE: {
+    label: string;
+    value: string;
+  }[] = [
+    { label: "White", value: "#FFFFFF" },
+    { label: "Yellow", value: "#FFEB3B" },
+    { label: "Green", value: "#69F0AE" },
+    { label: "Cyan", value: "#80DEEA" },
+    { label: "Blue", value: "#82B1FF" },
+    { label: "Magenta", value: "#FF80AB" },
+    { label: "Red", value: "#FF5252" },
+    { label: "Black", value: "#000000" },
+  ];
+
+  private loadSubtitleSettings(): void {
+    try {
+      const raw = localStorage.getItem(
+        MoviElement.SUBTITLE_SETTINGS_STORAGE_KEY,
+      );
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        if (typeof parsed.sizeMult === "number" && parsed.sizeMult > 0) {
+          this._subtitleSettings.sizeMult = parsed.sizeMult;
+        }
+        if (typeof parsed.color === "string") {
+          this._subtitleSettings.color = parsed.color;
+        }
+        if (typeof parsed.bgAlpha === "number") {
+          this._subtitleSettings.bgAlpha = Math.min(
+            1,
+            Math.max(0, parsed.bgAlpha),
+          );
+        }
+        if (
+          parsed.edge === "none" ||
+          parsed.edge === "shadow" ||
+          parsed.edge === "outline" ||
+          parsed.edge === "raised"
+        ) {
+          this._subtitleSettings.edge = parsed.edge;
+        }
+      }
+    } catch {
+      /* ignore — fall back to defaults */
+    }
+  }
+
+  private saveSubtitleSettings(): void {
+    try {
+      localStorage.setItem(
+        MoviElement.SUBTITLE_SETTINGS_STORAGE_KEY,
+        JSON.stringify(this._subtitleSettings),
+      );
+    } catch {
+      /* localStorage may be disabled — apply still works */
+    }
+  }
+
+  private applySubtitleSettings(): void {
+    const s = this._subtitleSettings;
+    this.style.setProperty("--movi-sub-size-mult", String(s.sizeMult));
+    this.style.setProperty("--movi-sub-color", s.color);
+    this.style.setProperty("--movi-sub-bg-alpha", String(s.bgAlpha));
+    this.style.setProperty(
+      "--movi-sub-bg-rgb",
+      MoviElement.contrastBackdropRgb(s.color),
+    );
+    this.style.setProperty(
+      "--movi-sub-edge",
+      MoviElement.SUBTITLE_EDGE_STYLES[s.edge],
+    );
+  }
+
+  /**
+   * Apply one of the public subtitle-customize attributes onto
+   * _subtitleSettings. Returns true if the attribute name matched
+   * (caller can decide whether to call applySubtitleSettings()).
+   *
+   *   subtitlesize="150"      (50–200, treated as %; also accepts 1.5)
+   *   subtitlecolor="#FFEB3B" (any CSS color hex, 3 or 6 digits)
+   *   subtitlebg="50"         (0–100, treated as %; also accepts 0.5)
+   *   subtitleedge="outline"  (none | shadow | outline | raised)
+   */
+  private applySubtitleAttribute(name: string, raw: string | null): boolean {
+    const s = this._subtitleSettings;
+    switch (name) {
+      case "subtitlesize": {
+        if (raw === null) return true; // attribute removed → keep current
+        const parsed = parseFloat(raw);
+        if (!Number.isFinite(parsed) || parsed <= 0) return true;
+        // > 5 → percentage (e.g. 150). Else treat as multiplier (1.5).
+        s.sizeMult = parsed > 5 ? parsed / 100 : parsed;
+        return true;
+      }
+      case "subtitlecolor": {
+        if (raw === null) return true;
+        const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(raw.trim());
+        if (m) s.color = raw.trim();
+        return true;
+      }
+      case "subtitlebg": {
+        if (raw === null) return true;
+        const parsed = parseFloat(raw);
+        if (!Number.isFinite(parsed)) return true;
+        // > 1 → percentage (e.g. 75). Else treat as 0–1 alpha.
+        s.bgAlpha = Math.max(0, Math.min(1, parsed > 1 ? parsed / 100 : parsed));
+        return true;
+      }
+      case "subtitleedge": {
+        if (raw === null) return true;
+        const v = raw.trim().toLowerCase();
+        if (v === "none" || v === "shadow" || v === "outline" || v === "raised") {
+          s.edge = v;
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Pick a backdrop RGB that contrasts with the text color so the cue
+   * stays readable regardless of the user's color choice. Dark text on
+   * dark backdrop (or vice versa) would render the subtitle invisible.
+   */
+  private static contrastBackdropRgb(color: string): string {
+    const m = /^#([0-9a-f]{3,8})$/i.exec(color.trim());
+    if (!m) return "8, 8, 8";
+    let h = m[1];
+    if (h.length === 3)
+      h = h
+        .split("")
+        .map((c) => c + c)
+        .join("");
+    if (h.length !== 6) return "8, 8, 8";
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    // Perceived (Rec. 601) luminance — 0..1
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    // Dark text → light backdrop; otherwise dark backdrop.
+    return lum < 0.5 ? "245, 245, 245" : "8, 8, 8";
+  }
+
+  private renderSubtitleCustomizePanel(): string {
+    const s = this._subtitleSettings;
+    const kind = this.getActiveSubtitleKind();
+    const showText = kind === "vtt" || kind === "text"; // color/edge
+    // Font size applies to image subs too — the renderer multiplies the
+    // bitmap's uniformScale by --movi-sub-size-mult, so PGS/VOBSUB respect
+    // the same slider that resizes text/vtt cues.
+    const showSize = kind !== null;
+    const showBackdrop = kind === "vtt"; // backdrop only paints for VTT
+    // Subtitle delay only makes sense on file sources — streamed sources
+    // don't expose the timing surface this control nudges.
+    const showShift = kind !== null && !!this.player?.isFileSource();
+    const currentDelay = this.player ? this.player.getSubtitleDelay() : 0;
+
+    const edges: {
+      label: string;
+      value: "none" | "shadow" | "outline" | "raised";
+    }[] = [
+      { label: "None", value: "none" },
+      { label: "Shadow", value: "shadow" },
+      { label: "Outline", value: "outline" },
+      { label: "Raised", value: "raised" },
+    ];
+
+    // Live preview shows actual settings so the user sees every change
+    // immediately. Uses the SAME CSS classes the real subtitles use,
+    // so it matches the in-video output 1:1. The backdrop is only
+    // painted for VTT — SRT and other text formats render plain in
+    // the video too, so the preview must mirror that.
+    const previewBgRgb = MoviElement.contrastBackdropRgb(s.color);
+    const previewBlockBg =
+      showBackdrop && s.bgAlpha > 0
+        ? `background: rgba(${previewBgRgb}, ${s.bgAlpha});`
+        : "background: transparent;";
+    const previewLineStyle =
+      `color: ${s.color};` +
+      `font-size: calc(18px * ${s.sizeMult});` +
+      `text-shadow: ${MoviElement.SUBTITLE_EDGE_STYLES[s.edge]};`;
+
+    const colorSwatches = MoviElement.SUBTITLE_COLOR_PALETTE.map(
+      (c) => `
+      <button type="button"
+              class="movi-sub-cust-swatch${c.value === s.color ? " is-active" : ""}"
+              data-group="color"
+              data-value="${c.value}"
+              aria-label="${c.label}"
+              title="${c.label}"
+              style="--swatch:${c.value}"></button>
+    `,
+    ).join("");
+
+    const edgeTiles = edges
+      .map(
+        (e) => `
+      <button type="button"
+              class="movi-sub-cust-edge-tile${e.value === s.edge ? " is-active" : ""}"
+              data-group="edge"
+              data-value="${e.value}">
+        <span class="movi-sub-cust-edge-sample"
+              style="text-shadow: ${MoviElement.SUBTITLE_EDGE_STYLES[e.value]};">Aa</span>
+        <span class="movi-sub-cust-edge-name">${e.label}</span>
+      </button>
+    `,
+      )
+      .join("");
+
+    const sizePct = Math.round(s.sizeMult * 100);
+    const bgPct = Math.round(s.bgAlpha * 100);
+
+    const fontSizeSection = showSize
+      ? `
+      <div class="movi-sub-cust-section">
+        <div class="movi-sub-cust-section-head">
+          <span class="movi-sub-cust-section-title">Font size</span>
+          <span class="movi-sub-cust-section-value" data-readout="size">${sizePct}%</span>
+        </div>
+        <input type="range"
+               class="movi-sub-cust-range"
+               data-group="size"
+               min="50" max="200" step="25"
+               value="${sizePct}"
+               aria-label="Font size">
+      </div>`
+      : "";
+
+    const textColorSection = showText
+      ? `
+      <div class="movi-sub-cust-section">
+        <div class="movi-sub-cust-section-head">
+          <span class="movi-sub-cust-section-title">Text color</span>
+        </div>
+        <div class="movi-sub-cust-swatch-grid">
+          ${colorSwatches}
+        </div>
+      </div>`
+      : "";
+
+    const backgroundSection = showBackdrop
+      ? `
+      <div class="movi-sub-cust-section">
+        <div class="movi-sub-cust-section-head">
+          <span class="movi-sub-cust-section-title">Background</span>
+          <span class="movi-sub-cust-section-value" data-readout="bg">${bgPct}%</span>
+        </div>
+        <input type="range"
+               class="movi-sub-cust-range"
+               data-group="bg"
+               min="0" max="100" step="25"
+               value="${bgPct}"
+               aria-label="Background opacity">
+      </div>`
+      : "";
+
+    const edgeStyleSection = showText
+      ? `
+      <div class="movi-sub-cust-section">
+        <div class="movi-sub-cust-section-head">
+          <span class="movi-sub-cust-section-title">Edge style</span>
+        </div>
+        <div class="movi-sub-cust-edge-grid">
+          ${edgeTiles}
+        </div>
+      </div>`
+      : "";
+
+    // Shift the cue timing forwards / backwards. VLC/mpv convention:
+    // positive = subs appear LATER, negative = earlier. The number
+    // field on the right accepts arbitrary entries (e.g. -1.7) for
+    // sources where the preset ±0.1/±1 nudges aren't fine enough.
+    const shiftSection = showShift
+      ? `
+      <div class="movi-sub-cust-section">
+        <div class="movi-sub-cust-section-head">
+          <span class="movi-sub-cust-section-title">Subtitle delay</span>
+          <div class="movi-sub-cust-shift-input-wrap">
+            <input type="number"
+                   class="movi-sub-cust-shift-input"
+                   data-readout="shift"
+                   step="0.1" min="-300" max="300"
+                   value="${currentDelay.toFixed(1)}"
+                   aria-label="Subtitle delay in seconds">
+            <span class="movi-sub-cust-shift-input-suffix">s</span>
+          </div>
+        </div>
+        <div class="movi-sub-cust-shift-controls">
+          <button type="button" class="movi-sub-cust-shift-btn" data-shift="-1" aria-label="Shift earlier by 1 s">−1s</button>
+          <button type="button" class="movi-sub-cust-shift-btn" data-shift="-0.1" aria-label="Shift earlier by 0.1 s">−0.1s</button>
+          <button type="button" class="movi-sub-cust-shift-btn movi-sub-cust-shift-zero" data-shift="zero" aria-label="Reset shift">0</button>
+          <button type="button" class="movi-sub-cust-shift-btn" data-shift="0.1" aria-label="Shift later by 0.1 s">+0.1s</button>
+          <button type="button" class="movi-sub-cust-shift-btn" data-shift="1" aria-label="Shift later by 1 s">+1s</button>
+        </div>
+      </div>`
+      : "";
+
+    // Empty-state: nothing to customize when no subtitle is active.
+    if (kind === null) {
+      return `
+        <div class="movi-sub-cust-panel">
+          <button type="button" class="movi-sub-cust-back" data-action="back" aria-label="Back to subtitles">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+              <path d="M15 18l-6-6 6-6"/>
+            </svg>
+            <span>Back</span>
+          </button>
+          <div class="movi-sub-cust-empty">Select a subtitle track to customize.</div>
+        </div>
+      `;
+    }
+
+    return `
+      <div class="movi-sub-cust-panel">
+        <button type="button" class="movi-sub-cust-back" data-action="back" aria-label="Back to subtitles">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="14" height="14">
+            <path d="M15 18l-6-6 6-6"/>
+          </svg>
+          <span>Back</span>
+        </button>
+
+        ${
+          showText
+            ? `
+        <div class="movi-sub-cust-preview">
+          <div class="movi-sub-cust-preview-stage">
+            <div class="movi-sub-cust-preview-block" style="${previewBlockBg}">
+              <div class="movi-sub-cust-preview-line" style="${previewLineStyle}">Sample subtitles</div>
+            </div>
+          </div>
+        </div>`
+            : ""
+        }
+
+        ${fontSizeSection}
+        ${textColorSection}
+        ${backgroundSection}
+        ${edgeStyleSection}
+        ${shiftSection}
+
+        <div class="movi-sub-cust-footer">
+          <button type="button" class="movi-sub-cust-reset" data-action="reset">Reset to default</button>
+        </div>
+      </div>
+    `;
+  }
+
+
+  private wireSubtitleCustomizePanel(root: HTMLElement): void {
+    // Update the preview, the live in-video subtitle, and persist —
+    // without re-rendering the whole panel so a slider drag stays
+    // smooth (no DOM rebuild on every input event).
+    const refreshPreview = () => {
+      const s = this._subtitleSettings;
+      const block = root.querySelector<HTMLElement>(
+        ".movi-sub-cust-preview-block",
+      );
+      const line = root.querySelector<HTMLElement>(
+        ".movi-sub-cust-preview-line",
+      );
+      // Mirror the in-video CSS: backdrop only paints for VTT, so the
+      // preview also goes transparent for SRT / other text formats.
+      const previewShowsBackdrop = this.getActiveSubtitleKind() === "vtt";
+      if (block) {
+        const rgb = MoviElement.contrastBackdropRgb(s.color);
+        block.style.background =
+          previewShowsBackdrop && s.bgAlpha > 0
+            ? `rgba(${rgb}, ${s.bgAlpha})`
+            : "transparent";
+      }
+      if (line) {
+        line.style.color = s.color;
+        line.style.fontSize = `calc(18px * ${s.sizeMult})`;
+        line.style.textShadow = MoviElement.SUBTITLE_EDGE_STYLES[s.edge];
+      }
+    };
+    const refreshReadout = (group: "size" | "bg") => {
+      const r = root.querySelector<HTMLElement>(
+        `[data-readout="${group}"]`,
+      );
+      if (!r) return;
+      r.textContent =
+        group === "size"
+          ? `${Math.round(this._subtitleSettings.sizeMult * 100)}%`
+          : `${Math.round(this._subtitleSettings.bgAlpha * 100)}%`;
+    };
+    const persistAndApply = () => {
+      this.saveSubtitleSettings();
+      this.applySubtitleSettings();
+    };
+
+    // Range sliders — input fires continuously while dragging.
+    root
+      .querySelectorAll<HTMLInputElement>(".movi-sub-cust-range")
+      .forEach((range) => {
+        range.addEventListener("input", (e) => {
+          e.stopPropagation();
+          const group = range.dataset.group as "size" | "bg" | undefined;
+          if (!group) return;
+          const pct = parseFloat(range.value);
+          if (group === "size") this._subtitleSettings.sizeMult = pct / 100;
+          else this._subtitleSettings.bgAlpha = pct / 100;
+          refreshReadout(group);
+          refreshPreview();
+          persistAndApply();
+        });
+      });
+
+    // Color swatches.
+    root
+      .querySelectorAll<HTMLElement>(".movi-sub-cust-swatch")
+      .forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const v = btn.dataset.value;
+          if (!v) return;
+          this._subtitleSettings.color = v;
+          root
+            .querySelectorAll(".movi-sub-cust-swatch")
+            .forEach((el) => el.classList.remove("is-active"));
+          btn.classList.add("is-active");
+          refreshPreview();
+          persistAndApply();
+        });
+      });
+
+    // Edge style tiles.
+    root
+      .querySelectorAll<HTMLElement>(".movi-sub-cust-edge-tile")
+      .forEach((tile) => {
+        tile.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const v = tile.dataset.value as
+            | "none"
+            | "shadow"
+            | "outline"
+            | "raised"
+            | undefined;
+          if (!v) return;
+          this._subtitleSettings.edge = v;
+          root
+            .querySelectorAll(".movi-sub-cust-edge-tile")
+            .forEach((el) => el.classList.remove("is-active"));
+          tile.classList.add("is-active");
+          refreshPreview();
+          persistAndApply();
+        });
+      });
+
+    // Back to subtitles list. The handler MUST run before the click bubbles
+    // out — the document-level closeSubtitleMenuHandler will hide the whole
+    // dropdown if it ever sees a click whose composedPath doesn't include
+    // the menu, which can happen on this button alone because innerHTML is
+    // about to replace the click target before bubbling completes (the
+    // path captured at dispatch time is fine, but some browsers retarget).
+    // stopImmediatePropagation + preventDefault belt-and-suspenders the
+    // path; the explicit re-open guarantees the menu stays visible even
+    // if some other listener slips through.
+    const backBtn = root.querySelector<HTMLElement>(".movi-sub-cust-back");
+    backBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      this._showingSubtitleCustomize = false;
+      this.updateSubtitleTrackMenu();
+      const menu = this.shadowRoot?.querySelector(
+        ".movi-subtitle-track-menu",
+      ) as HTMLElement | null;
+      this.setBottomMenuOpen(menu, true);
+    });
+
+    // Subtitle shift (timing nudge). Preset buttons (±0.1s / ±1s / 0)
+    // plus a number input for custom entry. Per-source state (lives on
+    // the player, NOT in localStorage — drift is content-specific).
+    const shiftInput = root.querySelector<HTMLInputElement>(
+      'input[data-readout="shift"]',
+    );
+    const refreshShiftReadout = () => {
+      if (!shiftInput || !this.player) return;
+      const v = this.player.getSubtitleDelay();
+      // Don't clobber the field while the user is typing in it.
+      if (document.activeElement !== shiftInput) {
+        shiftInput.value = v.toFixed(1);
+      }
+    };
+    const applyShift = (next: number) => {
+      if (!this.player) return;
+      const clamped = Math.max(-300, Math.min(300, next));
+      // Round to 1 decimal so consecutive nudges don't accumulate fp noise.
+      const rounded = Math.round(clamped * 10) / 10;
+      this.player.setSubtitleDelay(rounded);
+      refreshShiftReadout();
+      // If the transcript panel is showing, repaint its rows so the
+      // displayed timestamps reflect the new delay (each row shows the
+      // video time at which the cue actually appears, not the raw
+      // stream time).
+      const cuesPanel = this.shadowRoot?.querySelector(
+        ".movi-cues-panel",
+      ) as HTMLElement | null;
+      if (cuesPanel && cuesPanel.style.display !== "none") {
+        this.renderCuesPanel();
+      }
+    };
+    root
+      .querySelectorAll<HTMLElement>(".movi-sub-cust-shift-btn")
+      .forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (!this.player) return;
+          const v = btn.dataset.shift;
+          if (!v) return;
+          if (v === "zero") applyShift(0);
+          else {
+            const delta = parseFloat(v);
+            if (Number.isFinite(delta))
+              applyShift(this.player.getSubtitleDelay() + delta);
+          }
+        });
+      });
+    if (shiftInput) {
+      // Apply on Enter / blur so the user can type out a value without
+      // every keystroke racing with re-formatting.
+      const commit = () => {
+        const parsed = parseFloat(shiftInput.value);
+        if (Number.isFinite(parsed)) {
+          applyShift(parsed);
+          shiftInput.value = (
+            this.player ? this.player.getSubtitleDelay() : 0
+          ).toFixed(1);
+        } else {
+          // Restore last good value if the user typed garbage.
+          shiftInput.value = (
+            this.player ? this.player.getSubtitleDelay() : 0
+          ).toFixed(1);
+        }
+      };
+      shiftInput.addEventListener("keydown", (e) => {
+        // Player has global key bindings (←/→ seek, Space play/pause,
+        // ↑/↓ volume) — they must NOT fire while the user is typing
+        // in this field. Stopping propagation keeps the key event
+        // local to the input.
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          shiftInput.blur(); // triggers commit via blur
+        }
+      });
+      // Same shielding for keyup/keypress so capture-phase listeners
+      // upstream don't pick the keys up either.
+      shiftInput.addEventListener("keyup", (e) => e.stopPropagation());
+      shiftInput.addEventListener("keypress", (e) => e.stopPropagation());
+      shiftInput.addEventListener("blur", commit);
+      // Stop the document-level close handler from eating focus events
+      // that originate inside the field.
+      shiftInput.addEventListener("click", (e) => e.stopPropagation());
+    }
+
+    // Reset.
+    const resetBtn = root.querySelector<HTMLElement>(".movi-sub-cust-reset");
+    resetBtn?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this._subtitleSettings = {
+        sizeMult: 1,
+        color: "#FFFFFF",
+        bgAlpha: 0.75,
+        edge: "shadow",
+      };
+      this.saveSubtitleSettings();
+      this.applySubtitleSettings();
+      this.updateSubtitleTrackMenu(); // full redraw — slider/swatch/tile state all need to flip
+    });
+  }
+
+  private _showingSubtitleCustomize: boolean = false;
+
+  // Cues browser state
+  private _cuesPanelCues: { start: number; end: number; text: string }[] = [];
+  private _cuesPanelFiltered: { start: number; end: number; text: string }[] = [];
+  private _cuesPanelQuery: string = "";
+  private _cuesPanelActiveIdx: number = -1;
+  private _cuesPanelTimeUpdateUnsub: (() => void) | null = null;
+  private _cuesPanelEscHandler: ((e: KeyboardEvent) => void) | null = null;
+
+  private async openCuesPanel(): Promise<void> {
+    const panel = this.shadowRoot?.querySelector(
+      ".movi-cues-panel",
+    ) as HTMLElement | null;
+    const list = panel?.querySelector(
+      ".movi-cues-list",
+    ) as HTMLElement | null;
+    const meta = panel?.querySelector(
+      ".movi-cues-meta-count",
+    ) as HTMLElement | null;
+    const search = panel?.querySelector(
+      ".movi-cues-search",
+    ) as HTMLInputElement | null;
+    if (!panel || !list || !this.player) return;
+
+    panel.style.display = "flex";
+    list.innerHTML = `<div class="movi-cues-empty">Loading…</div>`;
+    if (meta) meta.textContent = "Scanning subtitle stream…";
+
+    let cues: { start: number; end: number; text: string }[] = [];
+    try {
+      cues = await this.player.getAllSubtitleCues();
+    } catch (err) {
+      Logger.error(TAG, "Failed to load cues for browser", err);
+    }
+
+    // Panel may have been closed while we awaited — bail out cleanly.
+    if (panel.style.display === "none") return;
+
+    this._cuesPanelCues = cues;
+    this._cuesPanelQuery = "";
+    if (search) {
+      search.value = "";
+      // Wire input/keydown once per open — handlers reference the latest
+      // _cuesPanelQuery via closure each time, so we replace listeners on
+      // every open to avoid stacking.
+      const newSearch = search.cloneNode(true) as HTMLInputElement;
+      search.replaceWith(newSearch);
+      newSearch.addEventListener("input", () => {
+        this._cuesPanelQuery = newSearch.value;
+        this.renderCuesPanel();
+      });
+      newSearch.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") {
+          if (newSearch.value.length > 0) {
+            newSearch.value = "";
+            this._cuesPanelQuery = "";
+            this.renderCuesPanel();
+            e.stopPropagation();
+          }
+        }
+      });
+      // Focus after rAF so the search field is ready to type into.
+      requestAnimationFrame(() => newSearch.focus());
+    }
+
+    // Delegated click on list rows — survives re-renders since we listen
+    // on the static list element itself.
+    list.onclick = (e) => {
+      const row = (e.target as HTMLElement)?.closest(
+        ".movi-cues-row",
+      ) as HTMLElement | null;
+      if (!row || !this.player) return;
+      const startStr = row.dataset.start;
+      if (!startStr) return;
+      const start = parseFloat(startStr);
+      if (!Number.isFinite(start)) return;
+      // Seek to (cue start − delay) so the cue lands at this video time.
+      const delay = this.player.getSubtitleDelay();
+      const target = Math.max(0, start - delay);
+      this.player.seek(target).catch(() => {});
+      this.closeCuesPanel();
+    };
+
+    this.renderCuesPanel();
+
+    // Active cue follow — re-pick the active row whenever clock advances.
+    if (this._cuesPanelTimeUpdateUnsub) this._cuesPanelTimeUpdateUnsub();
+    const onTime = () => this.updateCuesPanelActive();
+    this.player.on("timeUpdate", onTime);
+    this._cuesPanelTimeUpdateUnsub = () =>
+      this.player?.off("timeUpdate", onTime);
+
+    // ESC to close.
+    if (this._cuesPanelEscHandler) {
+      document.removeEventListener("keydown", this._cuesPanelEscHandler);
+    }
+    this._cuesPanelEscHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        // Only swallow ESC when the search input is empty — otherwise
+        // let the search input's own ESC handler clear the query first.
+        const s = this.shadowRoot?.querySelector(
+          ".movi-cues-search",
+        ) as HTMLInputElement | null;
+        if (!s || s.value.length === 0) {
+          this.closeCuesPanel();
+          e.stopPropagation();
+        }
+      }
+    };
+    document.addEventListener("keydown", this._cuesPanelEscHandler);
+  }
+
+  private closeCuesPanel(): void {
+    const panel = this.shadowRoot?.querySelector(
+      ".movi-cues-panel",
+    ) as HTMLElement | null;
+    if (panel) panel.style.display = "none";
+    if (this._cuesPanelTimeUpdateUnsub) {
+      this._cuesPanelTimeUpdateUnsub();
+      this._cuesPanelTimeUpdateUnsub = null;
+    }
+    if (this._cuesPanelEscHandler) {
+      document.removeEventListener("keydown", this._cuesPanelEscHandler);
+      this._cuesPanelEscHandler = null;
+    }
+    this._cuesPanelCues = [];
+    this._cuesPanelFiltered = [];
+    this._cuesPanelQuery = "";
+    this._cuesPanelActiveIdx = -1;
+  }
+
+  private renderCuesPanel(): void {
+    const list = this.shadowRoot?.querySelector(
+      ".movi-cues-list",
+    ) as HTMLElement | null;
+    const meta = this.shadowRoot?.querySelector(
+      ".movi-cues-meta-count",
+    ) as HTMLElement | null;
+    if (!list) return;
+
+    const q = this._cuesPanelQuery.trim().toLowerCase();
+    const filtered = q
+      ? this._cuesPanelCues.filter((c) => c.text.toLowerCase().includes(q))
+      : this._cuesPanelCues;
+    this._cuesPanelFiltered = filtered;
+
+    if (meta) {
+      const total = this._cuesPanelCues.length;
+      meta.textContent = q
+        ? `${filtered.length} of ${total} matching “${this._cuesPanelQuery}”`
+        : `${total} cues`;
+    }
+
+    if (filtered.length === 0) {
+      list.innerHTML = `<div class="movi-cues-empty">${q ? "No matches." : "No cues."}</div>`;
+      this._cuesPanelActiveIdx = -1;
+      return;
+    }
+
+    const escapeHtml = (s: string) =>
+      s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+
+    // Some subtitle decoders emit HTML-entity-encoded text (&gt;, &amp;,
+    // &#39;, &nbsp;…). Decode those first so the user sees the real
+    // characters — and so a "<i>" written as "&lt;i&gt;" still gets
+    // recognised as an italic tag below. &amp; is decoded last to avoid
+    // double-decoding (e.g. "&amp;gt;" should land at "&gt;", not ">").
+    const decodeEntities = (s: string): string =>
+      s
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&apos;/gi, "'")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&");
+
+    // Tokenize the cue text into plain spans + safe inline-style tags
+    // (<i>, <b>, <u>). The C-side decoder emits these for SubRip/ASS
+    // italic/bold/underline, and they should render — escaping them as
+    // raw <i> on screen looks broken. Anything else gets escaped.
+    const SAFE_TAG_RE = /<\/?[biu]>/gi;
+    type Token = { type: "text" | "tag"; value: string };
+    const tokenize = (raw: string): Token[] => {
+      const text = decodeEntities(raw);
+      const tokens: Token[] = [];
+      let pos = 0;
+      let m: RegExpExecArray | null;
+      SAFE_TAG_RE.lastIndex = 0;
+      while ((m = SAFE_TAG_RE.exec(text)) !== null) {
+        if (m.index > pos)
+          tokens.push({ type: "text", value: text.slice(pos, m.index) });
+        tokens.push({ type: "tag", value: m[0].toLowerCase() });
+        pos = SAFE_TAG_RE.lastIndex;
+      }
+      if (pos < text.length)
+        tokens.push({ type: "text", value: text.slice(pos) });
+      return tokens;
+    };
+
+    const highlight = (text: string): string => {
+      const tokens = tokenize(text);
+
+      if (!q) {
+        return tokens
+          .map((t) => (t.type === "tag" ? t.value : escapeHtml(t.value)))
+          .join("");
+      }
+
+      // Build a plain-text view (tags stripped) so the search query
+      // matches across italic boundaries, then map matches back onto
+      // the original token stream so the rendered output preserves
+      // tags AND highlights the matched substrings.
+      let plain = "";
+      const textRanges: { tokenIdx: number; start: number }[] = [];
+      tokens.forEach((t, i) => {
+        if (t.type === "text") {
+          textRanges.push({ tokenIdx: i, start: plain.length });
+          plain += t.value;
+        }
+      });
+      const plainLower = plain.toLowerCase();
+      const matches: { start: number; end: number }[] = [];
+      let cur = 0;
+      while (cur <= plainLower.length - q.length) {
+        const idx = plainLower.indexOf(q, cur);
+        if (idx < 0) break;
+        matches.push({ start: idx, end: idx + q.length });
+        cur = idx + q.length;
+      }
+
+      const parts: string[] = [];
+      for (let i = 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (t.type === "tag") {
+          parts.push(t.value);
+          continue;
+        }
+        const range = textRanges.find((r) => r.tokenIdx === i);
+        if (!range) continue;
+        const tStart = range.start;
+        const tEnd = tStart + t.value.length;
+        let cursor = tStart;
+        for (const mm of matches) {
+          if (mm.end <= tStart || mm.start >= tEnd) continue;
+          const ovStart = Math.max(mm.start, tStart);
+          const ovEnd = Math.min(mm.end, tEnd);
+          if (ovStart > cursor)
+            parts.push(escapeHtml(plain.slice(cursor, ovStart)));
+          parts.push(`<mark>${escapeHtml(plain.slice(ovStart, ovEnd))}</mark>`);
+          cursor = ovEnd;
+        }
+        if (cursor < tEnd) parts.push(escapeHtml(plain.slice(cursor, tEnd)));
+      }
+      return parts.join("");
+    };
+
+    const fmt = (sec: number): string => {
+      const total = Math.max(0, Math.floor(sec));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      const mm = m.toString().padStart(2, "0");
+      const ss = s.toString().padStart(2, "0");
+      return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+    };
+
+    // Display the video-time at which each cue actually appears so the
+    // numbers stay meaningful when the user has dialled in a delay
+    // offset. Raw stream time is preserved on data-start for active-row
+    // matching against the renderer's own (also delay-aware) clock.
+    const delay = this.player ? this.player.getSubtitleDelay() : 0;
+    list.innerHTML = filtered
+      .map(
+        (c) => `
+      <div class="movi-cues-row" role="option" data-start="${c.start}">
+        <span class="movi-cues-row-time">${fmt(Math.max(0, c.start - delay))}</span>
+        <span class="movi-cues-row-text">${highlight(c.text)}</span>
+      </div>`,
+      )
+      .join("");
+
+    this.updateCuesPanelActive();
+  }
+
+  private updateCuesPanelActive(): void {
+    const list = this.shadowRoot?.querySelector(
+      ".movi-cues-list",
+    ) as HTMLElement | null;
+    if (!list || !this.player) return;
+    const cues = this._cuesPanelFiltered;
+    if (cues.length === 0) return;
+    // Apply the live subtitle delay so the highlighted row matches what's
+    // actually showing on screen (cue.start refers to raw stream time).
+    const delay = this.player.getSubtitleDelay();
+    const adjusted = this.player.getCurrentTime() + delay;
+    // Pick the latest cue whose start <= adjusted. Linear scan is fine
+    // for ~thousands of cues; switch to binary search if that ever
+    // becomes a hotspot.
+    let idx = -1;
+    for (let i = 0; i < cues.length; i++) {
+      if (cues[i].start <= adjusted) idx = i;
+      else break;
+    }
+    // Only count it active while the cue is still in its display window.
+    if (idx >= 0 && cues[idx].end + 0.5 < adjusted) idx = -1;
+    if (idx === this._cuesPanelActiveIdx) return;
+    this._cuesPanelActiveIdx = idx;
+
+    const rows = list.querySelectorAll<HTMLElement>(".movi-cues-row");
+    rows.forEach((r, i) => {
+      r.classList.toggle("is-active", i === idx);
+    });
+    if (idx >= 0) {
+      const row = rows[idx];
+      if (row) {
+        const rowTop = row.offsetTop;
+        const rowBot = rowTop + row.offsetHeight;
+        const viewTop = list.scrollTop;
+        const viewBot = viewTop + list.clientHeight;
+        if (rowTop < viewTop || rowBot > viewBot) {
+          list.scrollTop = rowTop - list.clientHeight / 2 + row.offsetHeight / 2;
+        }
+      }
+    }
   }
 
   private updateSubtitleTrackMenu(): void {
@@ -4755,6 +6168,54 @@ export class MoviElement extends HTMLElement {
 
     subtitleTrackContainer.style.display = "flex";
     subtitleTrackBtn.style.display = "flex";
+
+    // Reflect the customize state on the header gear icon and hide it
+    // entirely when there is no active subtitle — there's nothing to
+    // customize until the user picks a track.
+    const gearBtn = this.shadowRoot?.querySelector(
+      ".movi-subtitle-customize-btn",
+    ) as HTMLElement | null;
+    const browseBtn = this.shadowRoot?.querySelector(
+      ".movi-subtitle-browse-btn",
+    ) as HTMLElement | null;
+    const activeSubtitleKind = this.getActiveSubtitleKind();
+    const hasActiveSubtitle = activeSubtitleKind !== null;
+    if (gearBtn) {
+      gearBtn.style.display = hasActiveSubtitle ? "" : "none";
+      gearBtn.classList.toggle("is-active", this._showingSubtitleCustomize);
+      gearBtn.setAttribute(
+        "aria-pressed",
+        this._showingSubtitleCustomize ? "true" : "false",
+      );
+    }
+    if (browseBtn) {
+      // Transcript browser needs text cues — image subtitles (PGS/VOBSUB)
+      // are bitmaps with no extractable text. Also file-source only, since
+      // getAllSubtitleCues() can't yield a complete list for streamed sources.
+      const canBrowse =
+        hasActiveSubtitle &&
+        activeSubtitleKind !== "image" &&
+        !!this.player?.isFileSource();
+      browseBtn.style.display = canBrowse ? "" : "none";
+    }
+    // If the user had the customize panel open and then hit "Off",
+    // bounce them back to the track list automatically.
+    if (this._showingSubtitleCustomize && !hasActiveSubtitle) {
+      this._showingSubtitleCustomize = false;
+    }
+
+    // If the user pressed the gear, render the settings panel inside
+    // the same dropdown. Pressing the gear (or the panel's Back) returns.
+    if (this._showingSubtitleCustomize) {
+      subtitleTrackList.innerHTML = this.renderSubtitleCustomizePanel();
+      this.wireSubtitleCustomizePanel(subtitleTrackList);
+      this.flashSubtitleListFade(subtitleTrackList);
+      const subtitleFooter = this.shadowRoot?.querySelector(
+        ".movi-subtitle-track-footer",
+      ) as HTMLElement | null;
+      if (subtitleFooter) subtitleFooter.textContent = "";
+      return;
+    }
 
     const anyExternalActive = externalSubs.some((t) => t.active);
     const offActive = activeTrack === null && !anyExternalActive;
@@ -4823,6 +6284,7 @@ export class MoviElement extends HTMLElement {
       .join("");
 
     subtitleTrackList.innerHTML = menuHTML;
+    this.flashSubtitleListFade(subtitleTrackList);
 
     // Footer count
     const subtitleFooter = this.shadowRoot?.querySelector(
@@ -4872,11 +6334,12 @@ export class MoviElement extends HTMLElement {
               const muxSubOsdC = muxSubLangC && muxSubLabelC !== muxSubLangC ? `${muxSubLabelC} [${muxSubLangC}]` : muxSubLabelC;
               this.showOSD(subIconOn, muxSubOsdC);
             }
-            // Close menu
-            const menu = this.shadowRoot?.querySelector(
-              ".movi-subtitle-track-menu",
-            ) as HTMLElement;
-            if (menu) menu.style.display = "none";
+            // Re-render so the active row's checkmark + the gear/browse
+            // icons reflect the new selection. Do NOT close the menu —
+            // user wants to glance at the panel, swap a track, and
+            // possibly tweak something else (Transcript, customize)
+            // without re-opening the dropdown each time.
+            this.updateSubtitleTrackMenu();
           }
         });
       });
@@ -4959,6 +6422,189 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  /**
+   * Close every bottom-controls dropdown (speed, audio, subtitle,
+   * quality) plus the context menu. Used to enforce one-menu-at-a-time
+   * and to swallow a player-area click when a menu is open.
+   * Pass a `keep` selector to skip closing the menu currently being
+   * opened, otherwise everything goes away.
+   */
+  private closeAllBottomMenus(keep?: string): void {
+    if (!this.shadowRoot) return;
+    const animatedSelectors = [
+      ".movi-speed-menu",
+      ".movi-audio-track-menu",
+      ".movi-subtitle-track-menu",
+      ".movi-quality-menu",
+    ];
+    for (const sel of animatedSelectors) {
+      if (sel === keep) continue;
+      const el = this.shadowRoot.querySelector(sel) as HTMLElement | null;
+      this.setBottomMenuOpen(el, false);
+    }
+    if (keep !== ".movi-context-menu") {
+      const ctx = this.shadowRoot.querySelector(
+        ".movi-context-menu",
+      ) as HTMLElement | null;
+      if (ctx && ctx.style.display !== "none") ctx.style.display = "none";
+    }
+  }
+
+  /**
+   * Toggle a bottom-bar dropdown with a pop-in / pop-out animation.
+   * Inline display:none stays the truly-hidden terminal state so the
+   * existing dom-presence checks elsewhere keep working — we just clear
+   * it on open, run the CSS transition, and restore it once the exit
+   * transition finishes.
+   */
+  private setBottomMenuOpen(
+    el: HTMLElement | null,
+    open: boolean,
+  ): void {
+    if (!el) return;
+    if (open) {
+      if (el.classList.contains("is-open")) return;
+      el.style.display = ""; // revert to CSS default (flex/block)
+      void el.getBoundingClientRect(); // flush layout so transition starts
+      el.classList.add("is-open");
+      return;
+    }
+    if (!el.classList.contains("is-open") && el.style.display === "none") {
+      return;
+    }
+    el.classList.remove("is-open");
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      // If the menu was reopened during the exit transition, leave it.
+      if (el.classList.contains("is-open")) return;
+      el.style.display = "none";
+    };
+    el.addEventListener("transitionend", finish, { once: true });
+    setTimeout(finish, 240); // safety net if transitionend doesn't fire
+  }
+
+  private isBottomMenuOpen(el: HTMLElement | null): boolean {
+    return !!el && el.classList.contains("is-open");
+  }
+
+  /**
+   * Restart the subtle fade-in on the subtitle dropdown's content area so
+   * toggling between the track list and the customize panel feels like a
+   * crossfade rather than a snap. Removing + re-adding the class with a
+   * forced reflow restarts the CSS animation; without the reflow the
+   * browser deduplicates the class change and the animation never replays.
+   */
+  private flashSubtitleListFade(el: HTMLElement | null): void {
+    if (!el) return;
+    el.classList.remove("movi-fade-in");
+    void el.offsetWidth;
+    el.classList.add("movi-fade-in");
+  }
+
+  /**
+   * Hide the seek OSD pill immediately and reset the chain state.
+   * Used when a relative-seek press lands on the boundary (delta 0)
+   * so the previous chain's "- 25s" cue doesn't keep reading like the
+   * playhead has gone past zero — the cue had served its purpose
+   * before the boundary press, but holding it on screen with no
+   * forward movement is what the user sees as "minus".
+   */
+  private dismissSeekOSD(): void {
+    if (this.osdTimeout) {
+      clearTimeout(this.osdTimeout);
+      this.osdTimeout = null;
+    }
+    const osdContainer = this.shadowRoot?.querySelector(
+      ".movi-osd-container",
+    ) as HTMLElement | null;
+    if (osdContainer) {
+      osdContainer.classList.remove("visible");
+      window.setTimeout(() => {
+        if (!osdContainer.classList.contains("visible")) {
+          osdContainer.style.display = "none";
+        }
+      }, 300);
+    }
+    this.cumulativeSeekAmount = 0;
+    this.lastSeekSide = null;
+    this._seekChainTarget = null;
+  }
+
+  /**
+   * Run a relative seek (button / key / double-tap) and surface it
+   * through the OSD. The OSD label tracks the *actual* delta between
+   * the pre-seek time and the clamped target — so pressing left at 5s
+   * with a 10s step shows "- 5s", not "- 10s", and a follow-up press
+   * at 0s suppresses the OSD entirely instead of accumulating phantom
+   * seconds the playhead never travelled. Same on the duration end.
+   *
+   * For rapid chained presses we anchor "before" on the previous
+   * target rather than the (still-stale) playback time, so the cue
+   * tracks where the playhead is *headed* even mid-seek.
+   */
+  private performRelativeSeek(direction: "left" | "right", step = 10): void {
+    const now = Date.now();
+    const continuing =
+      this.lastSeekSide === direction &&
+      now - this.lastSeekTime < 1000;
+    const dur = this.duration;
+    // Sanitise the dur cap. Infinity (live) and NaN/0 (not yet loaded)
+    // both leave Math.min producing values that bypass clamping; pin
+    // forward seeks to a sane upper bound so target never lands above
+    // the playable range.
+    const safeDur =
+      Number.isFinite(dur) && dur > 0 ? dur : Number.POSITIVE_INFINITY;
+    // Anchor chained presses on the previous *target* (where the
+    // playhead is headed) instead of this.currentTime, since the
+    // setter is async and a burst of presses would otherwise read the
+    // same stale time and double-count the delta. Clamp to [0, dur]
+    // so a stale chain (e.g. duration shrank on a live stream cap)
+    // can't anchor outside the playable range.
+    const rawBefore =
+      continuing && this._seekChainTarget !== null
+        ? this._seekChainTarget
+        : this.currentTime;
+    const before = Math.max(
+      0,
+      Math.min(safeDur, Number.isFinite(rawBefore) ? rawBefore : 0),
+    );
+    const target = direction === "left"
+      ? Math.max(0, before - step)
+      : Math.min(safeDur, before + step);
+    this.currentTime = target;
+    this._seekChainTarget = target;
+    const delta =
+      direction === "left" ? before - target : target - before;
+
+    const nextCum =
+      continuing && delta > 0
+        ? this.cumulativeSeekAmount + delta
+        : delta;
+    // cum should be ≥ 0 by construction, but Math.max guards against
+    // any weird state (NaN, transient float negatives) leaking into
+    // the display.
+    const safeCum = Math.max(0, Number.isFinite(nextCum) ? nextCum : 0);
+    const rounded = Math.round(safeCum);
+    // If the rounded amount is 0 (boundary hit, sub-second move, or
+    // float noise) the OSD would read "- 0s" / "+ 0s" — which the
+    // user reads as the playhead having gone past zero. Dismiss any
+    // lingering chain cue and bail without re-showing the pill.
+    if (rounded <= 0) {
+      this.dismissSeekOSD();
+      return;
+    }
+
+    this.cumulativeSeekAmount = safeCum;
+    this.lastSeekSide = direction;
+    this.lastSeekTime = now;
+
+    const label = `${direction === "left" ? "-" : "+"} ${rounded}s`;
+    const icon = direction === "left" ? OSD.seekBackward : OSD.seekForward;
+    this.showOSD(icon, label);
+  }
+
   private isAnyMenuOpen(): boolean {
     if (!this.shadowRoot) return false;
 
@@ -4969,10 +6615,10 @@ export class MoviElement extends HTMLElement {
     const contextMenu = this.shadowRoot.querySelector(".movi-context-menu") as HTMLElement;
 
     return (
-      (speedMenu && speedMenu.style.display === "block") ||
-      (audioMenu && audioMenu.style.display === "block") ||
-      (subtitleMenu && subtitleMenu.style.display === "block") ||
-      (qualityMenu && qualityMenu.style.display === "block") ||
+      this.isBottomMenuOpen(speedMenu) ||
+      this.isBottomMenuOpen(audioMenu) ||
+      this.isBottomMenuOpen(subtitleMenu) ||
+      this.isBottomMenuOpen(qualityMenu) ||
       (contextMenu && (contextMenu.style.display === "block" || contextMenu.style.display === "flex"))
     );
   }
@@ -5104,6 +6750,15 @@ export class MoviElement extends HTMLElement {
       }
 
       :host {
+        /* Treat the host as a query container so the responsive
+           breakpoints below trigger off the PLAYER's own width
+           instead of the viewport's. Without this, embedding the
+           player inside a desktop layout with a sidebar (player
+           width < 640px while viewport > 640px) keeps the desktop
+           controls layout and clips the rightmost icons. */
+        container-type: inline-size;
+        container-name: movi-host;
+
         /* Premium Color Palette */
         --movi-primary: #8B5CF6;
         /* Derived so themecolor attribute cascades to light/dark variants */
@@ -5724,7 +7379,7 @@ export class MoviElement extends HTMLElement {
       .movi-progress-handle {
         position: absolute;
         top: 50%;
-        left: 1%;
+        left: 0%;
         transform: translate(-50%, -50%) scale(0);
         width: 16px;
         height: 16px;
@@ -5899,13 +7554,65 @@ export class MoviElement extends HTMLElement {
         border-radius: 14px;
         min-width: 260px;
         max-width: 340px;
-        max-height: 360px;
+        /* Capped against the PLAYER's own height (--movi-player-height
+           is set by JS on connect/resize) — minus a controls-bar
+           reserve so the menu never extends below the player. Falls
+           back to 460px / 70vh if the variable isn't yet set. */
+        max-height: min(
+          calc(var(--movi-player-height, 70vh) - 100px),
+          460px
+        );
         overflow: hidden;
         display: flex;
         flex-direction: column;
         box-shadow: var(--movi-shadow-lg);
         z-index: 1000;
+      }
+
+      /* Pop-in animation shared by all bottom-bar dropdowns. The default
+         (no .is-open) state is the "closed" rest position; setBottomMenuOpen
+         in MoviElement adds .is-open to play the entrance and removes it to
+         play the exit. inline display:none stays the truly-hidden terminal
+         state — toggled around the transition by the helper.
+         Transform is composed from custom props so other layers (e.g.
+         the mobile media query, which centres the menu via translateX
+         on its own --movi-menu-tx axis) can stack with the animation
+         instead of fighting !important against it. */
+      .movi-audio-track-menu,
+      .movi-subtitle-track-menu,
+      .movi-quality-menu,
+      .movi-speed-menu {
+        --movi-menu-tx: 0px;
+        --movi-menu-ty: 8px;
+        --movi-menu-scale: 0.97;
+        opacity: 0;
+        transform: translateX(var(--movi-menu-tx)) translateY(var(--movi-menu-ty)) scale(var(--movi-menu-scale));
+        transform-origin: bottom right;
+        transition:
+          opacity 180ms cubic-bezier(0.16, 1, 0.3, 1),
+          transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+        pointer-events: none !important;
+        will-change: opacity, transform;
+      }
+
+      .movi-audio-track-menu.is-open,
+      .movi-subtitle-track-menu.is-open,
+      .movi-quality-menu.is-open,
+      .movi-speed-menu.is-open {
+        --movi-menu-ty: 0px;
+        --movi-menu-scale: 1;
+        opacity: 1;
         pointer-events: auto !important;
+      }
+
+      /* Fade the customize panel's content swap so toggling the gear
+         doesn't snap between the track list and the settings UI. */
+      @keyframes movi-sub-list-fade {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: none; }
+      }
+      .movi-subtitle-track-list.movi-fade-in {
+        animation: movi-sub-list-fade 160ms cubic-bezier(0.16, 1, 0.3, 1);
       }
 
       .movi-track-menu-header {
@@ -5928,6 +7635,55 @@ export class MoviElement extends HTMLElement {
         opacity: 0.85;
       }
 
+      /* Gear icon at the top-right of the Subtitles header opens the
+         customize panel. Toggling it returns to the track list. */
+      .movi-subtitle-track-header {
+        position: relative;
+      }
+
+      .movi-subtitle-track-header > span {
+        flex: 1;
+      }
+
+      .movi-subtitle-customize-btn,
+      .movi-subtitle-browse-btn {
+        all: unset;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        color: var(--movi-controls-color);
+        opacity: 0.7;
+        transition: background var(--movi-transition-fast), opacity var(--movi-transition-fast), color var(--movi-transition-fast);
+      }
+
+      .movi-subtitle-customize-btn:hover,
+      .movi-subtitle-browse-btn:hover {
+        background: color-mix(in srgb, var(--movi-controls-color) 0.1, transparent);
+        opacity: 1;
+      }
+
+      .movi-subtitle-browse-btn svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .movi-subtitle-customize-btn.is-active,
+      .movi-subtitle-customize-btn[aria-pressed="true"] {
+        color: var(--movi-primary);
+        opacity: 1;
+        background: color-mix(in srgb, var(--movi-primary) 0.18, transparent);
+      }
+
+      .movi-subtitle-customize-btn svg {
+        width: 16px;
+        height: 16px;
+        opacity: 1;
+      }
+
       .movi-track-menu-footer {
         padding: 8px 16px 10px;
         font-size: 11px;
@@ -5946,8 +7702,43 @@ export class MoviElement extends HTMLElement {
       .movi-subtitle-track-list {
         padding: 6px;
         overflow-y: auto;
-        flex: 1;
+        overscroll-behavior: contain;
+        /* Bound the list directly off the player's own height (minus
+           ~180px of chrome: header + footer + the controls-bar reserve
+           the parent menu also subtracts). Capped at 360px on tall
+           players. Bypasses flex shrinking quirks: the list ALWAYS has
+           a concrete max-height so overflow-y kicks in cleanly.
+           Mobile media query below overrides this with max-height:
+           none so the outer menu's single scrollbar handles long
+           lists on small screens. */
+        max-height: min(
+          calc(var(--movi-player-height, 70vh) - 180px),
+          360px
+        );
+        flex: 1 1 auto;
         min-height: 0;
+        scrollbar-width: thin;
+        scrollbar-color: color-mix(in srgb, var(--movi-controls-color) 0.35, transparent) transparent;
+      }
+
+      /* Always-visible thin scrollbar so users can see at a glance that
+         long track lists (16+ languages) keep going below the fold. */
+      .movi-audio-track-list::-webkit-scrollbar,
+      .movi-subtitle-track-list::-webkit-scrollbar {
+        width: 6px;
+      }
+      .movi-audio-track-list::-webkit-scrollbar-track,
+      .movi-subtitle-track-list::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .movi-audio-track-list::-webkit-scrollbar-thumb,
+      .movi-subtitle-track-list::-webkit-scrollbar-thumb {
+        background: color-mix(in srgb, var(--movi-controls-color) 0.28, transparent);
+        border-radius: 3px;
+      }
+      .movi-audio-track-list::-webkit-scrollbar-thumb:hover,
+      .movi-subtitle-track-list::-webkit-scrollbar-thumb:hover {
+        background: color-mix(in srgb, var(--movi-controls-color) 0.5, transparent);
       }
 
       .movi-audio-track-item,
@@ -6039,6 +7830,492 @@ export class MoviElement extends HTMLElement {
         display: none; /* Hidden by default, shown when subtitle tracks available */
         align-items: center;
         margin-left: 4px;
+      }
+
+      .movi-subtitle-track-divider {
+        height: 1px;
+        background: var(--movi-glass-border);
+        margin: 6px 4px;
+        opacity: 0.7;
+      }
+
+      .movi-subtitle-customize-item {
+        opacity: 0.92;
+      }
+
+      .movi-sub-cust-panel {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+        padding: 14px 14px 12px;
+      }
+
+      /* Back-to-list pill at the top of the customize panel. The negative
+         left margin pulls the chevron flush with the section content's
+         left edge — without it, the pill's own padding shifts the icon
+         ~8px right of every other label below and reads as misaligned. */
+      .movi-sub-cust-back {
+        all: unset;
+        cursor: pointer;
+        align-self: flex-start;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        margin-left: -10px;
+        margin-bottom: -8px;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--movi-text-secondary);
+        background: color-mix(in srgb, var(--movi-controls-color) 0.06, transparent);
+        border-radius: 999px;
+        transition: background var(--movi-transition-fast), color var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-back:hover {
+        color: var(--movi-controls-color);
+        background: color-mix(in srgb, var(--movi-primary) 0.16, transparent);
+      }
+
+      .movi-sub-cust-back svg {
+        flex-shrink: 0;
+      }
+
+      /* Live preview — sample text rendered using the EXACT same look
+         the in-video subtitle will get. Always a dark-ish "video"
+         backdrop (regardless of theme) so user-selected text colors
+         and shadows render in a realistic context — subtitles are
+         designed to sit on a dark video frame. */
+      .movi-sub-cust-preview {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 86px;
+        border-radius: 10px;
+        overflow: hidden;
+        background:
+          linear-gradient(135deg, rgba(255,255,255,0.05), rgba(255,255,255,0)),
+          repeating-conic-gradient(
+            rgba(255,255,255,0.04) 0% 25%,
+            rgba(255,255,255,0.02) 0% 50%
+          ),
+          #1a1a1a;
+        background-size: auto, 16px 16px, auto;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .movi-sub-cust-preview-stage {
+        padding: 12px 16px;
+      }
+
+      .movi-sub-cust-preview-block {
+        display: inline-block;
+        padding: 4px 12px;
+        border-radius: 4px;
+      }
+
+      .movi-sub-cust-preview-line {
+        font-family: 'YouTube Sans', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        font-weight: 500;
+        line-height: 1.35;
+        letter-spacing: 0.01em;
+        white-space: nowrap;
+      }
+
+      .movi-sub-cust-section {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .movi-sub-cust-section-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+
+      .movi-sub-cust-section-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--movi-controls-color);
+        letter-spacing: 0;
+        text-transform: none;
+      }
+
+      .movi-sub-cust-section-value {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--movi-primary);
+        font-variant-numeric: tabular-nums;
+      }
+
+      /* Range slider — themed thumb in primary color, visible rail.
+         color-mix() rendered the rail as effectively transparent in
+         some Chromium builds, so the rail uses plain rgba() now. */
+      .movi-sub-cust-range {
+        appearance: none;
+        -webkit-appearance: none;
+        -moz-appearance: none;
+        display: block;
+        width: 100%;
+        height: 22px;
+        padding: 0;
+        margin: 0;
+        background: transparent;
+        cursor: pointer;
+        outline: none;
+      }
+
+      .movi-sub-cust-range::-webkit-slider-runnable-track {
+        width: 100%;
+        height: 6px;
+        border-radius: 999px;
+        /* Rail color via CSS variable so light theme can swap it
+           without fighting pseudo-element specificity. */
+        background: var(--movi-sub-cust-rail, rgba(255, 255, 255, 0.22));
+        border: none;
+      }
+
+      .movi-sub-cust-range::-webkit-slider-thumb {
+        appearance: none;
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--movi-primary);
+        border: 3px solid #FFFFFF;
+        margin-top: -6px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+        cursor: pointer;
+        transition: transform var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-range::-webkit-slider-thumb:hover {
+        transform: scale(1.1);
+      }
+
+      .movi-sub-cust-range::-moz-range-track {
+        width: 100%;
+        height: 6px;
+        border-radius: 999px;
+        background: var(--movi-sub-cust-rail, rgba(255, 255, 255, 0.22));
+        border: none;
+      }
+
+      .movi-sub-cust-range::-moz-range-thumb {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: var(--movi-primary);
+        border: 3px solid #FFFFFF;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+        cursor: pointer;
+      }
+
+      .movi-sub-cust-range::-moz-range-progress {
+        height: 6px;
+        border-radius: 999px;
+        background: var(--movi-primary);
+      }
+
+      :host([theme="light"]) {
+        /* Slider rail color overridden via the host — :host(...) X::pseudo
+           selectors don't reliably target ::-webkit-slider-runnable-track
+           across browsers, but a CSS variable on the host cascades into
+           the shadow DOM cleanly. */
+        --movi-sub-cust-rail: rgba(0, 0, 0, 0.35);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-range::-webkit-slider-thumb,
+      :host([theme="light"]) .movi-sub-cust-range::-moz-range-thumb {
+        border-color: rgba(255, 255, 255, 0.95);
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3),
+                    0 0 0 1px rgba(0, 0, 0, 0.1);
+      }
+
+      /* Light-theme readability for the customize panel — without these
+         the labels inherit a faded color and disappear against the
+         glass-bg. */
+      :host([theme="light"]) .movi-sub-cust-section-title {
+        color: #11142d;
+      }
+
+      /* Gear icon contrast — default opacity 0.7 reads as nearly
+         white-on-white in light theme. Force full opacity + dark
+         color for proper visibility. */
+      :host([theme="light"]) .movi-subtitle-customize-btn {
+        color: #11142d;
+        opacity: 1;
+      }
+
+      :host([theme="light"]) .movi-subtitle-customize-btn:hover {
+        background: rgba(0, 0, 0, 0.06);
+      }
+
+      :host([theme="light"]) .movi-subtitle-customize-btn.is-active,
+      :host([theme="light"]) .movi-subtitle-customize-btn[aria-pressed="true"] {
+        color: var(--movi-primary);
+        background: color-mix(in srgb, var(--movi-primary) 0.16, transparent);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-back {
+        color: #11142d;
+        background: rgba(0, 0, 0, 0.05);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-back:hover {
+        background: color-mix(in srgb, var(--movi-primary) 0.16, rgba(0,0,0,0.04));
+      }
+
+      :host([theme="light"]) .movi-sub-cust-reset {
+        color: #11142d;
+        background: rgba(0, 0, 0, 0.06);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-reset:hover {
+        color: var(--movi-primary);
+        background: color-mix(in srgb, var(--movi-primary) 0.18, transparent);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-swatch {
+        box-shadow:
+          inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+          0 0 0 0 transparent;
+      }
+
+      :host([theme="light"]) .movi-sub-cust-swatch.is-active {
+        box-shadow:
+          inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+          0 0 0 3px var(--movi-primary);
+      }
+
+      /* Subtitle-shift buttons inherit color from the controls color
+         var which doesn't always cascade reliably across the customize
+         panel; force visible dark text + light-bg pill in light theme. */
+      :host([theme="light"]) .movi-sub-cust-shift-btn {
+        color: #11142d;
+        background: rgba(0, 0, 0, 0.06);
+        border-color: rgba(0, 0, 0, 0.1);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-shift-btn:hover {
+        background: color-mix(in srgb, var(--movi-primary) 0.16, rgba(0, 0, 0, 0.04));
+        border-color: color-mix(in srgb, var(--movi-primary) 0.4, rgba(0, 0, 0, 0.1));
+      }
+
+      :host([theme="light"]) .movi-sub-cust-shift-zero {
+        color: rgba(0, 0, 0, 0.5);
+      }
+
+      /* Color swatch grid — generously tappable, primary-ring on active. */
+      .movi-sub-cust-swatch-grid {
+        display: grid;
+        grid-template-columns: repeat(8, 1fr);
+        gap: 8px;
+      }
+
+      .movi-sub-cust-swatch {
+        all: unset;
+        cursor: pointer;
+        aspect-ratio: 1 / 1;
+        border-radius: 50%;
+        background: var(--swatch);
+        box-shadow:
+          inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+          0 0 0 0 transparent;
+        transition: transform var(--movi-transition-fast), box-shadow var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-swatch:hover {
+        transform: scale(1.08);
+      }
+
+      .movi-sub-cust-swatch.is-active {
+        box-shadow:
+          inset 0 0 0 1px rgba(0, 0, 0, 0.5),
+          0 0 0 3px var(--movi-primary);
+      }
+
+      /* Edge style tiles — each tile shows the actual effect on a
+         sample "Aa" so the user picks by what they SEE. */
+      .movi-sub-cust-edge-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 8px;
+      }
+
+      .movi-sub-cust-edge-tile {
+        all: unset;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 12px 6px 10px;
+        border-radius: 10px;
+        /* Always-dark tile background so the white "Aa" sample (which
+           shows the actual edge effect) keeps proper contrast in
+           light theme too. */
+        background: #181a20;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        transition: background var(--movi-transition-fast), border-color var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-edge-tile:hover {
+        background: #22252e;
+        border-color: color-mix(in srgb, var(--movi-primary) 0.5, rgba(255,255,255,0.08));
+      }
+
+      .movi-sub-cust-edge-tile.is-active {
+        background: #22252e;
+        border-color: var(--movi-primary);
+        box-shadow: 0 0 0 1px var(--movi-primary);
+      }
+
+      .movi-sub-cust-edge-tile .movi-sub-cust-edge-name {
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      .movi-sub-cust-edge-tile.is-active .movi-sub-cust-edge-name {
+        color: #FFFFFF;
+      }
+
+      .movi-sub-cust-edge-sample {
+        font-family: 'YouTube Sans', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        font-size: 22px;
+        font-weight: 700;
+        color: #FFFFFF;
+        line-height: 1;
+      }
+
+      .movi-sub-cust-edge-name {
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--movi-text-tertiary);
+        letter-spacing: 0.02em;
+      }
+
+      /* Editable readout (number input + "s" suffix) sitting in the
+         section header. Looks like a flat readout but accepts custom
+         values for fine drift correction. */
+      .movi-sub-cust-shift-input-wrap {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 2px;
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--movi-controls-color) 0.06, transparent);
+        transition: background var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-shift-input-wrap:focus-within {
+        background: color-mix(in srgb, var(--movi-primary) 0.18, transparent);
+        outline: 1px solid color-mix(in srgb, var(--movi-primary) 0.5, transparent);
+      }
+
+      .movi-sub-cust-shift-input {
+        all: unset;
+        width: 5.5ch;
+        text-align: right;
+        font-size: 12px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: var(--movi-primary);
+        cursor: text;
+      }
+
+      /* Hide the spinner buttons on Chromium / Firefox — keyboard or
+         the preset pills are how we want users to nudge values. */
+      .movi-sub-cust-shift-input::-webkit-outer-spin-button,
+      .movi-sub-cust-shift-input::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+      }
+      .movi-sub-cust-shift-input {
+        -moz-appearance: textfield;
+      }
+
+      .movi-sub-cust-shift-input-suffix {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--movi-primary);
+      }
+
+      :host([theme="light"]) .movi-sub-cust-shift-input-wrap {
+        background: rgba(0, 0, 0, 0.06);
+      }
+
+      /* Subtitle-shift controls — five compact buttons in one row.
+         The middle "0" is treated as a soft reset for timing only. */
+      .movi-sub-cust-shift-controls {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 6px;
+      }
+
+      .movi-sub-cust-shift-btn {
+        all: unset;
+        cursor: pointer;
+        text-align: center;
+        padding: 8px 6px;
+        border-radius: 8px;
+        font-size: 12px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: var(--movi-controls-color);
+        background: color-mix(in srgb, var(--movi-controls-color) 0.08, transparent);
+        border: 1px solid color-mix(in srgb, var(--movi-controls-color) 0.1, transparent);
+        transition: background var(--movi-transition-fast), border-color var(--movi-transition-fast), transform var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-shift-btn:hover {
+        background: color-mix(in srgb, var(--movi-primary) 0.16, transparent);
+        border-color: color-mix(in srgb, var(--movi-primary) 0.4, transparent);
+      }
+
+      .movi-sub-cust-shift-btn:active {
+        transform: scale(0.96);
+      }
+
+      .movi-sub-cust-shift-zero {
+        color: var(--movi-text-tertiary);
+      }
+
+      /* Empty-state when no track is selected. */
+      .movi-sub-cust-empty {
+        padding: 28px 12px;
+        text-align: center;
+        font-size: 12px;
+        color: var(--movi-text-tertiary);
+      }
+
+      /* Footer — single, prominent reset action. */
+      .movi-sub-cust-footer {
+        display: flex;
+        justify-content: center;
+        padding-top: 4px;
+        border-top: 1px solid color-mix(in srgb, var(--movi-controls-color) 0.06, transparent);
+        margin-top: 2px;
+        padding-top: 14px;
+      }
+
+      .movi-sub-cust-reset {
+        all: unset;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--movi-controls-color);
+        padding: 8px 16px;
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--movi-controls-color) 0.06, transparent);
+        transition: background var(--movi-transition-fast), color var(--movi-transition-fast);
+      }
+
+      .movi-sub-cust-reset:hover {
+        background: color-mix(in srgb, var(--movi-primary) 0.18, transparent);
+        color: var(--movi-primary);
       }
 
       .movi-subtitle-track-btn {
@@ -6338,7 +8615,7 @@ export class MoviElement extends HTMLElement {
         object-fit: unset;
       }
 
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         .movi-nerd-stats {
           top: 4px;
           left: 4px;
@@ -6596,7 +8873,7 @@ export class MoviElement extends HTMLElement {
         flex-shrink: 0;
       }
 
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         .movi-timeline-panel {
           left: 8px;
           right: 8px;
@@ -6702,7 +8979,134 @@ export class MoviElement extends HTMLElement {
         flex: 1;
       }
 
-      @media (max-width: 640px) {
+      .movi-cues-panel {
+        position: absolute;
+        inset: 0;
+        z-index: 200;
+        background: rgba(0, 0, 0, 0.78);
+        backdrop-filter: blur(24px);
+        -webkit-backdrop-filter: blur(24px);
+        display: flex;
+        flex-direction: column;
+        font-family: 'Inter', -apple-system, sans-serif;
+        color: rgba(255, 255, 255, 0.92);
+        pointer-events: auto;
+      }
+      .movi-cues-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 14px 18px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        flex-shrink: 0;
+      }
+      .movi-cues-title {
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        white-space: nowrap;
+      }
+      .movi-cues-search-wrap {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 12px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        max-width: 380px;
+        margin-left: auto;
+        margin-right: auto;
+      }
+      .movi-cues-search-wrap svg {
+        color: rgba(255, 255, 255, 0.5);
+        flex-shrink: 0;
+      }
+      .movi-cues-search {
+        all: unset;
+        flex: 1;
+        font-size: 13px;
+        color: #fff;
+        font-family: inherit;
+      }
+      .movi-cues-search::placeholder { color: rgba(255, 255, 255, 0.4); }
+      .movi-cues-search::-webkit-search-cancel-button { display: none; }
+      .movi-cues-close {
+        background: none;
+        border: none;
+        color: rgba(255, 255, 255, 0.55);
+        font-size: 24px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 6px;
+        transition: color 0.15s;
+      }
+      .movi-cues-close:hover { color: #fff; }
+      .movi-cues-meta {
+        padding: 6px 18px;
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.45);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        flex-shrink: 0;
+      }
+      .movi-cues-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 4px 8px 12px;
+        scroll-behavior: smooth;
+      }
+      .movi-cues-list::-webkit-scrollbar { width: 8px; }
+      .movi-cues-list::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.12);
+        border-radius: 4px;
+      }
+      .movi-cues-row {
+        display: flex;
+        gap: 12px;
+        padding: 10px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        align-items: flex-start;
+        transition: background 0.12s;
+      }
+      .movi-cues-row:hover { background: rgba(255, 255, 255, 0.06); }
+      .movi-cues-row.is-active {
+        background: color-mix(in srgb, var(--movi-primary) 0.18, transparent);
+      }
+      .movi-cues-row.is-active .movi-cues-row-time {
+        color: var(--movi-primary);
+      }
+      .movi-cues-row-time {
+        font-variant-numeric: tabular-nums;
+        font-size: 12px;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.5);
+        flex-shrink: 0;
+        min-width: 56px;
+        padding-top: 1px;
+      }
+      .movi-cues-row-text {
+        font-size: 13px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .movi-cues-row mark {
+        background: color-mix(in srgb, var(--movi-primary) 0.4, transparent);
+        color: inherit;
+        padding: 0 2px;
+        border-radius: 3px;
+      }
+      .movi-cues-empty {
+        text-align: center;
+        padding: 40px 20px;
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 13px;
+      }
+
+      @container movi-host (max-width: 720px) {
         .movi-shortcuts-panel {
           min-width: unset;
           max-width: unset;
@@ -6814,7 +9218,7 @@ export class MoviElement extends HTMLElement {
         color: rgba(255, 255, 255, 0.8);
       }
 
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         .movi-resume-dialog {
           bottom: 80px;
           padding: 10px 14px;
@@ -6836,7 +9240,7 @@ export class MoviElement extends HTMLElement {
       ======================================== */
 
       /* Mobile devices (up to 640px) */
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         :host {
           --movi-controls-height: var(--movi-controls-height-mobile);
           --movi-btn-size: var(--movi-btn-size-mobile);
@@ -6927,6 +9331,15 @@ export class MoviElement extends HTMLElement {
         
         .movi-volume-slider-container {
           display: none !important;
+        }
+
+        /* When user taps the speaker on mobile, surface the slider */
+        .movi-volume-container.active .movi-volume-slider-container {
+          display: flex !important;
+          width: 80px !important;
+          padding: 8px 8px !important;
+          overflow: visible !important;
+          opacity: 1 !important;
         }
 
         .movi-seek-backward,
@@ -7044,16 +9457,21 @@ export class MoviElement extends HTMLElement {
              position: static !important;
         }
 
-        /* Position menus correctly on mobile */
+        /* Position menus correctly on mobile. Centering goes through
+           --movi-menu-tx so it composes with the animation's translateY
+           + scale instead of overriding them — without the custom-prop
+           split, the .is-open rule's transform reset would knock the
+           menu off-centre the moment it opens. */
         .movi-audio-track-menu,
         .movi-subtitle-track-menu,
         .movi-quality-menu,
         .movi-speed-menu {
+          --movi-menu-tx: -50%;
           position: absolute !important;
           bottom: 100% !important;
           margin-bottom: 15px !important;
           left: 50% !important;
-          transform: translateX(-50%) !important;
+          transform-origin: bottom center !important;
           width: 90% !important;
           max-width: 300px !important;
           /* Constrain height: min of 60% viewport height OR 30% viewport width (fits ~108px on 360px wide 16:9 player, strictly avoiding top clip) */
@@ -7072,10 +9490,70 @@ export class MoviElement extends HTMLElement {
         :host(:fullscreen) .movi-speed-menu {
            max-height: 70vh !important;
         }
+
+        /* On mobile the menu itself scrolls (see overflow-y above) —
+           so the inner list shouldn't carry its own bounded scroll
+           area; collapsing the desktop max-height lets the menu's
+           single scrollbar handle long lists. flex: 0 0 auto stops
+           the list from shrinking inside the column — without it the
+           desktop's flex 1 1 auto + min-height 0 shrunk the list
+           below its content height, and overflow visible then let
+           the items spill past the list box, sitting on top of the
+           footer ("4 audio tracks available" appearing mid-list). */
+        .movi-audio-track-list,
+        .movi-subtitle-track-list {
+          max-height: none !important;
+          overflow-y: visible !important;
+          flex: 0 0 auto !important;
+        }
+
+        /* Subtitle customize panel — compact layout for narrow players. */
+        .movi-sub-cust-panel {
+          padding: 2px 4px 6px;
+          gap: 6px;
+        }
+        .movi-sub-cust-back {
+          padding: 6px 8px;
+          font-size: 12px;
+        }
+        .movi-sub-cust-row {
+          padding: 2px 4px;
+        }
+        .movi-sub-cust-label {
+          font-size: 10px;
+          margin-bottom: 4px;
+        }
+        .movi-sub-cust-options {
+          gap: 3px;
+        }
+        .movi-sub-cust-opt {
+          min-width: 36px;
+          padding: 5px 7px;
+          font-size: 11px;
+          flex: 1 1 calc(20% - 3px);
+        }
+        .movi-sub-cust-swatch {
+          width: 22px;
+          height: 22px;
+          border-width: 2px;
+        }
+        .movi-sub-cust-reset {
+          font-size: 11px;
+          padding: 5px 8px;
+        }
+        /* Header gear stays tappable but trims weight on small players. */
+        .movi-subtitle-customize-btn {
+          width: 26px;
+          height: 26px;
+        }
+        .movi-subtitle-customize-btn svg {
+          width: 14px;
+          height: 14px;
+        }
       }
 
       /* Desktop: Hide More button */
-      @media (min-width: 641px) {
+      @container movi-host (min-width: 721px) {
         .movi-more-btn {
           display: none !important;
         }
@@ -7084,20 +9562,39 @@ export class MoviElement extends HTMLElement {
         }
       }
 
-      
-      /* Tablet devices (641px to 1024px) */
-      @media (min-width: 641px) and (max-width: 1024px) {
+
+      /* Tablet-sized players (721px to 1024px) */
+      @container movi-host (min-width: 721px) and (max-width: 1024px) {
         .movi-controls-bar {
           padding: 14px 18px;
         }
-        
+
         .movi-time {
           font-size: 12px;
         }
+
+        /* Tighten button + gap sizing so all the right-side icons fit
+           within the bar at medium widths — without this, the right
+           icons (loop, fullscreen) clip off the edge. */
+        .movi-btn {
+          width: 40px;
+          height: 40px;
+          padding: 8px;
+        }
+        .movi-btn svg {
+          width: 20px;
+          height: 20px;
+        }
+        .movi-controls-right {
+          gap: 4px;
+        }
+        .movi-controls-left {
+          gap: 4px;
+        }
       }
-      
-      /* Large screens (1025px and above) */
-      @media (min-width: 1025px) {
+
+      /* Large players (1025px and above) */
+      @container movi-host (min-width: 1025px) {
         .movi-controls-bar {
           padding: 16px 24px;
         }
@@ -7226,7 +9723,7 @@ export class MoviElement extends HTMLElement {
       }
 
       /* Mobile loader - smaller size */
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         .movi-loader-container {
           width: 48px;
           height: 48px;
@@ -7322,7 +9819,7 @@ export class MoviElement extends HTMLElement {
       }
       
       /* Mobile center button sizing */
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         .movi-center-play-pause {
           width: 72px;
           height: 72px;
@@ -7350,23 +9847,98 @@ export class MoviElement extends HTMLElement {
 
       /* Subtitle shift is handled via JS in showControls/hideControls */
 
+      /* Full-width anchor row; padding-left set inline by the renderer
+         pushes the inline-block backdrop to the position where the
+         final sentence's centered start would sit. */
+      .movi-subtitle-anchor {
+        display: block;
+        width: 100%;
+        text-align: left;
+        box-sizing: border-box;
+      }
+
+      /* The single rounded backdrop. Inline-block so it hugs its
+         widest line; multi-line cues share ONE backdrop instead of
+         stacking individual boxes per line. The actual backdrop fill
+         is opt-in: only WebVTT tracks get it (see the
+         .movi-subtitle-format-vtt rule below). SRT / embedded text
+         tracks render plain — backdrop on traditional movie subs
+         reads as noise. */
+      .movi-subtitle-block {
+        display: inline-block;
+        max-width: 100%;
+        border-radius: 4px;
+        padding: 4px 12px;
+        text-align: left;
+        box-sizing: border-box;
+        /* Make the block itself clickable while keeping the overlay
+           transparent — clicking the live caption opens the transcript
+           browser, scrolled to the current cue. */
+        pointer-events: auto;
+        cursor: pointer;
+      }
+
+      .movi-subtitle-overlay.movi-subtitle-format-vtt .movi-subtitle-block {
+        background: rgba(
+          var(--movi-sub-bg-rgb, 8, 8, 8),
+          var(--movi-sub-bg-alpha, 0.75)
+        );
+      }
+
       .movi-subtitle-line {
-        color: #FFFFFF;
-        font-family: 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-        font-size: clamp(18px, 3vw, 42px);
+        display: block;
+        color: var(--movi-sub-color, #FFFFFF);
+        font-family: 'YouTube Sans', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        /* Base size scales against the player width via --movi-player-width;
+           the user's customize-panel choice is applied as a multiplier via
+           --movi-sub-size-mult. Defaults to 1 (= 100%). */
+        font-size: calc(clamp(20px, calc(var(--movi-player-width, 100vw) * 0.032), 40px) * var(--movi-sub-size-mult, 1));
         font-weight: 500;
-        line-height: 1.4;
-        text-shadow: 
-          0 0 4px rgba(0, 0, 0, 0.8),
-          0 2px 4px rgba(0, 0, 0, 0.8);
-        margin: 2px 0;
-        padding: 2px 6px;
+        line-height: 1.35;
+        letter-spacing: 0.01em;
+        /* Edge style is user-selectable: drop shadow, outline, raised,
+           or none. Defaults to a single soft shadow. */
+        text-shadow: var(--movi-sub-edge, 0 0 4px rgba(0, 0, 0, 0.85));
+        /* Centre each line within the block. For dialogue cues like
+           "- Long sentence...\n- Short reply." the shorter line otherwise
+           sits flush-left of the wider one and reads as visually
+           unbalanced. VTT karaoke needs a stable left edge for the
+           incremental word reveal — overridden below. */
+        text-align: center;
         white-space: pre-wrap;
         word-wrap: break-word;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
         text-rendering: optimizeLegibility;
-        transform: translateZ(0); /* Force hardware acceleration for better rendering */
+      }
+
+      /* VTT karaoke grows static + new word spans inside a single line;
+         centring would wobble the existing words on every reveal. Keep
+         left-aligned so the karaoke types in from a stable edge. */
+      .movi-subtitle-overlay.movi-subtitle-format-vtt .movi-subtitle-line {
+        text-align: left;
+      }
+
+      /* Words already on screen from the previous cue — paint instantly. */
+      .movi-subtitle-static {
+        opacity: 1;
+      }
+
+      /* Newly-added word(s) — gentle opacity fade only. No translate;
+         lateral slides on every karaoke tick are what was straining the
+         eye. */
+      .movi-subtitle-new {
+        animation: movi-subtitle-word-in 320ms ease-out forwards;
+        will-change: opacity;
+      }
+
+      @keyframes movi-subtitle-word-in {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
       }
 
       /* Context Menu */
@@ -7661,8 +10233,56 @@ export class MoviElement extends HTMLElement {
          margin-left: 8px;
       }
 
+      .movi-quality-label-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .movi-quality-badge {
+        font-size: 9px;
+        font-weight: 700;
+        line-height: 1;
+        padding: 2px 4px;
+        border-radius: 3px;
+        letter-spacing: 0.4px;
+        background: rgba(255, 255, 255, 0.18);
+        color: rgba(255, 255, 255, 0.95);
+        text-transform: uppercase;
+        vertical-align: middle;
+        position: relative;
+        top: -1px;
+      }
+
+      .movi-quality-badge-hd,
+      .movi-quality-badge-4k,
+      .movi-quality-badge-8k {
+        background: rgba(255, 255, 255, 0.18);
+        color: rgba(255, 255, 255, 0.95);
+      }
+
+      .movi-quality-btn {
+        position: relative;
+      }
+
+      .movi-quality-btn-badge {
+        position: absolute;
+        top: 4px;
+        right: 0;
+        font-size: 8px;
+        font-weight: 700;
+        line-height: 1;
+        padding: 2px 3px;
+        border-radius: 3px;
+        letter-spacing: 0.4px;
+        text-transform: uppercase;
+        background: var(--movi-primary);
+        color: #fff;
+        pointer-events: none;
+      }
+
       /* Hide speed/quality menus on mobile by default and position them centrally */
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
          .movi-quality-menu {
             position: fixed;
             bottom: 80px;
@@ -7985,7 +10605,7 @@ export class MoviElement extends HTMLElement {
 
       /* Short / narrow players: shrink the placeholder so it fits above
          the controls bar without clipping into it. */
-      @media (max-width: 640px) {
+      @container movi-host (max-width: 720px) {
         .movi-empty-state {
           padding: 16px 16px calc(var(--movi-controls-height) + 12px);
         }
@@ -8182,6 +10802,21 @@ export class MoviElement extends HTMLElement {
           width: 26px !important;
           height: 26px !important;
         }
+
+        /* Tighter OSD on very narrow viewports — at 480px the 16px base
+           font wraps the track label across two lines and the pill grows
+           taller than the video. */
+        .movi-osd-container {
+          padding: 5px 12px;
+          gap: 6px;
+        }
+        .movi-osd-icon svg {
+          width: 16px;
+          height: 16px;
+        }
+        .movi-osd-text {
+          font-size: 12px;
+        }
       }
 
       /* Mobile Responsiveness for Context Menu */
@@ -8206,7 +10841,22 @@ export class MoviElement extends HTMLElement {
         }
         
         .movi-osd-container {
-            top: 20px; 
+            top: 20px;
+            /* Scale the OSD pill so a multi-line label like "HDHub4u.Tv
+               [ENG]" doesn't end up taller than a small embed's video
+               area. Default sizing assumes a desktop viewport. */
+            padding: 6px 14px;
+            gap: 8px;
+            border-radius: 22px;
+            max-width: calc(100% - 32px);
+        }
+        .movi-osd-icon svg {
+            width: 18px;
+            height: 18px;
+        }
+        .movi-osd-text {
+            font-size: 13px;
+            line-height: 1.25;
         }
       }
     `;
@@ -8228,6 +10878,16 @@ export class MoviElement extends HTMLElement {
       this.player = null;
     }
 
+    // Hide the canvas while the GL context is gone — otherwise the user sees
+    // the last (now-corrupt) GPU framebuffer flash through as garbled pixels
+    // before the loading spinner takes over. visibility:hidden keeps layout.
+    this.canvas.style.visibility = "hidden";
+
+    // Show the captured snapshot as a poster overlay (no-op if visibility
+    // change already activated it). Covers cases where the context is lost
+    // without a preceding visibility-hidden event.
+    this._showSnapshotPoster();
+
     this.isLoading = true;
     this.updateControlsState();
     this.updateLoadingIndicator("loading");
@@ -8235,15 +10895,35 @@ export class MoviElement extends HTMLElement {
 
   private handleContextRestored = () => {
     Logger.info(TAG, "WebGL context restored - recovering playback");
+    // handleContextLost set isLoading=true to show the spinner; clear it so
+    // initializePlayer's early-return guard doesn't bail before re-creating
+    // the player (otherwise the spinner stays forever after a long minimize).
+    this.isLoading = false;
     this.initializePlayer().then(() => {
       if (this.player) {
         if (this._contextLostTime > 0) {
           this.player.seek(this._contextLostTime).catch(() => {});
         }
         if (this._contextLostPlaying) {
-          this.player.play().catch(() => {});
+          this.player.play().catch(() => {
+            // Mobile browsers block autoplay after long backgrounding because
+            // the prior user gesture has expired. Force paused state so the UI
+            // shows the play button and the user can tap to resume.
+            if (this.player) this.player.pause();
+          });
         }
       }
+      // Reveal the canvas again — a fresh frame has been rendered (poster
+      // seek inside initializePlayer or the seek above), so no garbled
+      // framebuffer left behind.
+      this.canvas.style.visibility = "";
+      // Restore the poster overlay to whatever it was before context loss
+      // (user-supplied poster, or hidden if there wasn't one).
+      this._hideSnapshotPoster();
+      // Clear recovery markers so the next initializePlayer (e.g. user picks
+      // a new file) doesn't suppress the resume dialog or skip the seek.
+      this._contextLostTime = 0;
+      this._contextLostPlaying = false;
     });
   };
 
@@ -8263,6 +10943,11 @@ export class MoviElement extends HTMLElement {
     if (volumeAttr) this._volume = parseFloat(volumeAttr);
     const playbackRateAttr = this.getAttribute("playbackrate");
     if (playbackRateAttr) this._playbackRate = parseFloat(playbackRateAttr);
+    const subtitleDelayAttr = this.getAttribute("subtitledelay");
+    if (subtitleDelayAttr) {
+      const parsed = parseFloat(subtitleDelayAttr);
+      if (Number.isFinite(parsed)) this._subtitleDelay = parsed;
+    }
     this._ambientMode = this.hasAttribute("ambientmode");
     this._ambientWrapper = this.getAttribute("ambientwrapper");
     const objectFitAttr = this.getAttribute("objectfit");
@@ -8340,21 +11025,58 @@ export class MoviElement extends HTMLElement {
       this.handleContextRestored,
     );
 
+    // Capture the last visible frame just before the tab is hidden — by the
+    // time webglcontextlost fires the GPU buffer is already gone, so snapshot
+    // proactively. Used as a poster during context-loss recovery.
+    document.addEventListener("visibilitychange", this._onVisibilityChange);
+
     // Initial state: disable controls except volume
     this.updateControlsState();
     this.updatePlayPauseIcon();
     this.updateFastSeek();
     this.updatePoster();
 
+    // Publish the player's own width as a CSS custom property so
+    // descendant CSS (subtitle font sizing in particular) can scale
+    // against the player rather than the viewport.
+    const publishPlayerWidth = () => {
+      const w = this.clientWidth;
+      const h = this.clientHeight;
+      if (w > 0) this.style.setProperty("--movi-player-width", `${w}px`);
+      // Track menus (subtitle / audio / quality) cap themselves at this
+      // height so the panel never grows taller than the player itself.
+      if (h > 0) this.style.setProperty("--movi-player-height", `${h}px`);
+    };
+    publishPlayerWidth();
+
+    // Hydrate persisted subtitle appearance settings, then let any
+    // explicit attributes override (precedence: attribute >
+    // localStorage > built-in defaults). Finally push the resulting
+    // values onto the host element as CSS variables so the shadow-DOM
+    // subtitle styles pick them up immediately.
+    this.loadSubtitleSettings();
+    for (const attr of [
+      "subtitlesize",
+      "subtitlecolor",
+      "subtitlebg",
+      "subtitleedge",
+    ]) {
+      const val = this.getAttribute(attr);
+      if (val !== null) this.applySubtitleAttribute(attr, val);
+    }
+    this.applySubtitleSettings();
+
     // Listen for resize events
     if (typeof ResizeObserver !== "undefined") {
       const resizeObserver = new ResizeObserver(() => {
+        publishPlayerWidth();
         this.updateCanvasSize();
       });
       resizeObserver.observe(this);
     } else {
       // Fallback for browsers without ResizeObserver
       window.addEventListener("resize", () => {
+        publishPlayerWidth();
         this.updateCanvasSize();
       });
     }
@@ -8381,6 +11103,12 @@ export class MoviElement extends HTMLElement {
           src: el.getAttribute("src") || "",
           type: el.getAttribute("type") || undefined,
           kind: el.getAttribute("kind") || undefined,
+          height: parseInt(el.getAttribute("data-height") || "", 10) || 0,
+          label: el.getAttribute("data-label") || el.getAttribute("label") || "",
+          fps: parseInt(el.getAttribute("data-fps") || "", 10) || 0,
+          badge: el.getAttribute("data-badge") || "",
+          srclang: el.getAttribute("srclang") || el.getAttribute("lang") || "",
+          isDefault: el.hasAttribute("data-default") || el.hasAttribute("default"),
         })).filter((s) => s.src);
 
         // Separate audio sources (kind="audio") from video sources
@@ -8388,15 +11116,93 @@ export class MoviElement extends HTMLElement {
         const videoSources = allSources.filter((s) => s.kind !== "audio");
 
         if (videoSources.length > 0) {
-          const picked = this.pickSource(videoSources);
-          this._src = picked ? picked.src : videoSources[0].src;
+          // Capture quality metadata for non-HLS quality menu
+          this._videoQualities = videoSources
+            .filter((s) => s.height > 0 || s.label)
+            .map((s) => ({
+              src: s.src,
+              type: s.type,
+              height: s.height,
+              label: s.label || (s.height ? `${s.height}p` : ""),
+              fps: s.fps || undefined,
+              badge: s.badge || undefined,
+            }))
+            .sort((a, b) => b.height - a.height);
+
+          // Prefer explicit data-default, otherwise pickSource heuristic
+          const defaultSource = videoSources.find((s) => s.isDefault);
+          if (defaultSource) {
+            this._src = defaultSource.src;
+          } else {
+            const picked = this.pickSource(videoSources);
+            this._src = picked ? picked.src : videoSources[0].src;
+          }
         }
 
+        // Multi-language audio: when more than one <source kind="audio"> is
+        // declared with `srclang`/`label`, treat them as parallel language
+        // tracks so the player surfaces the audio-language menu. Otherwise
+        // fall back to the legacy single split-audio source path.
         if (audioSources.length > 0) {
-          this._audioSrc = audioSources[0].src;
+          const langed = audioSources.filter((s) => s.srclang || s.label);
+          if (audioSources.length > 1 && langed.length >= 2) {
+            this._audioTracks = audioSources.map((s, i) => ({
+              src: s.src,
+              type: s.type,
+              lang: s.srclang || `track-${i}`,
+              label: s.label || s.srclang || `Track ${i + 1}`,
+            }));
+            // Pick a default for initial playback. Honour `default` /
+            // `data-default` attributes; otherwise prefer the first track
+            // matching the page locale, else the first one.
+            const explicitDefault = audioSources.findIndex((s) => s.isDefault);
+            const localePrefix = (navigator.language || "en").slice(0, 2).toLowerCase();
+            const localeMatch = audioSources.findIndex(
+              (s) => s.srclang && s.srclang.toLowerCase().startsWith(localePrefix),
+            );
+            const idx =
+              explicitDefault >= 0
+                ? explicitDefault
+                : localeMatch >= 0
+                  ? localeMatch
+                  : 0;
+            this._audioSrc = audioSources[idx].src;
+          } else {
+            this._audioSrc = audioSources[0].src;
+          }
         }
       }
     }
+
+    // Parse <track> child elements (Video.js / standard <video>-style) into
+    // external subtitle tracks. Lets integrators declare captions
+    // declaratively without having to wire up the JS source setter.
+    const trackEls = this.querySelectorAll(
+      'track[kind="subtitles"], track[kind="captions"], track:not([kind])',
+    );
+    if (trackEls.length > 0 && this._subtitleTracks.length === 0) {
+      this._subtitleTracks = Array.from(trackEls)
+        .map((el) => ({
+          src: el.getAttribute("src") || "",
+          lang: el.getAttribute("srclang") || el.getAttribute("lang") || "",
+          label:
+            el.getAttribute("label") ||
+            el.getAttribute("srclang") ||
+            "Subtitle",
+          format: (el.getAttribute("data-format") as
+            | "vtt"
+            | "srt"
+            | undefined) || "vtt",
+        }))
+        .filter((t) => t.src);
+    }
+
+    // Re-evaluate the poster overlay now that _src may have been populated
+    // from <source> children. updatePoster() ran earlier in connectedCallback
+    // (when _src was still null) and short-circuited because hasSource was
+    // false; without this second pass the explicit poster="…" attribute
+    // never paints when the player is loaded via <source> tags.
+    this.updatePoster();
 
     // Automatically initialize player if src is set or encrypted mode
     if (this._src || (this._encrypted && this._tokenUrl && this._videoUrl)) {
@@ -8494,6 +11300,7 @@ export class MoviElement extends HTMLElement {
       "webglcontextrestored",
       this.handleContextRestored,
     );
+    document.removeEventListener("visibilitychange", this._onVisibilityChange);
     // Cleanup nerd stats interval
     if (this.nerdStatsInterval) {
       clearInterval(this.nerdStatsInterval);
@@ -8650,6 +11457,10 @@ export class MoviElement extends HTMLElement {
             }
           }
 
+          // Source changed — re-evaluate poster visibility (it's gated on
+          // having an actual source so it doesn't paint in the empty state).
+          this.updatePoster();
+
           // If src changed and element is connected, reload
           if (this.isConnected && this._src && this._src !== oldSrc) {
             this.load();
@@ -8677,11 +11488,12 @@ export class MoviElement extends HTMLElement {
         if (this.video) {
           this.video.muted = this._muted;
         }
-        if (this._autoplay) {
-          this.play();
-        } else if (this._startAt > 0 && this.player) {
-          // Seek to start time if set
-          this.player.seek(this._startAt);
+        // Just propagate the muted state. Triggering play()/seek() here makes
+        // every M-key toggle resume from pause, and was only ever meant for
+        // the autoplay-muted → unmute startup flow (handled in
+        // initializePlayer / restoreState instead).
+        if (this.player) {
+          this.updateMuted();
         }
         break;
       case "playsinline":
@@ -8696,6 +11508,16 @@ export class MoviElement extends HTMLElement {
       case "poster":
         this._poster = newValue || "";
         this.updatePoster();
+        break;
+      case "subtitlesize":
+      case "subtitlecolor":
+      case "subtitlebg":
+      case "subtitleedge":
+        // Mutate _subtitleSettings via the shared parser, then push the
+        // resulting CSS variables onto the host. Attributes win over
+        // localStorage values for the lifetime of this element.
+        this.applySubtitleAttribute(name, newValue);
+        this.applySubtitleSettings();
         break;
       case "postertime":
         this._posterTime = newValue;
@@ -8725,6 +11547,22 @@ export class MoviElement extends HTMLElement {
           this._playbackRate = parseFloat(newValue);
           if (this.player) {
             this.updatePlaybackRate();
+          }
+        }
+        break;
+      case "subtitledelay":
+        if (newValue !== null) {
+          const parsed = parseFloat(newValue);
+          if (Number.isFinite(parsed)) {
+            this._subtitleDelay = parsed;
+            if (this.player) {
+              this.updateSubtitleDelay();
+            }
+          }
+        } else {
+          this._subtitleDelay = 0;
+          if (this.player) {
+            this.updateSubtitleDelay();
           }
         }
         break;
@@ -8800,6 +11638,9 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  private _lastCanvasW: number = 0;
+  private _lastCanvasH: number = 0;
+
   private updateCanvasSize() {
     const widthAttr = this.getAttribute("width");
     const heightAttr = this.getAttribute("height");
@@ -8818,21 +11659,25 @@ export class MoviElement extends HTMLElement {
     }
 
     if (width > 0 && height > 0) {
-      // Update canvas dimensions
-      // Update canvas dimensions
-      this.canvas.width = width;
-      this.canvas.height = height;
+      // Coalesce burst resizes (e.g. ResizeObserver during fullscreen
+      // animation). Setting canvas.width clears the WebGL framebuffer
+      // and CanvasRenderer.resize does heavy CSS/style writes — running
+      // it many times per transition stalls the presentation loop.
+      if (width === this._lastCanvasW && height === this._lastCanvasH) {
+        return;
+      }
+      this._lastCanvasW = width;
+      this._lastCanvasH = height;
 
-      // CSS layout is handled by CanvasRenderer and style.width='100%' default
-      // Removing manual pixel overrides prevents conflict with rotation logic
-
-      // Update video dimensions
-      this.video.width = width;
-      this.video.height = height;
-
-      // Reconfigure video renderer with new canvas dimensions
       if (this.player) {
+        // CanvasRenderer.resize() owns canvas.width/height (it accounts
+        // for rotation). Setting them here too clears the framebuffer a
+        // second time on every resize.
         this.player.resizeCanvas(width, height);
+      } else {
+        // Pre-init: keep buffer dims in sync so toDataURL etc. work.
+        this.canvas.width = width;
+        this.canvas.height = height;
       }
     }
   }
@@ -8841,8 +11686,10 @@ export class MoviElement extends HTMLElement {
     if (this.player) {
       // When muted, disable audio track processing (saves CPU)
       this.player.setMuted(this._muted);
-      this.updateVolumeIcon();
     }
+    // Update icon regardless of player presence so UI reflects state even
+    // before src is set / player is initialized.
+    this.updateVolumeIcon();
   }
 
   private updateVolume() {
@@ -8871,9 +11718,15 @@ export class MoviElement extends HTMLElement {
       // We add a check for timestamp to avoid showing on initial page load if we had a persistent volume setter
       // For now, simpler is better: if connected and player is ready
       // AND checks if audio tracks exist before showing OSD
-      if (this.player && this.player.getAudioTracks().length > 0) {
+      if (this.player && this.player.hasAudibleSource()) {
         this.showOSD(icon, `${volumePercent}%`);
       }
+    }
+  }
+
+  private updateSubtitleDelay() {
+    if (this.player) {
+      this.player.setSubtitleDelay(this._subtitleDelay);
     }
   }
 
@@ -8905,6 +11758,31 @@ export class MoviElement extends HTMLElement {
 
   private updateFitMode() {
     if (this.player) {
+      // Sync canvas/renderer dims to the player's CURRENT visual size
+      // BEFORE we flip the fit mode. setFitMode kicks off an animated
+      // re-fit that interpolates against containerWidth/containerHeight
+      // — if those are stale (e.g. the player CSS-resized but no
+      // ResizeObserver tick fired since), the animation aims at the
+      // wrong target and the visible result snaps to the right size
+      // only on the next window resize. By resizing first, the
+      // animation runs against fresh dims AND the eventual settle
+      // lands at the correct fit.
+      const rect = this.getBoundingClientRect();
+      const w =
+        document.fullscreenElement === this ? window.innerWidth : rect.width;
+      const h =
+        document.fullscreenElement === this ? window.innerHeight : rect.height;
+      if (w > 0 && h > 0) {
+        // Bypass the dedup guard so resize fires even when the box
+        // size is unchanged (the cached containerWidth on the
+        // renderer might still be wrong).
+        this._lastCanvasW = -1;
+        this._lastCanvasH = -1;
+        this.player.resizeCanvas(w, h);
+        this._lastCanvasW = w;
+        this._lastCanvasH = h;
+      }
+
       if (this._objectFit === "control") {
         this.player.setFitMode(this._currentFit);
       } else {
@@ -8912,14 +11790,38 @@ export class MoviElement extends HTMLElement {
       }
     }
 
+    if (this.posterElement) {
+      this.posterElement.style.objectFit = this.posterObjectFit();
+    }
+
     // Ensure icon matches the state immediately
     this.updateAspectRatioIcon();
+  }
+
+  // CSS object-fit only supports contain/cover/fill/none/scale-down. Map our
+  // custom modes (zoom, control) to the closest visual match for the poster
+  // overlay, since the canvas-side custom math doesn't apply to a plain <img>.
+  private posterObjectFit(): string {
+    const fit = this._objectFit === "control" ? this._currentFit : this._objectFit;
+    if (fit === "zoom") return "cover";
+    if (fit === "fill") return "fill";
+    if (fit === "cover") return "cover";
+    return "contain";
   }
 
   /**
    * Automatically create and initialize MoviPlayer
    */
   private async initializePlayer(): Promise<void> {
+    // Re-run the security-header check before any FFmpeg init. load() resets
+    // _isUnsupported on every source change, which would otherwise let a
+    // non-isolated context (e.g. embed iframe inside a third-party page that
+    // doesn't set COOP+COEP) reach FFmpeg and surface a cryptic
+    // "Failed to open media: Timeout at 0" instead of the proper
+    // "Security Headers Missing" diagnostic.
+    this.checkSecurityHeaders();
+    if (this._isUnsupported) return;
+
     // If encrypted mode, use loadEncrypted instead
     if (this._encrypted && this._tokenUrl && this._videoUrl && !this.isLoading && !this.player) {
       try {
@@ -9030,6 +11932,16 @@ export class MoviElement extends HTMLElement {
       Logger.info(TAG, `Initializing MoviPlayer (${mode} Mode)`);
       this.player = new MoviPlayer(playerConfig);
 
+      // Hand off any audio element preserved across a quality switch BEFORE
+      // init() so setupNativeAudio reuses it instead of allocating a fresh
+      // (and autoplay-blocked) Audio element.
+      if (this._carryAudioEl) {
+        try {
+          (this.player as any).adoptNativeAudio?.(this._carryAudioEl);
+        } catch {}
+        this._carryAudioEl = null;
+      }
+
       // In DRM mode, use HLS wrapper's video element directly
       if (playerConfig.drm) {
         const hlsVideo = this.player.getHLSVideoElement();
@@ -9097,6 +12009,7 @@ export class MoviElement extends HTMLElement {
       this.updateVolume();
       this.updateMuted(); // Apply muted state before autoplay
       this.updatePlaybackRate();
+      this.updateSubtitleDelay();
       this.updateCanvasSize(); // Ensure canvas size is synced after load overwrites
       this.updateFitMode();
       if (this.player) {
@@ -9117,8 +12030,11 @@ export class MoviElement extends HTMLElement {
         await this.player.seek(this._startAt).catch((e: unknown) => {
           Logger.warn(TAG, "Failed to seek to start time", e);
         });
-      } else if (this._resume && this.player) {
-        // Show resume dialog if saved position exists
+      } else if (this._resume && this.player && this._contextLostTime === 0) {
+        // Show resume dialog if saved position exists.
+        // Skip during WebGL context-loss recovery — handleContextRestored will
+        // seek directly to _contextLostTime, so prompting "Resume from X?" is
+        // redundant noise (and would race the silent recovery seek).
         const savedTime = this.getResumePosition();
         if (savedTime > 2 && savedTime < this.duration - 5) {
           this.showResumeDialog(savedTime);
@@ -9297,6 +12213,14 @@ export class MoviElement extends HTMLElement {
       }
       // Hide poster on state change to playing
       if (state === "playing" && this.posterElement) {
+        // Drop the frozen-frame snapshot overlay used during quality switch
+        // so the live canvas underneath is visible again.
+        if (this._qualitySwitchInProgress) {
+          this._hideSnapshotPoster();
+          this._qualitySwitchInProgress = false;
+          this._switchResumeTime = 0;
+          this._switchResumeDuration = 0;
+        }
         this.posterElement.style.display = "none";
       }
 
@@ -9308,6 +12232,12 @@ export class MoviElement extends HTMLElement {
       if (state === "playing") {
         this.dispatchEvent(new Event("play"));
         this.showControls();
+        // Reset ambient sampling cadence on resume — the adaptive backoff
+        // can ratchet up to ~2s during seek/decode-recovery and would take
+        // tens of seconds to shrink back via the per-sample 0.8x recovery.
+        if (this._ambientMode) {
+          this._ambientSampleInterval = 100;
+        }
         // Update Media Session metadata with clean title
         if ("mediaSession" in navigator && this._title) {
           navigator.mediaSession.metadata = new MediaMetadata({
@@ -9348,6 +12278,14 @@ export class MoviElement extends HTMLElement {
     this.player.on("timeUpdate", timeUpdateHandler);
     this.eventHandlers.set("timeUpdate", () =>
       this.player?.off("timeUpdate", timeUpdateHandler),
+    );
+
+    const fileRevokedHandler = (info: { offset: number; length: number; reason: string }) => {
+      this.dispatchEvent(new CustomEvent("filerevoked", { detail: info, bubbles: true, composed: true }));
+    };
+    this.player.on("filerevoked", fileRevokedHandler);
+    this.eventHandlers.set("filerevoked", () =>
+      this.player?.off("filerevoked", fileRevokedHandler),
     );
 
     const errorHandler = (error: unknown) => {
@@ -9605,10 +12543,15 @@ export class MoviElement extends HTMLElement {
         centerPlayIcon?.style.setProperty("display", "none");
         centerPauseIcon?.style.setProperty("display", "block");
 
-        // Only show if controls are visible
-        const controlsHidden = this.controlsContainer?.classList.contains(
-          "movi-controls-hidden",
-        );
+        // Only show if controls are enabled AND currently visible.
+        // Embeds that opt out of the controls bar entirely
+        // (controls={false} on the host attribute) shouldn't get a
+        // floating center play/pause either — Shorts-style hosts
+        // surface their own actions UI.
+        const controlsDisabled = !this._controls
+        const controlsHidden =
+          controlsDisabled ||
+          this.controlsContainer?.classList.contains("movi-controls-hidden")
         if (!controlsHidden) {
           requestAnimationFrame(() => {
             centerPlayPauseBtn.classList.add("movi-center-visible");
@@ -9737,7 +12680,7 @@ export class MoviElement extends HTMLElement {
         progressFilled.style.width = `${percent}%`;
       }
       if (progressHandle) {
-        progressHandle.style.left = `${Math.max(1, percent)}%`;
+        progressHandle.style.left = `${percent}%`;
       }
 
       // Buffer draws from 0 to bufferEnd; the filled bar overlays it on top
@@ -10143,6 +13086,11 @@ export class MoviElement extends HTMLElement {
   private startAmbientColorSampling(): void {
     if (this._ambientRafId !== null) return;
 
+    // Reset adaptive interval — a previously-throttled session may have left
+    // it ratcheted up to 2s, which would make ambient appear "frozen" until
+    // the per-sample recovery slowly walked it back down.
+    this._ambientSampleInterval = 100;
+
     // Create helper canvas if needed for performance optimization
     if (!this._ambientSampleCanvas) {
       this._ambientSampleCanvas = document.createElement("canvas"); // Not attached to DOM
@@ -10158,7 +13106,11 @@ export class MoviElement extends HTMLElement {
       // If software decoding is active, pause ambient sampling to save main thread cycles
       // This is crucial for CPU-heavy 4K software decoding
       const isSoftware = this.player?.isSoftwareDecoding() ?? false;
-      if (isSoftware) {
+      // Also skip during seek/buffering — the renderer is recovering and any
+      // canvas readback contends with frame presentation, magnifying stutter.
+      const playerState = this.player?.getState();
+      const isRecovering = playerState === "seeking" || playerState === "buffering";
+      if (isSoftware || isRecovering) {
         this._lastAmbientSampleTime = timestamp; // Keep advancing time but skip work
         this._ambientRafId = requestAnimationFrame(loop);
         return;
@@ -10188,11 +13140,14 @@ export class MoviElement extends HTMLElement {
               `Ambient sampling taking too long (${duration.toFixed(1)}ms), slowing down to ${this._ambientSampleInterval.toFixed(0)}ms`,
             );
           }
-        } else if (duration < 2 && this._ambientSampleInterval > 100) {
-          // If very fast, we can speed up slightly, but cap at 10fps (100ms) as ambient doesn't need 60fps
+        } else if (duration < 5 && this._ambientSampleInterval > 100) {
+          // If reasonably fast (<5ms), shrink interval. Threshold was 2ms but
+          // GPU readback variance means a healthy machine rarely dips that
+          // low, so the interval would ratchet up forever after one slow
+          // frame. 5ms still leaves ample headroom on a 16ms (60Hz) budget.
           this._ambientSampleInterval = Math.max(
             100,
-            this._ambientSampleInterval * 0.9,
+            this._ambientSampleInterval * 0.8,
           );
         }
       }
@@ -10400,6 +13355,8 @@ export class MoviElement extends HTMLElement {
       this._src = value;
       // Remove the src attribute if it was a string
       this.removeAttribute("src");
+      // updatePoster gates on hasSource — re-evaluate now that _src is set.
+      this.updatePoster();
       // Re-initialize player if already connected
       if (this.isConnected) {
         this.initializePlayer();
@@ -11107,6 +14064,12 @@ export class MoviElement extends HTMLElement {
     const shadowRoot = this.shadowRoot;
     if (!shadowRoot) return;
 
+    // Skip when the player is already at (or very close to) the saved position.
+    // Happens after background-pause: state is preserved at exactly the saved
+    // time, and a "Resume from X?" prompt at the same X is pointless noise.
+    const currentTime = this.player ? this.player.getCurrentTime() : 0;
+    if (Math.abs(savedTime - currentTime) < 3) return;
+
     const dialog = shadowRoot.querySelector(".movi-resume-dialog") as HTMLElement;
     if (!dialog) return;
 
@@ -11511,6 +14474,32 @@ export class MoviElement extends HTMLElement {
     this.dispatchEvent(new CustomEvent("ratechange", { detail: { playbackRate: this._playbackRate } }));
   }
 
+  get subtitleDelay(): number {
+    return this._subtitleDelay;
+  }
+
+  set subtitleDelay(value: number) {
+    if (!Number.isFinite(value)) return;
+    this._subtitleDelay = value;
+    this.setAttribute("subtitledelay", this._subtitleDelay.toString());
+    this.updateSubtitleDelay();
+    this.dispatchEvent(
+      new CustomEvent("subtitledelaychange", {
+        detail: { subtitleDelay: this._subtitleDelay },
+      }),
+    );
+  }
+
+  /** VLC-style API alias from the feature request issue. */
+  setSubtitleDelay(seconds: number): void {
+    this.subtitleDelay = seconds;
+  }
+
+  /** VLC-style API alias from the feature request issue. */
+  getSubtitleDelay(): number {
+    return this._subtitleDelay;
+  }
+
   get ambientMode(): boolean {
     return this._ambientMode;
   }
@@ -11545,37 +14534,62 @@ export class MoviElement extends HTMLElement {
   }
 
   get currentTime(): number {
+    // While a quality switch is in flight the new player has been created
+    // but its clock hasn't been seeked yet, so getCurrentTime() reads 0 and
+    // the UI flashes "00:00". Return the captured pre-switch time until the
+    // restore step seeks the new clock back to the right position.
+    if (this._qualitySwitchInProgress && this._switchResumeTime > 0) {
+      const liveTime = this.player?.getCurrentTime() || 0;
+      // Once the new clock has actually advanced past 0 (post-seek), trust
+      // it again — guards against permanently masking the real time if the
+      // safety-timeout fires before "playing".
+      if (liveTime > 0.05) return liveTime;
+      return this._switchResumeTime;
+    }
     return this.player?.getCurrentTime() || 0;
   }
 
   set currentTime(value: number) {
-    if (this.player) {
-      const state = this.player.getState();
-      Logger.info(TAG, `currentTime setter: value=${value.toFixed(2)}, state=${state}, isSeeking=${this.isSeeking}`);
-      if (
-        state === "ready" ||
-        state === "playing" ||
-        state === "paused" ||
-        state === "ended" ||
-        state === "seeking" ||
-        state === "buffering"
-      ) {
-        this.isSeeking = true;
-        this.player
-          .seek(value)
-          .then(() => {
-            Logger.info(TAG, `Seek resolved: value=${value.toFixed(2)}, newState=${this.player?.getState()}`);
-          })
-          .catch((error) => {
-            Logger.error(TAG, `Seek error: value=${value.toFixed(2)}`, error);
-          })
-          .finally(() => {
-            this.isSeeking = false;
-          });
-      } else {
-        Logger.warn(TAG, `Seek blocked — state=${state} not allowed`);
-      }
+    if (!this.player) return;
+    const state = this.player.getState();
+    Logger.info(TAG, `currentTime setter: value=${value.toFixed(2)}, state=${state}, isSeeking=${this.isSeeking}`);
+    if (
+      state !== "ready" &&
+      state !== "playing" &&
+      state !== "paused" &&
+      state !== "ended" &&
+      state !== "seeking" &&
+      state !== "buffering"
+    ) {
+      Logger.warn(TAG, `Seek blocked — state=${state} not allowed`);
+      return;
     }
+
+    // Coalesce: a previous seek is still running. Stash the latest target and
+    // bail. The in-flight seek's finally() will pick up the latest target,
+    // collapsing any number of intermediate sets into one tail seek.
+    if (this.isSeeking) {
+      this.pendingSeekTarget = value;
+      return;
+    }
+
+    this.isSeeking = true;
+    this.player
+      .seek(value)
+      .then(() => {
+        Logger.info(TAG, `Seek resolved: value=${value.toFixed(2)}, newState=${this.player?.getState()}`);
+      })
+      .catch((error) => {
+        Logger.error(TAG, `Seek error: value=${value.toFixed(2)}`, error);
+      })
+      .finally(() => {
+        this.isSeeking = false;
+        if (this.pendingSeekTarget !== null) {
+          const next = this.pendingSeekTarget;
+          this.pendingSeekTarget = null;
+          this.currentTime = next;
+        }
+      });
   }
 
   get renderer(): RendererType {
@@ -11681,15 +14695,29 @@ export class MoviElement extends HTMLElement {
   }
 
   private updatePoster() {
+    // Only show the poster when there's actually a media source to back it.
+    // Without this gate, setting poster="..." paints the overlay even in the
+    // empty "No Video" state, which looks like a broken image.
+    const hasSource = !!this._src || (this._encrypted && !!this._videoUrl);
+    if (!hasSource) {
+      this.posterElement.style.display = "none";
+      return;
+    }
+    // While a quality switch is in flight the snapshot-poster mechanism owns
+    // the overlay (it's pinned to the last canvas frame). Bail out so we
+    // don't overwrite its src with the static thumbnail.
+    if (this._qualitySwitchInProgress && this._snapshotPosterActive) {
+      return;
+    }
     if (this._poster) {
       this.posterElement.src = this._poster;
       this.posterElement.style.display = "block";
-      this.posterElement.style.objectFit = this._objectFit || "contain";
+      this.posterElement.style.objectFit = this.posterObjectFit();
     } else if (this._generatedPosterUrl) {
       // Fall back to the postertime-generated poster if no explicit URL.
       this.posterElement.src = this._generatedPosterUrl;
       this.posterElement.style.display = "block";
-      this.posterElement.style.objectFit = this._objectFit || "contain";
+      this.posterElement.style.objectFit = this.posterObjectFit();
     } else {
       this.posterElement.style.display = "none";
     }
@@ -12121,7 +15149,15 @@ export class MoviElement extends HTMLElement {
   }
 
   get duration(): number {
-    return this.player?.getDuration() || 0;
+    const live = this.player?.getDuration() || 0;
+    // While a quality switch is in flight the new player's mediaInfo isn't
+    // populated yet so getDuration() returns 0 — fall back to the cached
+    // pre-switch duration. (Quality variants share the same length, so this
+    // is always correct.)
+    if (this._qualitySwitchInProgress && this._switchResumeDuration > 0 && live <= 0) {
+      return this._switchResumeDuration;
+    }
+    return live;
   }
 
   get paused(): boolean {

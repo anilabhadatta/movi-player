@@ -55,6 +55,7 @@ All events from `PlayerEventMap`:
 | `frame`                | `DecodedVideoFrame`      | Video frame decoded (advanced)             |
 | `audio`                | `DecodedAudioFrame`      | Audio frame decoded (advanced)             |
 | `subtitle`             | `SubtitleCue`            | Subtitle cue active                        |
+| `filerevoked`          | `{ offset, length, reason }` | `FileSource` handle was revoked by the browser (mobile background / memory pressure) |
 
 ## Lifecycle Events
 
@@ -484,8 +485,11 @@ The custom element re-exposes player activity as DOM events so you can wire `add
 | `subtitleTrackChange`  | —                                    | Active subtitle track switched (note camelCase)    |
 | `trackschange`         | `Track[]`                            | Available tracks list updated                      |
 | `fullscreenchange`     | `{ fullscreen: boolean }`            | Player entered/exited fullscreen                   |
+| `movi-fullscreen-request` | —                                 | **Cancelable** — fires before `requestFullscreen()`. `preventDefault()` blocks it so a host can take over via [`setHostFullscreen()`](./element.md#sethostfullscreen-active-boolean-void) |
 | `pipchange`            | `{ pip: boolean }`                   | Picture-in-Picture window opened/closed            |
 | `qualitychange`        | `{ trackId: number }`                | Active video quality / track switched              |
+| `subtitledelaychange`  | `{ subtitleDelay: number }`          | Subtitle offset changed via property/attribute     |
+| `filerevoked`          | `{ offset, length, reason }`         | Underlying `File` handle was revoked by the browser (mobile background / memory pressure). Prompt the user to re-pick. |
 
 ::: tip Casing note
 `subtitleTrackChange` keeps camelCase for backward compatibility while every other custom event uses lowercase. If you're listening for both `audiotrackchange` and subtitle changes, mind the casing.

@@ -1,13 +1,25 @@
-# Movi Player
+<div align="center">
 
-Play any video format directly in the browser. No transcoding, no server processing.
+<img src="docs/images/banner.png" alt="Movi Player" width="100%" />
 
-[![npm](https://img.shields.io/npm/v/movi-player.svg)](https://www.npmjs.com/package/movi-player)
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+### Play any video format directly in the browser.
+##### No transcoding. No server processing. Just `<movi-player src="video.mkv" controls>`.
 
-[Documentation](https://mrujjwalg.github.io/movi-player/) | [Live Demo](https://movi-player-examples.vercel.app/element.html) | [Examples](https://github.com/MrUjjwalG/movi-player-examples)
+[![npm version](https://img.shields.io/npm/v/movi-player.svg?style=flat-square&color=cb3837&logo=npm)](https://www.npmjs.com/package/movi-player)
+[![npm downloads](https://img.shields.io/npm/dm/movi-player.svg?style=flat-square&color=blue)](https://www.npmjs.com/package/movi-player)
+[![bundle size](https://img.shields.io/badge/bundle-50--410KB-success?style=flat-square)](https://www.npmjs.com/package/movi-player)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/MrUjjwalG/movi-player?style=flat-square&color=yellow&logo=github)](https://github.com/MrUjjwalG/movi-player/stargazers)
+
+**[Documentation](https://mrujjwalg.github.io/movi-player/)** &nbsp;·&nbsp; **[Live Demo](https://movi-player-examples.vercel.app/element.html)** &nbsp;·&nbsp; **[Examples](https://github.com/MrUjjwalG/movi-player-examples)** &nbsp;·&nbsp; **[Changelog](CHANGELOG.md)**
 
 ![Movi Player](docs/images/element.gif)
+
+<sub>Built with care by <a href="https://github.com/mrujjwalg"><b>mrujjwalg</b></a> · MKV · HEVC · AV1 · 4K HDR · DRM · Encrypted Streaming</sub>
+
+</div>
+
+---
 
 ## Why Movi Player?
 
@@ -163,7 +175,7 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 **Audio** -- AAC, MP3, Opus, FLAC, AC-3, E-AC-3. Multi-track switching. Stable volume (loudness normalization).
 
-**Subtitles** -- SRT, ASS, WebVTT, PGS (image-based), DVB. Multi-track with on-the-fly switching.
+**Subtitles** -- SRT, ASS, WebVTT, PGS (image-based), DVB. Multi-track with on-the-fly switching. Per-source delay/offset (`Z` / `X` to nudge ±100ms), full transcript browser with search + click-to-seek, customizable size/color/background/edge (persisted), karaoke-aligned VTT.
 
 **HDR** -- BT.2020/PQ/HLG detection + Display-P3 rendering on supported browsers.
 
@@ -175,7 +187,7 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 **Aspect Ratio** -- Press `A` to cycle contain/cover/fill/zoom. Context menu sub-menu with icons.
 
-**Nerd Stats** -- Press `I` for codec, resolution, FPS, decoder type, buffer health, network graph. HLS-aware stats.
+**Nerd Stats** -- Press `I` for codec, resolution, FPS, decoder type, buffer health, network graph. HLS-aware stats. 8K/16K resolutions labeled correctly.
 
 **Timeline** -- Press `T` for thumbnail strip. Chapter-aware. Keyboard navigation (arrows + enter).
 
@@ -190,6 +202,12 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 **Encrypted** -- AES-256-GCM chunked encryption with HMAC-signed token auth. See encrypted-server/.
 
 **DRM** -- Optional Widevine/FairPlay for HLS streams via `drm` + `licenseurl` attributes. Uses native `<video>` + EME API.
+
+**Premuxed Quality Menu** -- Multiple `<source data-height="...">` children give you a YouTube-style quality picker for plain MP4/MKV files, no HLS manifest needed.
+
+**File Revoked Recovery** -- Mobile browsers silently revoke `File` handles after long backgrounding; the `filerevoked` event fires so playlist UIs can prompt for re-pick instead of hanging forever.
+
+**Host Fullscreen Handoff** -- Cancelable `movi-fullscreen-request` event + `setHostFullscreen()` so embedders (VS Code webview, custom apps) can take over fullscreen and keep the player's UI in sync.
 
 ## Element Attributes
 
@@ -216,6 +234,11 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
   showtitle                 <!-- Show title overlay at top -->
   startat="30"              <!-- Start at time (seconds) -->
   postertime="10%"          <!-- Generate poster from timestamp ("5", "1:30", "10%") -->
+  subtitledelay="0.2"       <!-- Subtitle offset in seconds (positive = later, mpv/VLC sign) -->
+  subtitlesize="1.2"        <!-- Subtitle size multiplier (also persisted via UI) -->
+  subtitlecolor="#FFFF00"   <!-- Subtitle text color -->
+  subtitlebg="0.5"          <!-- Subtitle background opacity 0..1 -->
+  subtitleedge="outline"    <!-- none | shadow | outline | raised -->
   resume                    <!-- Resume from last position -->
   stablevolume              <!-- Loudness normalization -->
   buffersize="200"          <!-- Max prefetch window in MB (HTTP + encrypted) -->
@@ -242,6 +265,38 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 </movi-player>
 ```
 
+**Premuxed quality menu** -- declare multiple video sources with `data-height` to get a YouTube-style quality picker without an HLS manifest:
+
+```html
+<movi-player controls>
+  <source src="video-1080p.mp4" type="video/mp4" data-height="1080" data-label="1080p">
+  <source src="video-720p.mp4"  type="video/mp4" data-height="720"  data-label="720p">
+  <source src="video-480p.mp4"  type="video/mp4" data-height="480"  data-label="480p">
+</movi-player>
+```
+
+**Multi-language audio** -- declare two or more `<source kind="audio">` tags with `srclang` (or `label`) and the player surfaces an audio-language menu. Default pick: explicit `default` / `data-default`, else the first match for the page locale, else the first one.
+
+```html
+<movi-player controls>
+  <source src="video.mp4" type="video/mp4">
+  <source src="audio-en.m4a" type="audio/mp4" kind="audio" srclang="en" label="English" default>
+  <source src="audio-hi.m4a" type="audio/mp4" kind="audio" srclang="hi" label="Hindi">
+  <source src="audio-ja.m4a" type="audio/mp4" kind="audio" srclang="ja" label="Japanese">
+</movi-player>
+```
+
+**External subtitles via `<track>`** -- standard `<video>`-style markup, no JS wiring needed. Treats `kind="subtitles"`, `kind="captions"`, or no `kind` as caption tracks. `data-format="srt"` to load SRT instead of the default VTT.
+
+```html
+<movi-player controls>
+  <source src="video.mp4" type="video/mp4">
+  <track src="subs-en.vtt" srclang="en" label="English" kind="subtitles" default>
+  <track src="subs-hi.vtt" srclang="hi" label="Hindi" kind="subtitles">
+  <track src="subs-jp.srt" srclang="ja" label="Japanese" kind="subtitles" data-format="srt">
+</movi-player>
+```
+
 ## Keyboard Shortcuts
 
 Press `?` during playback to toggle the shortcuts panel (also available from the right-click context menu).
@@ -257,7 +312,7 @@ Press `?` during playback to toggle the shortcuts panel (also available from the
 | `T` | Timeline | `?` | Shortcuts panel |
 | `S` | Snapshot | `0` / `Home` | Seek to start |
 | `P` | Picture-in-Picture | Arrows | Seek / Volume |
-| `V` | Cycle subtitle track | | |
+| `V` | Cycle subtitle track | `Z` / `X` | Subtitle delay -/+ 100ms |
 
 ## Server Requirements
 
@@ -265,11 +320,12 @@ Videos served over HTTP need:
 
 1. **Range requests** -- for seeking
 2. **CORS headers** -- if cross-origin
-3. **COOP/COEP headers** (optional) -- for SharedArrayBuffer zero-copy mode:
+3. **COOP/COEP headers** -- required for `SharedArrayBuffer` (FFmpeg WASM threading). Without these the player shows a "Security Headers Missing" screen and refuses to initialize:
    ```
    Cross-Origin-Opener-Policy: same-origin
    Cross-Origin-Embedder-Policy: require-corp
    ```
+   On static hosts where you can't set response headers (GitHub Pages, Netlify free tier, etc.), use [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) to inject these headers client-side via a service worker.
 
 ## Browser Support
 
@@ -278,7 +334,7 @@ Videos served over HTTP need:
 | Chrome 94+ | Yes | Yes |
 | Edge 94+ | Yes | Yes |
 | Safari 16.4+ | Yes | Yes |
-| Firefox | No | No |
+| Firefox 130+ | Yes | Limited |
 
 ## Development
 
@@ -293,4 +349,4 @@ npm run dev
 
 ## License
 
-Apache 2.0 -- [Ujjwal Kashyap](https://github.com/mrujjwalg)
+Apache 2.0 -- [Ujjawal Kashyap](https://github.com/mrujjwalg)

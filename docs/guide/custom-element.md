@@ -58,6 +58,12 @@ The `<movi-player>` custom element is a drop-in replacement for the native `<vid
 | `videoid`     | `string`            | -                                  | Video ID (encrypted mode)                         |
 | `drm`         | `boolean`           | -                                  | DRM mode for HLS (native video + EME)             |
 | `licenseurl`  | `string`            | -                                  | Widevine/FairPlay license server URL              |
+| `subtitledelay` | `number`          | -                                  | Subtitle offset in seconds (positive = later)     |
+| `subtitlesize` | `number`           | `1`                                | Subtitle size multiplier                          |
+| `subtitlecolor` | `string`          | `#FFFFFF`                          | Subtitle text color                               |
+| `subtitlebg`   | `number`           | `0.75`                             | Subtitle background opacity (0..1)                |
+| `subtitleedge` | `string`           | `none`, `shadow`, `outline`, `raised` | Subtitle edge style                            |
+| `postertime`  | `string`            | -                                  | Generate poster from timestamp (`5`, `1:30`, `10%`) |
 
 ## Examples
 
@@ -83,6 +89,28 @@ The `<movi-player>` custom element is a drop-in replacement for the native `<vid
   style="width: 100%; height: 100vh;"
 ></movi-player>
 ```
+
+### Multi-Track via `<source>` and `<track>`
+
+Ship a full multi-quality + multi-language + multi-subtitle setup as plain HTML — the player parses these children at connect time, so no JS source setter is needed:
+
+```html
+<movi-player controls>
+  <!-- Quality picker (data-height + data-label) -->
+  <source src="movie-1080p.mp4" type="video/mp4" data-height="1080" data-default>
+  <source src="movie-720p.mp4"  type="video/mp4" data-height="720">
+
+  <!-- Parallel-language audio tracks -->
+  <source src="audio-en.m4a" type="audio/mp4" kind="audio" srclang="en" label="English" default>
+  <source src="audio-hi.m4a" type="audio/mp4" kind="audio" srclang="hi" label="Hindi">
+
+  <!-- Sidecar subtitles -->
+  <track src="subs-en.vtt" srclang="en" label="English" kind="subtitles" default>
+  <track src="subs-jp.srt" srclang="ja" label="Japanese" kind="subtitles" data-format="srt">
+</movi-player>
+```
+
+See [Multi-Track Support](./multi-track.md) for the audio default-pick order and the full attribute reference.
 
 ### Ambient Mode
 

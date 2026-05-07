@@ -110,6 +110,30 @@ fileInput.addEventListener("change", async (e) => {
 - ✅ LRU cache for chunks
 - ✅ Memory efficient (2MB chunks)
 - ✅ Works offline
+- ✅ Revocation recovery (8s timeout per chunk read)
+
+### Handle Revocation (mobile)
+
+iOS Safari and Android Chrome silently revoke `File` handles after long backgrounding or memory pressure, leaving the demuxer hung forever waiting on a read that will never complete.
+
+`FileSource` races each chunk read against an 8s timeout. The first time a read fails this way, it fires a one-shot `onRevoked` callback so the host can prompt for a re-pick. `MoviPlayer` re-emits this as a `filerevoked` event, and `<movi-player>` re-dispatches it as a DOM `CustomEvent`.
+
+```typescript
+// Direct FileSource use:
+const source = new FileSource(file);
+source.setOnRevoked(({ offset, length, reason }) => {
+  console.warn(`File handle revoked at byte ${offset} (${reason})`);
+  promptUserToRepickFile();
+});
+
+// Via the player:
+player.on("filerevoked", (info) => promptUserToRepickFile());
+
+// Via the element:
+el.addEventListener("filerevoked", (e: CustomEvent) => {
+  promptUserToRepickFile();
+});
+```
 
 ### Memory Management
 

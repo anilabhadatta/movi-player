@@ -23,7 +23,77 @@ document.addEventListener("fullscreenchange", () => {
 });
 document.addEventListener("fullscreenerror", (e) => {
   console.error("[Movi] fullscreenerror:", e.type, "target:", e.target && e.target.tagName);
+  // Safety net only — primary path is the player's `movi-fullscreen-request`
+  // event below, which fires BEFORE requestFullscreen is attempted.
+  sendFullscreen();
 });
+
+// Debounce so capture-intercept + fullscreenerror fallback can't double-fire.
+let _lastFullscreenAt = 0;
+let _inMoviFullscreen = false;
+let _fullscreenDisabled = false;
+
+function syncPlayerFullscreenIcon(active) {
+  const player = document.getElementById("player");
+  if (player && typeof player.setHostFullscreen === "function") {
+    player.setHostFullscreen(active);
+  }
+}
+
+function sendFullscreen() {
+  if (_fullscreenDisabled) return;
+  const now = Date.now();
+  if (now - _lastFullscreenAt < 300) return;
+  _lastFullscreenAt = now;
+
+  // Skip the confirm dialog on EXIT — only ask before entering fullscreen.
+  if (_inMoviFullscreen) {
+    _inMoviFullscreen = false;
+    syncPlayerFullscreenIcon(false);
+    try { vscode.postMessage({ type: "fullscreen" }); } catch {}
+    return;
+  }
+
+  showFullscreenConfirm().then((ok) => {
+    if (!ok) return;
+    _inMoviFullscreen = true;
+    syncPlayerFullscreenIcon(true);
+    try { vscode.postMessage({ type: "fullscreen" }); } catch {}
+  });
+}
+
+function showFullscreenConfirm() {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("fsConfirmOverlay");
+    const continueBtn = document.getElementById("fsConfirmContinue");
+    const cancelBtn = document.getElementById("fsConfirmCancel");
+    if (!overlay || !continueBtn || !cancelBtn) return resolve(true);
+
+    function cleanup(answer) {
+      overlay.classList.add("hidden");
+      continueBtn.removeEventListener("click", onContinue);
+      cancelBtn.removeEventListener("click", onCancel);
+      overlay.removeEventListener("click", onBackdrop);
+      document.removeEventListener("keydown", onKey, true);
+      resolve(answer);
+    }
+    function onContinue() { cleanup(true); }
+    function onCancel() { cleanup(false); }
+    function onBackdrop(e) { if (e.target === overlay) cleanup(false); }
+    function onKey(e) {
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cleanup(false); }
+      else if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); cleanup(true); }
+    }
+
+    continueBtn.addEventListener("click", onContinue);
+    cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey, true);
+    overlay.classList.remove("hidden");
+    setTimeout(() => continueBtn.focus(), 0);
+  });
+}
+
 
 const loadingOverlay = document.getElementById("loadingOverlay");
 const loadingName = document.getElementById("loadingName");
@@ -43,36 +113,30 @@ customElements.whenDefined("movi-player").then(() => {
     const title = player.title;
     if (title) document.title = title + " — Movi Player";
   });
-  // Hide fullscreen + PiP buttons (not supported in VS Code webviews) and
-  // remove their entries from the right-click context menu. Inject into
-  // shadow DOM since regular page CSS can't reach inside it.
+
+  // Standard handoff: MoviElement dispatches the cancelable
+  // `movi-fullscreen-request` event before calling requestFullscreen. We
+  // preventDefault and route through the host so the browser API (which
+  // VS Code webviews block) is never invoked, and the player's UI stays
+  // in sync via setHostFullscreen() — see syncPlayerFullscreenIcon().
+  player.addEventListener("movi-fullscreen-request", (e) => {
+    e.preventDefault();
+    sendFullscreen();
+  });
+
+  // PiP isn't supported in webviews — hide its UI entries.
   function hideUnsupported() {
     if (!player.shadowRoot) return;
     if (player.shadowRoot.getElementById("movi-vscode-hide")) return;
     const style = document.createElement("style");
     style.id = "movi-vscode-hide";
-    // VS Code webview top-level frame: Permissions-Policy denies both
-    // fullscreen and PiP. PiP button is hidden entirely. Fullscreen button
-    // stays visible (familiar UI) but disabled — clicking does nothing.
     style.textContent = `
       .movi-pip-btn,
       .movi-context-menu-item[data-action="pip"] { display: none !important; }
-
-      .movi-fullscreen-btn {
-        opacity: 0.4 !important;
-        cursor: not-allowed !important;
-        pointer-events: none !important;
-      }
-      .movi-context-menu-item[data-action="fullscreen"] {
-        opacity: 0.4 !important;
-        pointer-events: none !important;
-        cursor: not-allowed !important;
-      }
     `;
     player.shadowRoot.appendChild(style);
   }
   hideUnsupported();
-  // Re-apply after first frame in case shadow root populates async
   setTimeout(hideUnsupported, 0);
   setTimeout(hideUnsupported, 500);
 });
@@ -176,8 +240,33 @@ window.addEventListener("message", (event) => {
       pendingChunks.delete(msg.id);
       pending.reject(new Error(msg.error));
     }
+  } else if (msg.type === "disableFullscreen") {
+    _fullscreenDisabled = true;
+    hideFullscreenUi();
   }
 });
+
+// Inject CSS into the player's shadow root that hides the fullscreen
+// button + its context-menu entry. Re-applied on a small interval since
+// the shadow root may populate asynchronously after the message arrives.
+function hideFullscreenUi() {
+  function apply() {
+    const player = document.getElementById("player");
+    if (!player || !player.shadowRoot) return;
+    if (player.shadowRoot.getElementById("movi-fs-disable")) return;
+    const style = document.createElement("style");
+    style.id = "movi-fs-disable";
+    style.textContent = `
+      .movi-fullscreen-btn,
+      .movi-context-menu-item[data-action="fullscreen"] { display: none !important; }
+    `;
+    player.shadowRoot.appendChild(style);
+  }
+  apply();
+  setTimeout(apply, 0);
+  setTimeout(apply, 500);
+  setTimeout(apply, 1500);
+}
 
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable) return;

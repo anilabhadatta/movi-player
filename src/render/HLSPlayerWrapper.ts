@@ -234,6 +234,18 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
         resolve();
       });
 
+      // ABR / level switches in Auto mode change the active rendition
+      // without changing the track list. Re-fire tracksChange so the
+      // gear-badge UI in MoviElement repaints against the new height
+      // (e.g. 720p → 1080p flips the gear pill from blank to "HD").
+      this.hls!.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
+        Logger.debug(TAG, `LEVEL_SWITCHED → level ${data.level}`);
+        this.trackManager.emit(
+          "tracksChange",
+          this.trackManager.getTracks(),
+        );
+      });
+
       let networkRetries = 0;
       let mediaRetries = 0;
       const MAX_NETWORK_RETRIES = 3;
@@ -358,7 +370,40 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
 
     if (this.canvasRenderer && data.levels.length > 0) {
       const level = data.levels[0];
-      this.canvasRenderer.configure(level.width, level.height);
+      const applyDims = (w: number, h: number) => {
+        if (!this.canvasRenderer || w <= 0 || h <= 0) return;
+        this.canvasRenderer.configure(w, h);
+        // configure() only sets the drawing-buffer size; CSS sizing
+        // (width/height: 100%) is only applied inside resize(). Without
+        // this, canvas stays at its default 0×0 layout until the next
+        // ResizeObserver tick — manifests as a black frame that clears
+        // only after the user resizes the window.
+        const canvas = this.canvasRenderer.getCanvas();
+        const parent = canvas instanceof HTMLCanvasElement ? canvas.parentElement : null;
+        const cw = parent?.clientWidth || w;
+        const ch = parent?.clientHeight || h;
+        if (cw > 0 && ch > 0) {
+          this.canvasRenderer.resize(cw, ch);
+        }
+      };
+
+      if (level.width > 0 && level.height > 0) {
+        applyDims(level.width, level.height);
+      } else {
+        // Manifest didn't include RESOLUTION — wait for the <video>
+        // element to surface real dimensions, otherwise we configure
+        // a 0×0 framebuffer and render black until the next resize.
+        Logger.info(TAG, "HLS manifest lacks RESOLUTION; deferring canvas configure to loadedmetadata");
+        const onMeta = () => {
+          this.videoElement.removeEventListener("loadedmetadata", onMeta);
+          applyDims(this.videoElement.videoWidth, this.videoElement.videoHeight);
+        };
+        if (this.videoElement.videoWidth > 0 && this.videoElement.videoHeight > 0) {
+          applyDims(this.videoElement.videoWidth, this.videoElement.videoHeight);
+        } else {
+          this.videoElement.addEventListener("loadedmetadata", onMeta);
+        }
+      }
     }
   }
 
@@ -549,7 +594,7 @@ export class HLSPlayerWrapper extends EventEmitter<PlayerEventMap> {
     if (w && h) {
       stats["Video Codec"] = level?.videoCodec ?? "N/A";
       stats["Resolution"] = `${w}x${h}`;
-      stats["Quality"] = h >= 2160 ? "4K" : h >= 1440 ? "2K" : h >= 1080 ? "1080p" : h >= 720 ? "720p" : h >= 480 ? "480p" : "SD";
+      stats["Quality"] = h >= 8640 ? "16K" : h >= 4320 ? "8K" : h >= 2160 ? "4K" : h >= 1440 ? "2K" : h >= 1080 ? "1080p" : h >= 720 ? "720p" : h >= 480 ? "480p" : "SD";
       if (level?.frameRate) stats["Frame Rate"] = `${level.frameRate} fps`;
       stats["Video Bitrate"] = level?.bitrate
         ? `${(level.bitrate / 1000).toFixed(0)} kbps`

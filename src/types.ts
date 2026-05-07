@@ -248,6 +248,7 @@ export interface PlayerEventMap {
   durationChange: number;
   tracksChange: Track[];
   error: Error;
+  filerevoked: { offset: number; length: number; reason: string };
   loadStart: void;
   loadEnd: void;
   seeking: number;

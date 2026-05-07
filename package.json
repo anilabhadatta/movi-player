@@ -1,6 +1,6 @@
 {
   "name": "movi-player",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Play MKV, HEVC, AV1, HDR videos in the browser. WebCodecs + FFmpeg WASM player with encrypted playback, chapters, subtitles, multi-audio tracks. No server transcoding needed.",
   "type": "module",
   "main": "dist/index.js",
@@ -92,7 +92,7 @@
     "hlg",
     "bt2020"
   ],
-  "author": "Ujjwal Kashyap <mr.ujjwalg@gmail.com> (https://github.com/mrujjwalg)",
+  "author": "Ujjawal Kashyap <mr.ujjwalg@gmail.com> (https://github.com/mrujjwalg)",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
