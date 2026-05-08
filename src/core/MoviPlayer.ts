@@ -291,6 +291,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.audioRenderer.render(data);
     });
 
+    this.audioDecoder.setOnPCM((frame) => {
+      // Software-decoder path: avoids the WebCodecs AudioData constructor,
+      // which Firefox on Android does not implement.
+      this.audioRenderer.renderPCM(frame);
+    });
+
     this.audioDecoder.setOnError((error) => {
       Logger.error(TAG, "Audio decoder error", error);
       // Audio errors are less fatal - video can continue, just emit the error
@@ -336,6 +342,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         // Direct render (buffers in AudioContext)
         // AudioRenderer handles muted state internally
         this.audioRenderer.render(data);
+      });
+
+      this.audioDecoder.setOnPCM((frame) => {
+        this.audioRenderer.renderPCM(frame);
       });
 
       this.audioDecoder.setOnError((error) => {

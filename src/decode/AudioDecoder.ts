@@ -1,6 +1,6 @@
 import type { AudioTrack } from "../types";
 import { Logger } from "../utils/Logger";
-import { SoftwareAudioDecoder } from "./SoftwareAudioDecoder";
+import { SoftwareAudioDecoder, type PCMFrame } from "./SoftwareAudioDecoder";
 import { WasmBindings } from "../wasm/bindings";
 
 const TAG = "AudioDecoder";
@@ -12,6 +12,7 @@ export class MoviAudioDecoder {
   private useSoftware: boolean = false;
 
   private pendingData: AudioData[] = [];
+  private pendingPCM: PCMFrame[] = [];
   private pendingChunks: Array<{
     data: Uint8Array;
     timestamp: number;
@@ -19,6 +20,7 @@ export class MoviAudioDecoder {
   }> = [];
   private isConfigured: boolean = false;
   private onData: ((data: AudioData) => void) | null = null;
+  private onPCM: ((frame: PCMFrame) => void) | null = null;
   private onError: ((error: Error) => void) | null = null;
   private currentTrack: AudioTrack | null = null;
   private hasTriedSoftwareFallback: boolean = false; // Track if we've already tried software fallback
@@ -203,9 +205,9 @@ export class MoviAudioDecoder {
     }
 
     this.swDecoder = new SoftwareAudioDecoder(this.bindings);
-    this.swDecoder.setOnData((data) => {
-      if (this.onData) this.onData(data);
-      else this.pendingData.push(data);
+    this.swDecoder.setOnData((frame) => {
+      if (this.onPCM) this.onPCM(frame);
+      else this.pendingPCM.push(frame);
     });
     this.swDecoder.setOnError((e) => {
       Logger.error(TAG, "Software decoder error", e);
@@ -380,6 +382,18 @@ export class MoviAudioDecoder {
   }
 
   /**
+   * Set PCM frame output callback (used by the software decoder path).
+   */
+  setOnPCM(callback: (frame: PCMFrame) => void): void {
+    this.onPCM = callback;
+
+    while (this.pendingPCM.length > 0) {
+      const frame = this.pendingPCM.shift()!;
+      callback(frame);
+    }
+  }
+
+  /**
    * Set error callback
    */
   setOnError(callback: (error: Error) => void): void {
@@ -416,6 +430,7 @@ export class MoviAudioDecoder {
       data.close();
     }
     this.pendingData = [];
+    this.pendingPCM = [];
   }
 
   /**

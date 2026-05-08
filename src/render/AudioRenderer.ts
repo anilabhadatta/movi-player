@@ -5,6 +5,7 @@
 
 import { Logger } from "../utils/Logger";
 import { SoundTouch } from "../utils/soundtouch";
+import type { PCMFrame } from "../decode/SoftwareAudioDecoder";
 
 const TAG = "AudioRenderer";
 
@@ -215,6 +216,73 @@ export class AudioRenderer {
       return;
     }
 
+    try {
+      const numberOfFrames = audioData.numberOfFrames;
+      const numberOfChannels = audioData.numberOfChannels;
+      const sampleRate = audioData.sampleRate;
+      const audioTime = audioData.timestamp / 1_000_000; // Convert to seconds
+
+      const audioBuffer = this.audioContext.createBuffer(
+        numberOfChannels,
+        numberOfFrames,
+        sampleRate,
+      );
+
+      for (let channel = 0; channel < numberOfChannels; channel++) {
+        const channelData = new Float32Array(numberOfFrames);
+        audioData.copyTo(channelData, {
+          planeIndex: channel,
+          format: "f32-planar",
+        });
+        audioBuffer.copyToChannel(channelData, channel);
+      }
+
+      this.scheduleAudioBuffer(audioBuffer, audioTime);
+    } catch (error) {
+      Logger.error(TAG, "Render error", error);
+    } finally {
+      audioData.close();
+    }
+  }
+
+  /**
+   * Render a raw PCM frame (browser-agnostic path used by the software
+   * decoder). Avoids constructing a WebCodecs AudioData, which Firefox on
+   * Android does not implement.
+   */
+  renderPCM(frame: PCMFrame): void {
+    if (!this.audioContext || !this.gainNode) return;
+    if (!this.isPlaying) return;
+    if (this._muted && this.audioContext.state === "suspended") return;
+
+    try {
+      const audioTime = frame.timestamp / 1_000_000;
+      const audioBuffer = this.audioContext.createBuffer(
+        frame.numberOfChannels,
+        frame.numberOfFrames,
+        frame.sampleRate,
+      );
+
+      for (let channel = 0; channel < frame.numberOfChannels; channel++) {
+        audioBuffer.copyToChannel(
+          frame.planes[channel] as Float32Array<ArrayBuffer>,
+          channel,
+        );
+      }
+
+      this.scheduleAudioBuffer(audioBuffer, audioTime);
+    } catch (error) {
+      Logger.error(TAG, "RenderPCM error", error);
+    }
+  }
+
+  /**
+   * Schedule a populated AudioBuffer through the SoundTouch + A/V sync
+   * pipeline. Shared by render() and renderPCM().
+   */
+  private scheduleAudioBuffer(audioBuffer: AudioBuffer, audioTime: number): void {
+    if (!this.audioContext || !this.gainNode) return;
+
     // Track when we receive decoded audio
     this.lastDecodeTime = performance.now();
 
@@ -225,166 +293,128 @@ export class AudioRenderer {
       Logger.debug(TAG, "Recovered from audio starvation");
     }
 
-    // We do NOT drop frames here anymore to prevent A/V sync issues.
-    // Instead, MoviPlayer checks getBufferedDuration() to apply backpressure.
+    const numberOfChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
 
-    try {
-      const numberOfFrames = audioData.numberOfFrames;
-      const numberOfChannels = audioData.numberOfChannels;
-      const sampleRate = audioData.sampleRate;
-      const audioTime = audioData.timestamp / 1_000_000; // Convert to seconds
+    // Clear rebuffering flag as soon as audio data arrives (decoder is producing).
+    // Don't wait for successful scheduling — SoundTouch may skip a few buffers
+    // while accumulating internally, but the flag should clear immediately.
+    if (this.isRebufferingForRateChange) {
+      this.isRebufferingForRateChange = false;
+      Logger.debug(TAG, "Rebuffering complete after playback rate change");
+    }
 
-      // Create audio buffer
-      const audioBuffer = this.audioContext.createBuffer(
-        numberOfChannels,
-        numberOfFrames,
-        sampleRate,
-      );
-
-      // Copy data to buffer
-      for (let channel = 0; channel < numberOfChannels; channel++) {
-        const channelData = new Float32Array(numberOfFrames);
-        audioData.copyTo(channelData, {
-          planeIndex: channel,
-          format: "f32-planar",
-        });
-        audioBuffer.copyToChannel(channelData, channel);
+    // Apply pitch preservation if enabled and playback rate is not 1.0
+    let processedBuffer = audioBuffer;
+    let usedSoundTouch = false;
+    if (this.preservePitch && Math.abs(this._playbackRate - 1.0) > 0.01) {
+      const stOutput = this.processSoundTouch(audioBuffer, this._playbackRate);
+      if (stOutput && stOutput.length > 1) {
+        processedBuffer = stOutput;
+        usedSoundTouch = true;
+      } else {
+        // SoundTouch is accumulating internally — schedule silence of the expected
+        // duration to keep timing correct. No pitch change, just a brief gap.
+        const expectedDuration = audioBuffer.duration / this._playbackRate;
+        const silenceFrames = Math.max(1, Math.ceil(expectedDuration * sampleRate));
+        processedBuffer = this.audioContext.createBuffer(numberOfChannels, silenceFrames, sampleRate);
+        usedSoundTouch = true; // treat as SoundTouch path for scheduling
       }
+    }
 
-      // Clear rebuffering flag as soon as audio data arrives (decoder is producing).
-      // Don't wait for successful scheduling — SoundTouch may skip a few buffers
-      // while accumulating internally, but the flag should clear immediately.
-      if (this.isRebufferingForRateChange) {
-        this.isRebufferingForRateChange = false;
-        Logger.debug(TAG, "Rebuffering complete after playback rate change");
-      }
+    const source = this.audioContext.createBufferSource();
+    source.buffer = processedBuffer;
+    source.connect(this.gainNode);
+    source.playbackRate.value = usedSoundTouch ? 1.0 : this._playbackRate;
 
-      // Apply pitch preservation if enabled and playback rate is not 1.0
-      let processedBuffer = audioBuffer;
-      let usedSoundTouch = false;
-      if (this.preservePitch && Math.abs(this._playbackRate - 1.0) > 0.01) {
-        const stOutput = this.processSoundTouch(audioBuffer, this._playbackRate);
-        if (stOutput && stOutput.length > 1) {
-          processedBuffer = stOutput;
-          usedSoundTouch = true;
-        } else {
-          // SoundTouch is accumulating internally — schedule silence of the expected
-          // duration to keep timing correct. No pitch change, just a brief gap.
-          const expectedDuration = audioBuffer.duration / this._playbackRate;
-          const silenceFrames = Math.max(1, Math.ceil(expectedDuration * sampleRate));
-          processedBuffer = this.audioContext.createBuffer(numberOfChannels, silenceFrames, sampleRate);
-          usedSoundTouch = true; // treat as SoundTouch path for scheduling
-        }
-      }
+    const now = this.audioContext.currentTime;
+    const minTime = now + 0.005; // Small buffer to prevent glitches
 
-      // Create buffer source
-      const source = this.audioContext.createBufferSource();
-      source.buffer = processedBuffer;
-      source.connect(this.gainNode);
-      source.playbackRate.value = usedSoundTouch ? 1.0 : this._playbackRate;
-
-      // Schedule playback sequentially
-      const now = this.audioContext.currentTime;
-      const minTime = now + 0.005; // Small buffer to prevent glitches
-
-      // Detect buffer underrun
-      if (this.scheduledTime < now) {
-        // Stable audio: fill the gap with a short silence buffer to prevent pops
-        if (this._stableAudio && this.hasFirstBuffer && this.audioContext) {
-          const gapDuration = now - this.scheduledTime;
-          if (gapDuration > 0.005 && gapDuration < 1.0) {
-            try {
-              const silenceFrames = Math.ceil(gapDuration * sampleRate);
-              const silenceBuffer = this.audioContext.createBuffer(
-                numberOfChannels, silenceFrames, sampleRate
-              );
-              const silenceSource = this.audioContext.createBufferSource();
-              silenceSource.buffer = silenceBuffer;
-              silenceSource.connect(this.gainNode);
-              silenceSource.start(this.scheduledTime);
-              silenceSource.onended = () => {
-                try { silenceSource.disconnect(); } catch { /* ignore */ }
-              };
-              Logger.debug(TAG, `Gap filled: ${(gapDuration * 1000).toFixed(1)}ms silence`);
-            } catch {
-              // Ignore gap fill errors
-            }
+    // Detect buffer underrun
+    if (this.scheduledTime < now) {
+      // Stable audio: fill the gap with a short silence buffer to prevent pops
+      if (this._stableAudio && this.hasFirstBuffer && this.audioContext) {
+        const gapDuration = now - this.scheduledTime;
+        if (gapDuration > 0.005 && gapDuration < 1.0) {
+          try {
+            const silenceFrames = Math.ceil(gapDuration * sampleRate);
+            const silenceBuffer = this.audioContext.createBuffer(
+              numberOfChannels, silenceFrames, sampleRate
+            );
+            const silenceSource = this.audioContext.createBufferSource();
+            silenceSource.buffer = silenceBuffer;
+            silenceSource.connect(this.gainNode);
+            silenceSource.start(this.scheduledTime);
+            silenceSource.onended = () => {
+              try { silenceSource.disconnect(); } catch { /* ignore */ }
+            };
+            Logger.debug(TAG, `Gap filled: ${(gapDuration * 1000).toFixed(1)}ms silence`);
+          } catch {
+            // Ignore gap fill errors
           }
         }
-
-        this.scheduledTime = minTime;
-
-        if (this.hasFirstBuffer) {
-          // Pivot global clock if we underrun (resync)
-          this.firstBufferScheduledAt = minTime;
-          this.firstBufferMediaTime = audioTime;
-        }
       }
 
-      // Calculate expected playback time based on timestamp
-      let targetScheduleTime = this.scheduledTime;
+      this.scheduledTime = minTime;
 
       if (this.hasFirstBuffer) {
-        const expectedTime =
-          this.firstBufferScheduledAt +
-          (audioTime - this.firstBufferMediaTime) / this._playbackRate;
-
-        const drift = expectedTime - this.scheduledTime;
-        // Tighter drift tolerance (20ms) for better sync
-        if (Math.abs(drift) > 0.02) {
-          targetScheduleTime = expectedTime;
-        }
-      }
-
-      const when = Math.max(targetScheduleTime, minTime);
-      source.start(when);
-
-      // Track first buffer for audio clock
-      if (!this.hasFirstBuffer) {
-        this.firstBufferScheduledAt = when;
+        // Pivot global clock if we underrun (resync)
+        this.firstBufferScheduledAt = minTime;
         this.firstBufferMediaTime = audioTime;
-        this.hasFirstBuffer = true;
-        Logger.debug(
-          TAG,
-          `First buffer scheduled at ${when.toFixed(3)}s, mediaTime=${audioTime.toFixed(3)}s`,
-        );
       }
-
-      this.activeSources.push(source);
-      // When SoundTouch produced output, use its actual duration.
-      // When falling back to hardware rate, use original duration / rate.
-      this.scheduledTime = when + (usedSoundTouch
-        ? processedBuffer.duration
-        : audioBuffer.duration / this._playbackRate);
-      this.currentMediaTime = audioTime;
-      this.scheduledCount++;
-
-      // Track the maximum media time we've scheduled
-      // audioBuffer.duration is already in media seconds, no need to multiply by playbackRate
-      const endMediaTime = audioTime + audioBuffer.duration;
-      if (endMediaTime > this.maxScheduledMediaTime) {
-        this.maxScheduledMediaTime = endMediaTime;
-      }
-
-      // Cleanup when finished
-      source.onended = () => {
-        const idx = this.activeSources.indexOf(source);
-        if (idx !== -1) {
-          this.activeSources.splice(idx, 1);
-        }
-        try {
-          source.disconnect();
-        } catch {
-          // Ignore
-        }
-      };
-
-      // Close the AudioData
-      audioData.close();
-    } catch (error) {
-      Logger.error(TAG, "Render error", error);
-      audioData.close();
     }
+
+    // Calculate expected playback time based on timestamp
+    let targetScheduleTime = this.scheduledTime;
+
+    if (this.hasFirstBuffer) {
+      const expectedTime =
+        this.firstBufferScheduledAt +
+        (audioTime - this.firstBufferMediaTime) / this._playbackRate;
+
+      const drift = expectedTime - this.scheduledTime;
+      // Tighter drift tolerance (20ms) for better sync
+      if (Math.abs(drift) > 0.02) {
+        targetScheduleTime = expectedTime;
+      }
+    }
+
+    const when = Math.max(targetScheduleTime, minTime);
+    source.start(when);
+
+    if (!this.hasFirstBuffer) {
+      this.firstBufferScheduledAt = when;
+      this.firstBufferMediaTime = audioTime;
+      this.hasFirstBuffer = true;
+      Logger.debug(
+        TAG,
+        `First buffer scheduled at ${when.toFixed(3)}s, mediaTime=${audioTime.toFixed(3)}s`,
+      );
+    }
+
+    this.activeSources.push(source);
+    this.scheduledTime = when + (usedSoundTouch
+      ? processedBuffer.duration
+      : audioBuffer.duration / this._playbackRate);
+    this.currentMediaTime = audioTime;
+    this.scheduledCount++;
+
+    const endMediaTime = audioTime + audioBuffer.duration;
+    if (endMediaTime > this.maxScheduledMediaTime) {
+      this.maxScheduledMediaTime = endMediaTime;
+    }
+
+    source.onended = () => {
+      const idx = this.activeSources.indexOf(source);
+      if (idx !== -1) {
+        this.activeSources.splice(idx, 1);
+      }
+      try {
+        source.disconnect();
+      } catch {
+        // Ignore
+      }
+    };
   }
 
   /**

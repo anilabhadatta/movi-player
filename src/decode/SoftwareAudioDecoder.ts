@@ -4,9 +4,21 @@ import { Logger } from "../utils/Logger";
 
 const TAG = "SoftwareAudioDecoder";
 
+/**
+ * Browser-agnostic PCM frame. Avoids the WebCodecs AudioData constructor,
+ * which Firefox on Android does not implement.
+ */
+export interface PCMFrame {
+  planes: Float32Array[];
+  numberOfFrames: number;
+  numberOfChannels: number;
+  sampleRate: number;
+  timestamp: number; // micro-seconds, matches AudioData semantics
+}
+
 export class SoftwareAudioDecoder {
   private bindings: WasmBindings;
-  private onData: ((data: AudioData) => void) | null = null;
+  private onData: ((frame: PCMFrame) => void) | null = null;
   private onError: ((error: Error) => void) | null = null;
   private isConfigured = false;
   private trackIndex = -1;
@@ -15,7 +27,7 @@ export class SoftwareAudioDecoder {
     this.bindings = bindings;
   }
 
-  setOnData(callback: (data: AudioData) => void): void {
+  setOnData(callback: (frame: PCMFrame) => void): void {
     this.onData = callback;
   }
 
@@ -91,45 +103,36 @@ export class SoftwareAudioDecoder {
     const numberOfChannels = this.bindings.getFrameChannels();
     const sampleRate = this.bindings.getFrameSampleRate();
 
-    // FFmpeg usually outputs planar float (AV_SAMPLE_FMT_FLTP = 8) for most decoders
-    // We need to check the format and convert if necessary, but WebCodecs AudioData
-    // supports f32-planar which is what FLTP is.
-
+    // FFmpeg outputs planar float (AV_SAMPLE_FMT_FLTP) for most decoders.
+    // We copy each plane out of the WASM heap into its own Float32Array so the
+    // heap can be reused for the next frame.
     try {
-      // AV_SAMPLE_FMT_FLTP (Planar Float)
-      // Each plane is Float32Array
-      const planeSize = numberOfFrames * 4; // 4 bytes per float
-      const totalSize = planeSize * numberOfChannels;
-      const buffer = new Uint8Array(totalSize);
-
+      const heap = (this.bindings as any).module.HEAPU8 as Uint8Array;
+      const planes: Float32Array[] = new Array(numberOfChannels);
       for (let i = 0; i < numberOfChannels; i++) {
         const ptr = this.bindings.getFrameDataPointer(i);
-        const heap = (this.bindings as any).module.HEAPU8 as Uint8Array;
-        const planeData = heap.subarray(ptr, ptr + planeSize);
-        buffer.set(planeData, i * planeSize);
+        const view = new Float32Array(heap.buffer, ptr, numberOfFrames);
+        planes[i] = new Float32Array(view); // copy out of heap
       }
 
-      const audioData = new AudioData({
-        format: "f32-planar",
-        sampleRate: sampleRate,
-        numberOfFrames: numberOfFrames,
-        numberOfChannels: numberOfChannels,
+      const frame: PCMFrame = {
+        planes,
+        numberOfFrames,
+        numberOfChannels,
+        sampleRate,
         timestamp: timestamp * 1_000_000, // micro-seconds
-        data: buffer,
-      });
+      };
 
       if (Math.random() < 0.01) {
-        // Log occasionally to avoid spam
         Logger.debug(
           TAG,
           `Audio data: ${numberOfChannels}ch, ${numberOfFrames} frames`,
         );
       }
 
-      this.onData(audioData);
-      // ownership passed to callback
+      this.onData(frame);
     } catch (e) {
-      Logger.error(TAG, "AudioData creation failed", e);
+      Logger.error(TAG, "PCM frame extraction failed", e);
       if (this.onError) this.onError(e as Error);
     }
   }
