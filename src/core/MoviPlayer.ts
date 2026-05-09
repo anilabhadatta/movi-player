@@ -1318,7 +1318,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Stall detection: if playing but both video and audio buffers are critically low
     // Skip near end of video to avoid false stall at EOF
     const nearEnd = this.mediaInfo && this.clock.getTime() >= (this.mediaInfo.duration + this.startTime) - 3;
-    // Longer stall timeout for slow + high-FPS: SoundTouch/hardware rate fallback
+    // Longer stall timeout for slow + high-FPS: stretcher / hardware rate fallback
     // causes brief audio gaps that aren't true stalls. 2s vs 500ms default.
     const currentRate = this.clock.getPlaybackRate();
     const currentFps = (this.mediaInfo as any)?.videoFrameRate ?? 30;
@@ -3089,19 +3089,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // flowing means the audible transition is just whatever output buffer
     // the AudioContext has — small with latencyHint="interactive" — and
     // the new rate is applied to subsequent stretcher output naturally.
-  }
-
-  /**
-   * Switch the audio time-stretching engine. 'signalsmith' uses the
-   * MIT-licensed Signalsmith Stretch baked into movi.wasm; 'soundtouch' is
-   * the LGPL fallback shipped as JS. Default is 'soundtouch'.
-   */
-  setStretcher(name: "soundtouch" | "signalsmith"): void {
-    this.audioRenderer.setStretcher(name);
-  }
-
-  getStretcher(): "soundtouch" | "signalsmith" {
-    return this.audioRenderer.getStretcher();
   }
 
   /**

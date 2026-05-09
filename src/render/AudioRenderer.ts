@@ -4,7 +4,6 @@
  */
 
 import { Logger } from "../utils/Logger";
-import { SoundTouch } from "../utils/soundtouch";
 import {
   createSignalsmithStretcher,
   loadSignalsmith,
@@ -39,17 +38,11 @@ export class AudioRenderer {
   // Playback rate change rebuffering flag
   private isRebufferingForRateChange: boolean = false;
 
-  // Pitch preservation
+  // Pitch preservation via Signalsmith Stretch (MIT), compiled into the same
+  // movi WASM module as FFmpeg/dav1d. Loads asynchronously on first need;
+  // until then we fall back to scaling source.playbackRate (which shifts
+  // pitch but keeps audio playing).
   private preservePitch: boolean = true;
-  private soundTouch: SoundTouch | null = null;
-
-  // Signalsmith Stretch (MIT) — opt-in alternative to SoundTouch with
-  // higher pitch-preservation quality. Compiled into the same movi WASM
-  // module as FFmpeg/dav1d, no extra binary to fetch. Toggle via
-  // setStretcher('signalsmith') or localStorage.MOVI_STRETCHER === 'signalsmith'.
-  private useSignalsmith: boolean =
-    typeof localStorage !== "undefined" &&
-    localStorage.getItem("MOVI_STRETCHER") === "signalsmith";
   private signalsmith: SignalsmithStretcher | null = null;
   private signalsmithLoading: boolean = false;
   private signalsmithSampleRate: number = 0;
@@ -205,12 +198,11 @@ export class AudioRenderer {
         `Initialized: sampleRate=${this.audioContext.sampleRate}, muted=${this._muted}, state=${this.audioContext.state}`,
       );
 
-      // Warm the Signalsmith path if it's enabled. The actual stretcher
-      // instance is constructed lazily on the first audio chunk so we use
-      // the decoded sample rate (not AudioContext's, which often differs).
-      if (this.useSignalsmith) {
-        loadSignalsmith();
-      }
+      // Warm the Signalsmith WASM module so the first rate change isn't
+      // gated on a fetch. The stretcher instance is constructed lazily on
+      // the first audio chunk so we use the decoded sample rate (not
+      // AudioContext's, which often differs for Opus).
+      loadSignalsmith();
       return true;
     } catch (error) {
       Logger.error(TAG, "Failed to initialize", error);
@@ -307,7 +299,7 @@ export class AudioRenderer {
   }
 
   /**
-   * Schedule a populated AudioBuffer through the SoundTouch + A/V sync
+   * Schedule a populated AudioBuffer through the stretcher + A/V sync
    * pipeline. Shared by render() and renderPCM().
    */
   private scheduleAudioBuffer(audioBuffer: AudioBuffer, audioTime: number): void {
@@ -327,35 +319,40 @@ export class AudioRenderer {
     const sampleRate = audioBuffer.sampleRate;
 
     // Clear rebuffering flag as soon as audio data arrives (decoder is producing).
-    // Don't wait for successful scheduling — SoundTouch may skip a few buffers
-    // while accumulating internally, but the flag should clear immediately.
+    // Don't wait for successful scheduling — the stretcher may swallow a few
+    // buffers while warming up, but the flag should clear immediately.
     if (this.isRebufferingForRateChange) {
       this.isRebufferingForRateChange = false;
       Logger.debug(TAG, "Rebuffering complete after playback rate change");
     }
 
-    // Apply pitch preservation if enabled and playback rate is not 1.0
+    // Apply pitch preservation via Signalsmith if enabled and playback rate
+    // is not 1.0. If the stretcher isn't ready yet (WASM still loading) we
+    // fall back to scaling source.playbackRate — pitch shifts but audio
+    // keeps playing until the stretcher kicks in on a subsequent chunk.
     let processedBuffer = audioBuffer;
-    let usedSoundTouch = false;
+    let usedStretcher = false;
     if (this.preservePitch && Math.abs(this._playbackRate - 1.0) > 0.01) {
-      const stOutput = this.processSoundTouch(audioBuffer, this._playbackRate);
+      const stOutput = this.processStretch(audioBuffer, this._playbackRate);
       if (stOutput && stOutput.length > 1) {
         processedBuffer = stOutput;
-        usedSoundTouch = true;
-      } else {
-        // SoundTouch is accumulating internally — schedule silence of the expected
-        // duration to keep timing correct. No pitch change, just a brief gap.
+        usedStretcher = true;
+      } else if (this.signalsmith) {
+        // Stretcher ready but warming — schedule expected-duration silence
+        // so timing stays correct. Brief gap, no pitch shift.
         const expectedDuration = audioBuffer.duration / this._playbackRate;
         const silenceFrames = Math.max(1, Math.ceil(expectedDuration * sampleRate));
         processedBuffer = this.audioContext.createBuffer(numberOfChannels, silenceFrames, sampleRate);
-        usedSoundTouch = true; // treat as SoundTouch path for scheduling
+        usedStretcher = true;
       }
+      // else: stretcher not loaded yet — fall through with usedStretcher=false
+      // so source.playbackRate scales the rate (pitch will shift briefly).
     }
 
     const source = this.audioContext.createBufferSource();
     source.buffer = processedBuffer;
     source.connect(this.gainNode);
-    source.playbackRate.value = usedSoundTouch ? 1.0 : this._playbackRate;
+    source.playbackRate.value = usedStretcher ? 1.0 : this._playbackRate;
 
     const now = this.audioContext.currentTime;
     const minTime = now + 0.005; // Small buffer to prevent glitches
@@ -423,7 +420,7 @@ export class AudioRenderer {
     }
 
     this.activeSources.push(source);
-    this.scheduledTime = when + (usedSoundTouch
+    this.scheduledTime = when + (usedStretcher
       ? processedBuffer.duration
       : audioBuffer.duration / this._playbackRate);
     this.currentMediaTime = audioTime;
@@ -537,45 +534,12 @@ export class AudioRenderer {
   }
 
   /**
-   * Lazily construct + return the SoundTouch instance with current rate applied.
-   */
-  private getSoundTouch(): SoundTouch {
-    if (!this.soundTouch) {
-      this.soundTouch = new SoundTouch();
-    }
-    this.soundTouch.tempo = this._playbackRate;
-    this.soundTouch.pitch = 1.0;
-    return this.soundTouch;
-  }
-
-  /**
-   * Switch the time-stretching engine at runtime. 'signalsmith' uses the
-   * MIT-licensed Signalsmith Stretch compiled into movi.wasm; 'soundtouch'
-   * is the LGPL fallback shipped as JS.
-   */
-  setStretcher(name: "soundtouch" | "signalsmith"): void {
-    const target = name === "signalsmith";
-    if (target === this.useSignalsmith) return;
-    this.useSignalsmith = target;
-    if (!target && this.signalsmith) {
-      this.signalsmith.destroy();
-      this.signalsmith = null;
-    }
-    Logger.info(TAG, `Stretcher switched to ${name}`);
-    if (target) loadSignalsmith();
-  }
-
-  getStretcher(): "soundtouch" | "signalsmith" {
-    return this.signalsmith ? "signalsmith" : "soundtouch";
-  }
-
-  /**
-   * Kick off Signalsmith WASM-side stretcher init. Single-flight; idempotent.
-   * The actual movi WASM module is shared with FFmpeg, so this typically
-   * resolves instantly once the player is loaded — we just need an instance.
+   * Kick off Signalsmith stretcher construction. Single-flight; idempotent.
+   * The movi WASM module is shared with FFmpeg, so this is fast once the
+   * player has loaded — just an instance allocation.
    */
   private maybeInitSignalsmith(sampleRate: number): void {
-    if (!this.useSignalsmith || this.signalsmith || this.signalsmithLoading) return;
+    if (this.signalsmith || this.signalsmithLoading) return;
     this.signalsmithLoading = true;
     this.signalsmithSampleRate = sampleRate;
     createSignalsmithStretcher(sampleRate, 2)
@@ -589,86 +553,73 @@ export class AudioRenderer {
       })
       .catch((err) => {
         this.signalsmithLoading = false;
-        Logger.warn(TAG, "Signalsmith init failed; staying on SoundTouch", err);
+        Logger.warn(TAG, "Signalsmith init failed", err);
       });
   }
 
   /**
-   * Process audio buffer through the active stretcher (SoundTouch or
-   * Signalsmith) for pitch-preserving playback rate changes.
+   * Pitch-preserving time stretch through Signalsmith. Returns the stretched
+   * AudioBuffer, or null if the stretcher isn't ready yet (caller falls back
+   * to source.playbackRate scaling, which shifts pitch but keeps audio playing).
    */
-  private processSoundTouch(
+  private processStretch(
     inputBuffer: AudioBuffer,
-    playbackRate: number
-  ): AudioBuffer {
-    if (!this.audioContext) return inputBuffer;
+    playbackRate: number,
+  ): AudioBuffer | null {
+    if (!this.audioContext) return null;
 
     const numChannels = inputBuffer.numberOfChannels;
     const sampleRate = inputBuffer.sampleRate;
     const inputFrames = inputBuffer.length;
 
-    // Lazy-init Signalsmith if the flag is on. If sample rate changed since
-    // last instance, drop and rebuild — Signalsmith is fixed-rate per state.
-    if (this.useSignalsmith) {
-      if (this.signalsmith && this.signalsmithSampleRate !== sampleRate) {
-        this.signalsmith.destroy();
-        this.signalsmith = null;
-      }
-      this.maybeInitSignalsmith(sampleRate);
+    // Drop + rebuild the stretcher if the decoded sample rate changed —
+    // Signalsmith is fixed-rate per instance.
+    if (this.signalsmith && this.signalsmithSampleRate !== sampleRate) {
+      this.signalsmith.destroy();
+      this.signalsmith = null;
     }
+    this.maybeInitSignalsmith(sampleRate);
 
-    // Convert planar to interleaved stereo
+    if (!this.signalsmith) return null; // still loading — caller falls back
+
+    const stretcher = this.signalsmith;
+    stretcher.tempo = this._playbackRate;
+    stretcher.pitch = 1.0;
+
+    // Convert planar AudioBuffer → interleaved stereo for the WASM API.
     const interleavedInput = new Float32Array(inputFrames * 2);
     const leftChannel = inputBuffer.getChannelData(0);
     const rightChannel = numChannels > 1 ? inputBuffer.getChannelData(1) : leftChannel;
-
     for (let i = 0; i < inputFrames; i++) {
       interleavedInput[i * 2] = leftChannel[i];
       interleavedInput[i * 2 + 1] = rightChannel[i];
     }
 
-    // Pick stretcher: Signalsmith if loaded, else SoundTouch.
-    const stretcher: SoundTouch | SignalsmithStretcher =
-      this.signalsmith ?? this.getSoundTouch();
-    if (stretcher === this.signalsmith) {
-      stretcher.tempo = this._playbackRate;
-      stretcher.pitch = 1.0;
-    }
-
     stretcher.inputBuffer.putSamples(interleavedInput, 0, inputFrames);
     stretcher.process();
 
-    // Calculate expected output frames
     const expectedFrames = Math.ceil(inputFrames / playbackRate);
     const availableFrames = stretcher.outputBuffer.frameCount;
     const framesToExtract = Math.min(expectedFrames, availableFrames);
 
     if (framesToExtract === 0) {
-      // SoundTouch is still accumulating internally — signal caller to skip scheduling.
-      // Input is buffered inside SoundTouch and will be emitted on subsequent calls.
-      return null as unknown as AudioBuffer;
+      // Stretcher is still warming up — caller should skip scheduling.
+      return null;
     }
 
-    // Extract processed samples
     const interleavedOutput = new Float32Array(framesToExtract * 2);
     stretcher.outputBuffer.receiveSamples(interleavedOutput, framesToExtract);
 
-    // Create output buffer
     const outputBuffer = this.audioContext.createBuffer(
       numChannels,
       framesToExtract,
-      sampleRate
+      sampleRate,
     );
-
-    // De-interleave and copy to output buffer
     const outputLeft = outputBuffer.getChannelData(0);
     const outputRight = numChannels > 1 ? outputBuffer.getChannelData(1) : null;
-
     for (let i = 0; i < framesToExtract; i++) {
       outputLeft[i] = interleavedOutput[i * 2];
-      if (outputRight) {
-        outputRight[i] = interleavedOutput[i * 2 + 1];
-      }
+      if (outputRight) outputRight[i] = interleavedOutput[i * 2 + 1];
     }
 
     return outputBuffer;
@@ -781,13 +732,10 @@ export class AudioRenderer {
 
     const oldRate = this._playbackRate;
 
-    // Clear stretcher state when rate changes (both engines).
-    if (this.preservePitch) {
-      if (this.soundTouch) this.soundTouch.clear();
-      if (this.signalsmith) {
-        this.signalsmith.tempo = newRate;
-        this.signalsmith.clear();
-      }
+    // Clear stretcher state when rate changes.
+    if (this.preservePitch && this.signalsmith) {
+      this.signalsmith.tempo = newRate;
+      this.signalsmith.clear();
     }
 
     // Anchor the audio→media clock at the current play position so reads
@@ -933,8 +881,7 @@ export class AudioRenderer {
     this.isStarved = false;
     this.starvationStartTime = 0;
 
-    // Clear stretcher state (both engines)
-    if (this.soundTouch) this.soundTouch.clear();
+    // Clear stretcher state
     if (this.signalsmith) this.signalsmith.clear();
 
     // Restore gain after fade-out (for next playback)
@@ -1268,7 +1215,6 @@ export class AudioRenderer {
 
     this.gainNode = null;
     this.compressorNode = null;
-    this.soundTouch = null;
     if (this.signalsmith) {
       this.signalsmith.destroy();
       this.signalsmith = null;

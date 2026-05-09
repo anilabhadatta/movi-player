@@ -4513,14 +4513,6 @@ export class MoviElement extends HTMLElement {
     this.applyFullscreenUiState(active);
   }
 
-  /** Audio time-stretcher selector — 'signalsmith' (MIT, baked into WASM) or 'soundtouch'. */
-  public setStretcher(name: "soundtouch" | "signalsmith"): void {
-    this.player?.setStretcher(name);
-  }
-  public getStretcher(): "soundtouch" | "signalsmith" | null {
-    return this.player?.getStretcher() ?? null;
-  }
-
   private static readonly ASPECT_ICONS: Record<string, string> = {
     contain: `<rect x="3" y="3" width="18" height="18" rx="2"/><rect x="6" y="8" width="12" height="8" rx="1"/>`,
     cover: `<rect x="3" y="3" width="18" height="18" rx="2"/><rect x="1" y="7" width="22" height="10" rx="1"/>`,

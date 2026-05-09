@@ -1,14 +1,13 @@
 /**
  * Signalsmith Stretch wrapper — pitch-preserving time-stretch backed by the
  * MIT-licensed Signalsmith library, compiled into the same movi WASM module
- * as FFmpeg/dav1d. Exposes a SoundTouch-compatible facade so AudioRenderer
- * can swap stretchers behind a flag.
+ * as FFmpeg/dav1d.
  *
  * Signalsmith's native model is a single sync `process(in, nIn, out, nOut)`
  * call where the input/output sample-count ratio determines the time-stretch
- * factor (1:1 unity, 1:2 half-speed, 2:1 double-speed). To match SoundTouch's
- * "putSamples / process / available / receiveSamples" shape we stash the
- * incoming chunk on the JS side, run process() on demand, and present the
+ * factor (1:1 unity, 1:2 half-speed, 2:1 double-speed). We expose a
+ * "putSamples → process → frameCount → receiveSamples" shape: stash the
+ * incoming chunk on the JS side, run process() on demand, present the
  * exact-frame output as `frameCount`.
  */
 import { Logger } from "./Logger";
