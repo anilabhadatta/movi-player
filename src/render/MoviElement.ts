@@ -1859,11 +1859,37 @@ export class MoviElement extends HTMLElement {
       }
     });
 
+    // Refresh disabled/visible state of speed options whenever the menu opens —
+    // 4K+ sources cap at 1.5x because hardware decoders genuinely can't
+    // sustain ≥120 effective fps decode (8K @ 2x produces decoder errors and
+    // stalls regardless of buffer tuning). getMaxAllowedRate() returns the
+    // active source's ceiling; defined as a method below.
+    const refreshSpeedMenu = () => {
+      const maxRate = this.getMaxAllowedRate();
+      shadowRoot.querySelectorAll(".movi-speed-item").forEach((item) => {
+        const el = item as HTMLElement;
+        const speed = parseFloat(el.dataset.speed || "1");
+        const blocked = speed > maxRate;
+        el.style.opacity = blocked ? "0.4" : "";
+        el.style.pointerEvents = blocked ? "none" : "";
+        el.title = blocked
+          ? "Not available for this source (4K+ tops out at 1.5x)"
+          : "";
+      });
+    };
+    speedBtn?.addEventListener("click", () => {
+      // setBottomMenuOpen's animation runs after the click handler above —
+      // refresh on the next frame so disabled state applies before the menu
+      // actually paints.
+      requestAnimationFrame(refreshSpeedMenu);
+    });
+
     // Speed selection
     shadowRoot.querySelectorAll(".movi-speed-item").forEach((item) => {
       item.addEventListener("click", (e) => {
         e.stopPropagation();
-        const speed = parseFloat((item as HTMLElement).dataset.speed || "1");
+        const requested = parseFloat((item as HTMLElement).dataset.speed || "1");
+        const speed = Math.min(requested, this.getMaxAllowedRate());
         this.playbackRate = speed;
         this.showOSD(
           OSD.speed,
@@ -3063,7 +3089,8 @@ export class MoviElement extends HTMLElement {
           // +: Speed up (VLC standard)
           e.preventDefault();
           {
-            const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+            const maxRate = this.getMaxAllowedRate();
+            const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].filter(s => s <= maxRate);
             const curIdx = speeds.findIndex(s => s >= this._playbackRate);
             const nextIdx = Math.min((curIdx === -1 ? 3 : curIdx) + 1, speeds.length - 1);
             this.playbackRate = speeds[nextIdx];
@@ -3077,7 +3104,8 @@ export class MoviElement extends HTMLElement {
           // -: Speed down (VLC standard)
           e.preventDefault();
           {
-            const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+            const maxRate = this.getMaxAllowedRate();
+            const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2].filter(s => s <= maxRate);
             const curIdx = speeds.findIndex(s => s >= this._playbackRate);
             const nextIdx = Math.max((curIdx === -1 ? 3 : curIdx) - 1, 0);
             this.playbackRate = speeds[nextIdx];
@@ -5134,6 +5162,19 @@ export class MoviElement extends HTMLElement {
   }
 
   /*
+   * Maximum playback rate the current source can sustain. Heavy sources
+   * (4K+) cap at 1.5x — hardware AV1/HEVC decoders can't sustain ≥120
+   * effective fps decode at 8K, so 2x produces decoder errors and stalls
+   * regardless of buffer / queue tuning. Lighter sources get the full 2x.
+   */
+  private getMaxAllowedRate(): number {
+    const track = (this.player as any)?.trackManager?.getActiveVideoTrack?.();
+    const pixels = (track?.width ?? 0) * (track?.height ?? 0);
+    if (pixels >= 3840 * 2160) return 1.5;
+    return 2;
+  }
+
+  /**
    * Show On-Screen Display (OSD) notification
    */
   private osdTimeout: number | null = null;
@@ -14528,7 +14569,12 @@ export class MoviElement extends HTMLElement {
   }
 
   set playbackRate(value: number) {
-    this._playbackRate = Math.max(0.25, Math.min(4, value));
+    // Clamp to the source's allowed ceiling — 4K+ sources can't sustain >1.5x
+    // decode in any browser today, so even programmatic callers are clamped
+    // to prevent decoder errors / stalls. getMaxAllowedRate returns 2 when
+    // no track is active yet, so attribute init / settings restore still work.
+    const ceiling = this.getMaxAllowedRate();
+    this._playbackRate = Math.max(0.25, Math.min(ceiling, value));
     this.setAttribute("playbackrate", this._playbackRate.toString());
     this.updatePlaybackRate();
     SettingsStorage.getInstance().save({ playbackRate: this._playbackRate });

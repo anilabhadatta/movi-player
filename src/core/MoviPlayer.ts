@@ -1478,7 +1478,13 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // hold the same wall-clock duration as at 1x. Without this, at 0.5x the 100-frame
     // video buffer lasts 3.3s wall-time while 2s audio buffer starves after 2s → stutter.
     const rate = Math.max(0.25, this.clock.getPlaybackRate());
-    const rateScale = rate < 1.0 ? 1.0 / rate : 1.0; // e.g. 2x at 0.5x, 4x at 0.25x
+    // Slow rates: keep the same wall-clock buffer duration (so a 2s audio
+    // target doesn't underrun at 0.5x). Fast rates: give the video pipeline
+    // proportional headroom too — at 1.5x the decoder is producing frames
+    // 50% faster than wall-clock, and the base queue cap empties just as
+    // quickly, so any decode jitter shows up as stutter. Cap at 2x scale
+    // so 4x playback doesn't balloon VRAM/audio buffers on heavy sources.
+    const rateScale = rate < 1.0 ? 1.0 / rate : Math.min(2.0, rate);
     const maxAudioBuffered = (isSoftware ? 5.0 : isPostSeek ? 1.5 : 2.0) * rateScale;
     // Renderer queue limits (in frames). Two separate constraints:
     //
