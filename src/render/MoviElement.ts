@@ -758,10 +758,19 @@ export class MoviElement extends HTMLElement {
   }
 
   private createControls(shadowRoot: ShadowRoot): void {
+    // Overlay is a sibling of the controls container, not a child, so its
+    // box can span the whole player (top:0 → bottom:controls-height) and
+    // its mouseenter/mouseleave catch the cursor crossing ANY player edge.
+    // Nested inside .movi-controls-container it was confined to the bottom
+    // strip and only fired when the cursor crossed that small region.
+    const overlay = document.createElement("div");
+    overlay.className = "movi-controls-overlay";
+    shadowRoot.appendChild(overlay);
+
     const container = document.createElement("div");
     container.className = "movi-controls-container";
+    // eslint-disable-next-line no-unsanitized/property -- static template, no user data
     container.innerHTML = `
-      <div class="movi-controls-overlay"></div>
       <div class="movi-controls-bar" style="position: relative;">
         <div class="movi-progress-container">
           <div class="movi-progress-bar">
@@ -1518,31 +1527,26 @@ export class MoviElement extends HTMLElement {
     });
 
     document.addEventListener("mouseup", async (e) => {
-      if (this.isDragging) {
-        this.isDragging = false; // Stop dragging immediately to prevent UI updates during seek
-        await this.seekFromEvent(e); // Actual seek on release
-      }
-      this.isDragging = false;
+      // Only react to mouseup if we were actively dragging the progress
+      // bar — otherwise any click anywhere on the host page (a button on
+      // the embedding site, an unrelated link) was waking the player
+      // controls. The post-drag bookkeeping below (seek, isOverControls,
+      // showControls) is only meaningful at the end of a scrub.
+      if (!this.isDragging) return;
+      this.isDragging = false; // Stop immediately so the seek's UI updates aren't competing
+      await this.seekFromEvent(e); // Actual seek on release
       const controlsContainer = shadowRoot.querySelector(
         ".movi-controls-container",
       ) as HTMLElement;
       if (controlsContainer) {
         const rect = controlsContainer.getBoundingClientRect();
-        const mouseX = e.clientX;
-        const mouseY = e.clientY;
         const stillOverControls =
-          mouseX >= rect.left &&
-          mouseX <= rect.right &&
-          mouseY >= rect.top &&
-          mouseY <= rect.bottom;
-
+          e.clientX >= rect.left &&
+          e.clientX <= rect.right &&
+          e.clientY >= rect.top &&
+          e.clientY <= rect.bottom;
         this.isOverControls = stillOverControls;
-
-        if (stillOverControls) {
-          this.showControls();
-        } else {
-          this.showControls();
-        }
+        this.showControls();
       }
     });
 
@@ -2186,15 +2190,13 @@ export class MoviElement extends HTMLElement {
       }
     });
 
-    // Show controls when mouse moves over canvas/video/overlay
-    const activityHandler = () => {
-      this.showControls();
-    };
-
-    this.canvas.addEventListener("mousemove", activityHandler);
-    this.video.addEventListener("mousemove", activityHandler);
-    overlay?.addEventListener("mousemove", activityHandler);
-    controlsContainer?.addEventListener("mousemove", activityHandler);
+    // Mousemove → showControls is handled at the host level (see the
+    // listener added in setupKeyboardShortcuts), so it covers EVERY
+    // child — canvas, video, overlay, controls bar, empty-state,
+    // broken-indicator, loading spinner, nerd-stats, and any open
+    // menu. The previous per-child listeners only fired when the
+    // cursor was directly over canvas/video/overlay/controlsContainer,
+    // missing siblings that sit above them.
   }
 
   private async seekFromEvent(e: MouseEvent): Promise<void> {
@@ -3154,6 +3156,41 @@ export class MoviElement extends HTMLElement {
     // which yanks the page mid-hover when the player is partly off-screen.
     this.addEventListener("mouseenter", () => {
       this.focus({ preventScroll: true });
+      // Surface the controls the moment the cursor enters the player,
+      // regardless of which child element is under it. The canvas/video/
+      // overlay mousemove handlers miss the case where the cursor is
+      // over a sibling that absorbs events (empty-state, broken-indicator,
+      // loading spinner, nerd-stats, an open menu), so the host-level
+      // enter/move covers every internal element.
+      if (this._controls) this.showControls();
+    });
+
+    this.addEventListener("mousemove", () => {
+      if (this._controls) this.showControls();
+    });
+
+    // Hide controls when the cursor leaves the player's bounding box from
+    // ANY direction. The .movi-controls-overlay's own mouseleave isn't
+    // sufficient because several siblings sit above the overlay with
+    // pointer-events:auto and higher z-index — .movi-empty-state (z:5
+    // when there's no video), .movi-broken-indicator (z:10000), the
+    // loading spinner, nerd-stats, and any open menu. When the cursor is
+    // over one of those and exits the player, the overlay never had the
+    // cursor, so its mouseleave doesn't fire. mouseleave on the host
+    // element doesn't care which child was under the cursor; it fires
+    // whenever the cursor crosses the host's outer edge. The drag/menu/
+    // touch guards mirror the controls-container handler so behavior
+    // matches whether the cursor exits via the bottom or any other side.
+    this.addEventListener("mouseleave", () => {
+      if (
+        this._controls &&
+        !this.isDragging &&
+        !this.isTouchDragging &&
+        !this.isAnyMenuOpen() &&
+        Date.now() - this.lastTouchTime >= 1000
+      ) {
+        this.hideControls();
+      }
     });
   }
 
@@ -7201,16 +7238,26 @@ export class MoviElement extends HTMLElement {
         top: 0;
         left: 0;
         right: 0;
-        bottom: var(--movi-controls-height);
+        /* Spans the entire player (bottom:0, not bottom:controls-height)
+           so its mouseenter/mouseleave catch the cursor crossing any
+           edge — including over the controls bar. The controls-container
+           sits on z-index:10 (overlay is z:1), so buttons inside the bar
+           still receive their clicks; the overlay just provides the hit
+           surface for cursor-tracking. The gradient is bottom-anchored
+           and fades to transparent in the upper portion, so extending
+           the bottom edge under the bar doesn't change how the gradient
+           reads visually. */
+        bottom: 0;
         pointer-events: all;
         z-index: 1;
-        /* Subtle gradient overlay for better control visibility */
         background: var(--movi-overlay-bg);
         opacity: 0;
         transition: opacity var(--movi-transition-normal);
       }
       
-      .movi-controls-container.movi-controls-visible .movi-controls-overlay {
+      /* Overlay is no longer nested inside .movi-controls-container, so
+         the visibility class isn't an ancestor — use :has on the host. */
+      :host:has(.movi-controls-container.movi-controls-visible) .movi-controls-overlay {
         opacity: 1;
       }
 
@@ -9425,6 +9472,22 @@ export class MoviElement extends HTMLElement {
           opacity: 1 !important;
         }
 
+        /* Small player on a hover-capable device (e.g. embedded in a
+           compare/split layout on desktop) still needs hover-to-open
+           with the same width/opacity transition as the full-size
+           player. Just overriding display:none → flex on hover would
+           snap (display can't transition); instead, keep the slider
+           in the layout as display:flex and let the base rule's
+           width:0 + opacity:0 collapse it, so the desktop hover rule
+           (lines ~7514) animates width and opacity smoothly. The
+           wrapping @media keeps touch devices on the tap-to-open
+           path above. */
+        @media (hover: hover) {
+          .movi-volume-slider-container {
+            display: flex !important;
+          }
+        }
+
         .movi-seek-backward,
         .movi-seek-forward {
           display: none !important;
@@ -9557,8 +9620,17 @@ export class MoviElement extends HTMLElement {
           transform-origin: bottom center !important;
           width: 90% !important;
           max-width: 300px !important;
-          /* Constrain height: min of 60% viewport height OR 30% viewport width (fits ~108px on 360px wide 16:9 player, strictly avoiding top clip) */
-          max-height: min(60vh, 30vw) !important;
+          /* Cap against the PLAYER's own height (set by JS on connect/
+             resize), not the viewport — an embedded small player on a
+             1400px desktop window had 30vw=420px max-height but only
+             ~380px of player height, so the menu opened above the
+             controls bar and got chopped off the top by :host's
+             contain:paint. The reserve (controls bar ~60px + top
+             breathing room ~60px) keeps the menu visually inside the
+             player instead of butting against its top edge. The 70vh
+             fallback matches the variable's default elsewhere;
+             max(120px,…) keeps one visible row on tiny players. */
+          max-height: max(120px, calc(var(--movi-player-height, 70vh) - 120px)) !important;
           overflow-y: auto !important;
           z-index: 2000 !important;
           -webkit-overflow-scrolling: touch !important;
