@@ -1549,17 +1549,25 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     const activeVideo = this.trackManager.getActiveVideoTrack();
     const pixels = (activeVideo?.width ?? 0) * (activeVideo?.height ?? 0);
     const fps = Math.max(15, Math.min(120, activeVideo?.frameRate ?? 30));
+    const is8KPlus = pixels >= 7680 * 4320;
     const isHighRes = pixels >= 3840 * 2160; // 4K and above
     const isMobile = MoviPlayer._isMobileDevice;
     let baseHwQueue: number;
-    if (isHighRes) {
-      // 4K+ desktop: 16 frames is a VRAM-bound sweet spot (≥4K HDR frames are
-      // ~50MB each; deeper queues stall the compositor). On mobile the same
-      // sources hit Chrome's software dav1d path most of the time, so the
-      // bottleneck shifts from VRAM to decode throughput — a shallow queue
-      // helps the decoder catch up rather than fall further behind.
+    if (is8KPlus) {
+      // 8K+ desktop: 16 frames is a VRAM-bound sweet spot (8K HDR frames are
+      // ~50MB each; deeper queues stall the compositor and 100 × 50MB ≈ 5GB
+      // VRAM was the original starvation cause). Mobile shifts to software
+      // dav1d so a shallow queue helps the decoder catch up.
       if (isMobile) baseHwQueue = isPostSeek ? 8 : 12;
       else baseHwQueue = isPostSeek ? 12 : 16;
+    } else if (isHighRes) {
+      // 4K (not 8K) desktop: 4K HDR RGBA8 frames are ~33MB so 48 × 33MB ≈
+      // 1.6GB VRAM — bounded but deep enough to absorb 250-500ms GC/decode
+      // hiccups without draining the renderer queue. The previous uniform
+      // 16-frame cap (267ms @60fps) was too shallow for 4K60 HEVC HDR: any
+      // jitter emptied the queue, paused demuxing, and starved audio.
+      if (isMobile) baseHwQueue = isPostSeek ? 8 : 16;
+      else baseHwQueue = isPostSeek ? 24 : 48;
     } else if (isMobile) {
       // 1080p (and lighter) on mobile is smooth at the 800ms target — keep it.
       const targetMs = isPostSeek ? 400 : 800;
