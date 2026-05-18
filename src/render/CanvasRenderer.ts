@@ -665,22 +665,44 @@ export class CanvasRenderer {
     this.hdrEnabled = enabled;
     Logger.info(TAG, `HDR manual override set to: ${enabled}`);
 
-    // Re-detect and re-apply color space if gl exists
-    const newColorSpace = this.detectHDRColorSpace(
+    // Re-detect and re-apply color space if gl exists.
+    // Mirror configure(): upgrade HDR sources on Chromium to rec2100-pq/hlg so
+    // the compositor sends full peak brightness. detectHDRColorSpace() only
+    // returns display-p3 (wide-gamut SDR), which would dim the picture.
+    const detectedColorSpace = this.detectHDRColorSpace(
       this.lastPrimaries,
       this.lastTransfer,
     );
 
     if (this.gl && this.gl.drawingBufferColorSpace !== undefined) {
       try {
+        const isChromium = !!(window as any).chrome;
+        const transferLc = (this.lastTransfer || "").toLowerCase();
+        const isHLGSource =
+          transferLc.includes("hlg") || transferLc.includes("arib-std-b67");
+        const isHDRPath = this.isHDRSource && this.hdrEnabled && isChromium;
+        const hdrSpace = isHLGSource ? "rec2100-hlg" : "rec2100-pq";
+
+        let targetSpace: string;
+        if (isHDRPath) {
+          targetSpace = hdrSpace;
+        } else if (detectedColorSpace !== "srgb") {
+          const supportedSpaces = ["srgb", "display-p3"];
+          targetSpace = supportedSpaces.includes(detectedColorSpace)
+            ? detectedColorSpace
+            : "srgb";
+        } else {
+          targetSpace = "srgb";
+        }
+
         // @ts-ignore
-        this.gl.drawingBufferColorSpace = newColorSpace;
+        this.gl.drawingBufferColorSpace = targetSpace;
         // @ts-ignore
-        this.gl.unpackColorSpace = newColorSpace;
-        this.colorSpace = newColorSpace;
+        this.gl.unpackColorSpace = targetSpace;
+        this.colorSpace = detectedColorSpace;
         Logger.info(
           TAG,
-          `Updated WebGL color space to ${newColorSpace} following HDR toggle`,
+          `Updated WebGL color space to ${targetSpace} (detected: ${detectedColorSpace}, HDR path: ${isHDRPath}) following HDR toggle`,
         );
       } catch (e) {
         Logger.warn(TAG, "Failed to update drawingBufferColorSpace on the fly");
