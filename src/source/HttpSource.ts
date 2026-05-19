@@ -308,12 +308,20 @@ export class HttpSource implements SourceAdapter {
     // Extract filename from Content-Disposition header (e.g., "attachment; filename=\"video.mp4\"")
     const disposition = response.headers.get("Content-Disposition");
     if (disposition) {
-      // Try filename*= (RFC 5987 encoded) first, then filename=
-      let filenameMatch = disposition.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;\s]+)/i);
+      // Try filename*= (RFC 5987 encoded) first, then filename=.
+      // Per RFC 5987 the value after `UTF-8''` should be percent-encoded
+      // (so spaces become %20), but some CDNs (fsl-buckets.life seen in
+      // the wild) ship the filename with raw spaces. The old `[^;\s]+`
+      // greedy was stopping at the first space — capturing only "The"
+      // from "The Super Mario ...mkv". Capture up to `;` or end-of-string
+      // and trim, so both compliant and lazy servers work.
+      let filenameMatch = disposition.match(/filename\*\s*=\s*(?:UTF-8''|utf-8'')([^;]+)/i);
       if (filenameMatch) {
         try {
-          this._contentDispositionFilename = decodeURIComponent(filenameMatch[1]);
-        } catch { /* ignore decode error */ }
+          this._contentDispositionFilename = decodeURIComponent(filenameMatch[1].trim());
+        } catch {
+          this._contentDispositionFilename = filenameMatch[1].trim();
+        }
       }
       if (!this._contentDispositionFilename) {
         // Try quoted filename first (allows spaces inside quotes)
