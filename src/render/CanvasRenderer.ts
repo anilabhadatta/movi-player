@@ -2091,6 +2091,19 @@ export class CanvasRenderer {
       const scaledWidth = cue.image.width * uniformScale;
       const scaledHeight = cue.image.height * uniformScale;
 
+      // The video content is rendered "contain"-fit inside the canvas, so on
+      // an ultrawide window with a 16:9 source the video sits in a centred
+      // band with pillarbox bars on the sides (and vice versa for letterbox).
+      // PGS coordinates live in the 1920x1080 presentation space — i.e.
+      // relative to the video band, not the canvas — so positioned cues
+      // need this offset added to land where the author put them. Without
+      // it, a centred-in-PGS cue gets glued to the canvas's left third on
+      // ultrawide displays.
+      const videoOffsetX =
+        (canvasWidth - subtitleVideoWidth * baseScale) / 2;
+      const videoOffsetY =
+        (canvasHeight - subtitleVideoHeight * baseScale) / 2;
+
       const bottomPadding =
         CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
 
@@ -2102,7 +2115,7 @@ export class CanvasRenderer {
       if (cue.position?.x !== undefined) {
         const sourceCentreX =
           (cue.position.x + cue.image.width / 2) * baseScale;
-        x = sourceCentreX - scaledWidth / 2;
+        x = videoOffsetX + sourceCentreX - scaledWidth / 2;
       } else {
         x = (canvasWidth - scaledWidth) / 2;
       }
@@ -2113,7 +2126,7 @@ export class CanvasRenderer {
         // but ensure it doesn't go above top.
         const sourceCentreY =
           (cue.position.y + cue.image.height / 2) * baseScale;
-        y = sourceCentreY - scaledHeight / 2;
+        y = videoOffsetY + sourceCentreY - scaledHeight / 2;
         y = Math.max(0, Math.min(y, canvasHeight - scaledHeight));
       } else {
         // Default: Position at bottom with padding above controls (same as text subtitles)
