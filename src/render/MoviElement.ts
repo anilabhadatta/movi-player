@@ -125,6 +125,11 @@ export class MoviElement extends HTMLElement {
   // over the first frame during the brief pre-play startup window even
   // though the player is about to start on its own.
   private _autoplayStarting: boolean = false;
+  // True once playback has actually reached "playing" at least once.
+  // Distinguishes a real user pause (worth surfacing the controls bar
+  // for) from the synthetic "paused" state the initial poster seek
+  // lands in before the user has even pressed play.
+  private _hasEverPlayed: boolean = false;
   private _pendingPlay: boolean = false;
   // True while loading spinner + play() must wait for FileSource preload to
   // complete (mobile only, height >= 2160). Released by the player's
@@ -6568,12 +6573,25 @@ export class MoviElement extends HTMLElement {
     // button should reappear if the player is paused/ready, since
     // hideControls now strips its visible class. Without this, the
     // big play button stayed gone until the next state change.
+    //
+    // Gate on the loading INDICATOR's display, not the `isLoading`
+    // field. The field stays true through the entire initializePlayer
+    // call, but the indicator is suppressed during the initial
+    // seek(0) (suppressSpinner) — so visually nothing is loading,
+    // yet the field-based guard kept the big play button hidden on
+    // first paint when autoplay is off. Match the same source-of-
+    // truth `updatePlayPauseIcon` uses (line ~13024) so the two
+    // can't disagree.
     const centerPlayPause = this.shadowRoot?.querySelector(
       ".movi-center-play-pause",
     ) as HTMLElement | null;
+    const loadingIndicator = this.shadowRoot?.querySelector(
+      ".movi-loading-indicator",
+    ) as HTMLElement | null;
+    const spinnerVisible = loadingIndicator?.style.display === "flex";
     if (
       centerPlayPause &&
-      !this.isLoading &&
+      !spinnerVisible &&
       !this._isUnsupported &&
       !this._autoplayStarting
     ) {
@@ -6861,15 +6879,22 @@ export class MoviElement extends HTMLElement {
       if (this.video) this.video.style.cursor = "none";
     }
 
-    // The center play/pause button lives in a separate sibling, so the
-    // controls-container's hidden class doesn't reach it. Without this,
-    // pausing then moving the cursor out of the player left a big round
-    // play button floating over the frame even though the bottom bar
-    // had faded away.
+    // The center play/pause button is a separate sibling, so the bar's
+    // hidden class doesn't reach it. Only strip it when the player is
+    // actually playing — that's the pause-confirmation flash from a
+    // click, which should fade out alongside the bar. When the player
+    // is paused/ready/ended, keep the big play icon visible so the
+    // user always has a "click to resume" affordance even after the
+    // bottom bar has auto-hidden. updatePlayPauseIcon's paused branch
+    // will re-add the class on the next 250ms tick anyway, but the
+    // visible flicker between strip-and-re-add is what we're avoiding.
     const centerPlayPause = this.shadowRoot?.querySelector(
       ".movi-center-play-pause",
     ) as HTMLElement | null;
-    if (centerPlayPause) centerPlayPause.classList.remove("movi-center-visible");
+    const state = this.player?.getState();
+    if (centerPlayPause && state === "playing") {
+      centerPlayPause.classList.remove("movi-center-visible");
+    }
 
     // Shift timeline panel down when controls hide
     const timelinePanel = this.shadowRoot?.querySelector(".movi-timeline-panel") as HTMLElement;
@@ -6907,8 +6932,15 @@ export class MoviElement extends HTMLElement {
     ) as HTMLElement;
 
     if (this._controls) {
+      // Make the bar a layout participant, but start it in the hidden
+      // state — the YouTube-style first paint is just the big centre
+      // play icon over the poster/frame, no chrome. The host-level
+      // mouseenter / mousemove handlers surface the bar on the first
+      // real interaction, and stateChange → "paused" / "ended" still
+      // re-shows it after playback has started.
       container.style.display = "block";
-      this.showControls();
+      container.classList.remove("movi-controls-visible");
+      container.classList.add("movi-controls-hidden");
     } else {
       container.style.display = "none";
       if (centerPlayPause) centerPlayPause.classList.remove("movi-center-visible");
@@ -7142,17 +7174,22 @@ export class MoviElement extends HTMLElement {
          color: rgba(0, 0, 0, 0.4) !important; 
       }
       
-      :host([theme="light"]) .movi-volume-slider::-webkit-slider-runnable-track {
-         background: rgba(0, 0, 0, 0.15);
+      /* Light theme: keep both tracks transparent so the input's
+         gradient shows; the gradient itself swaps the unfilled
+         colour below for contrast against the lighter chrome. */
+      :host([theme="light"]) .movi-volume-slider {
+         background: linear-gradient(
+           to right,
+           var(--movi-primary) 0%,
+           var(--movi-primary) var(--movi-volume-pct, 100%),
+           rgba(0, 0, 0, 0.15) var(--movi-volume-pct, 100%),
+           rgba(0, 0, 0, 0.15) 100%
+         );
       }
 
       :host([theme="light"]) .movi-volume-slider::-webkit-slider-thumb {
          background: #11142d;
          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
-      }
-
-      :host([theme="light"]) .movi-volume-slider::-moz-range-track {
-         background: rgba(0, 0, 0, 0.15);
       }
 
       :host([theme="light"]) .movi-volume-slider::-moz-range-thumb {
@@ -7777,7 +7814,17 @@ export class MoviElement extends HTMLElement {
         height: 4px;
         -webkit-appearance: none;
         appearance: none;
-        background: rgba(255, 255, 255, 0.2);
+        /* Two-tone track: primary up to thumb, muted past it. The
+           hard stop at --movi-volume-pct (set in JS on every volume
+           change) means there's no anti-aliased blur where the two
+           colours meet. */
+        background: linear-gradient(
+          to right,
+          var(--movi-primary) 0%,
+          var(--movi-primary) var(--movi-volume-pct, 100%),
+          rgba(255, 255, 255, 0.2) var(--movi-volume-pct, 100%),
+          rgba(255, 255, 255, 0.2) 100%
+        );
         border-radius: 100px;
         outline: none !important;
         pointer-events: auto !important;
@@ -7812,7 +7859,9 @@ export class MoviElement extends HTMLElement {
 
       .movi-volume-slider::-webkit-slider-runnable-track {
         height: 4px;
-        background: rgba(255, 255, 255, 0.2);
+        /* Track must be transparent so the input's gradient
+           background (filled-vs-rest) shows through. */
+        background: transparent;
         border-radius: 100px;
       }
 
@@ -7863,7 +7912,8 @@ export class MoviElement extends HTMLElement {
       
       .movi-volume-slider::-moz-range-track {
         height: 4px;
-        background: rgba(255, 255, 255, 0.2);
+        /* Same as the webkit track — let the input's gradient show. */
+        background: transparent;
         border-radius: 100px;
       }
 
@@ -10066,15 +10116,15 @@ export class MoviElement extends HTMLElement {
         }
       }
 
-      /* Loading indicator — anchored to the same spot as the center
-         play/pause button (top 44%, 3% above geometric centre) so the spinner
-         and the play button occupy the exact same point. The box shrink-wraps
-         the loader; translate(-50%, -50%) centres it on that anchor. The inner
-         loader keeps its own rotate animation — separate element, no transform
-         conflict. */
+      /* Loading indicator — must share the same anchor as the centre
+         play/pause button so a spinner-to-play transition (or vice
+         versa) doesn't jump vertically. Default placement mirrors the
+         button's default (centre of the visible band above the
+         controls bar); the two override blocks below match the
+         button's bar-hidden and both-bars-visible rules exactly. */
       .movi-loading-indicator {
         position: absolute;
-        top: 44%;
+        top: calc(50% - var(--movi-controls-height) / 2);
         left: 50%;
         transform: translate(-50%, -50%);
         display: flex;
@@ -10083,6 +10133,15 @@ export class MoviElement extends HTMLElement {
         z-index: 1000;
         pointer-events: none;
         background: transparent;
+      }
+
+      :host:has(.movi-controls-container.movi-controls-hidden) .movi-loading-indicator,
+      :host(:not([controls])) .movi-loading-indicator {
+        top: 50%;
+      }
+
+      :host:has(.movi-controls-container.movi-controls-visible):has(.movi-title-bar.movi-title-visible) .movi-loading-indicator {
+        top: calc(50% - (var(--movi-controls-height) - 52px) / 2);
       }
 
       .movi-loader-container {
@@ -10116,14 +10175,15 @@ export class MoviElement extends HTMLElement {
         }
       }
 
-      /* Center play/pause button — anchored 3% above the geometric
-         centre so the bottom controls bar (always present, visually
-         heavy) doesn't drag the perceived centre down. Subtle enough
-         that it still reads as "middle" on a pane with no chrome
-         visible. */
+      /* Centre play/pause button. Default placement assumes only the
+         bottom controls bar is visible — sit the icon at the centre
+         of the available video band (50% of player minus half the
+         bar's height) so it reads as "middle" regardless of player
+         size. Bar-hidden and both-bars-visible overrides further
+         down adjust this for the other two layout states. */
       .movi-center-play-pause {
         position: absolute;
-        top: 44%;
+        top: calc(50% - var(--movi-controls-height) / 2);
         left: 50%;
         transform: translate(-50%, -50%) scale(0.8);
         z-index: 5;
@@ -10140,7 +10200,7 @@ export class MoviElement extends HTMLElement {
         opacity: 0;
         visibility: hidden;
         pointer-events: none;
-        transition: opacity var(--movi-transition-bounce), transform var(--movi-transition-bounce), visibility 0s linear 0.3s;
+        transition: opacity var(--movi-transition-bounce), transform var(--movi-transition-bounce), top var(--movi-transition-normal), visibility 0s linear 0.3s;
         box-shadow: 0 8px 32px color-mix(in srgb, var(--movi-primary) 25%, transparent), inset 0 0 0 1px rgba(255, 255, 255, 0.1);
       }
 
@@ -10150,6 +10210,25 @@ export class MoviElement extends HTMLElement {
         transform: translate(-50%, -50%) scale(1);
         pointer-events: auto;
         transition-delay: 0s;
+      }
+
+      /* Bar hidden or no controls attribute → no chrome to balance
+         against, sit at true geometric centre. */
+      :host:has(.movi-controls-container.movi-controls-hidden) .movi-center-play-pause,
+      :host(:not([controls])) .movi-center-play-pause {
+        top: 50%;
+      }
+
+      /* Bar visible AND title bar visible → centre the icon inside
+         the visible video band (between title bottom and controls
+         top), not the full player. The 44% default biases too far up
+         when there's also a title bar to balance the controls; here
+         the offset is just half the *difference* between the two
+         chrome heights (title ≈ 52px, controls 72px → ~10px above
+         centre on desktop). calc() keeps it right on mobile where
+         --movi-controls-height drops to 64px too. */
+      :host:has(.movi-controls-container.movi-controls-visible):has(.movi-title-bar.movi-title-visible) .movi-center-play-pause {
+        top: calc(50% - (var(--movi-controls-height) - 52px) / 2);
       }
 
       .movi-center-play-pause:hover {
@@ -11814,6 +11893,10 @@ export class MoviElement extends HTMLElement {
         if (!(this._src instanceof File)) {
           const oldSrc = this._src;
           this._src = newValue || null;
+          // New source → reset the "has been played" flag so the
+          // next source's initial poster-seek "paused" transition
+          // doesn't trigger a premature bar surface.
+          if (newValue !== oldSrc) this._hasEverPlayed = false;
 
           // Show/hide empty state indicator based on src
           if (this.emptyStateIndicator) {
@@ -12661,6 +12744,7 @@ export class MoviElement extends HTMLElement {
         // first so we can skip the click-confirmation UI below.
         const wasAutoplayStart = this._autoplayStarting;
         this._autoplayStarting = false;
+        this._hasEverPlayed = true;
         this.dispatchEvent(new Event("play"));
         // Autoplay had no user gesture, so there's no click to confirm —
         // hide the controls immediately rather than running the 200ms
@@ -12717,7 +12801,14 @@ export class MoviElement extends HTMLElement {
         }
       } else if (state === "paused") {
         this.dispatchEvent(new Event("pause"));
-        this.showControls();
+        // Only surface the bar if this is a real user pause — i.e.
+        // playback has actually started at least once. The initial
+        // seek(0, suppressSpinner) the no-autoplay branch fires for
+        // the poster frame also lands in "paused" (see MoviPlayer's
+        // seek completion path), and we don't want that synthetic
+        // transition to flash the bottom bar over the first frame.
+        // The center play icon is enough on first paint.
+        if (this._hasEverPlayed) this.showControls();
         if (this._resume) this.saveResumePosition();
       } else if (state === "ended") {
         this.dispatchEvent(new Event("ended"));
@@ -13098,17 +13189,16 @@ export class MoviElement extends HTMLElement {
           centerPlayIcon?.style.setProperty("display", "block");
           centerPauseIcon?.style.setProperty("display", "none");
 
-          // Mirror the playing branch's gating: only surface the
-          // center button when controls are enabled AND currently
-          // visible. Without this guard, the periodic UI refresh
-          // (which calls updatePlayPauseIcon) re-added the center
-          // button moments after hideControls had stripped it, so
-          // the play button kept popping back over a hidden bar.
-          const controlsDisabled = !this._controls;
-          const controlsHidden =
-            controlsDisabled ||
-            this.controlsContainer?.classList.contains("movi-controls-hidden");
-          if (!controlsHidden) {
+          // Paused/ready state: surface the big play icon whenever
+          // controls are enabled — independent of the bottom bar's
+          // current visibility. The bar may be auto-hidden (no hover
+          // on touch, or after the play→pause flash on desktop), but
+          // the user still needs a "click here to resume" affordance.
+          // The playing branch above keeps the controlsHidden gate so
+          // the pause-confirmation flash continues to fade out with
+          // the bar — that's about the click-confirmation flow, not
+          // the resume affordance.
+          if (this._controls) {
             requestAnimationFrame(() => {
               centerPlayPauseBtn.classList.add("movi-center-visible");
             });
@@ -13249,7 +13339,17 @@ export class MoviElement extends HTMLElement {
     ) as HTMLInputElement;
 
     if (volumeSlider) {
-      volumeSlider.value = this._muted ? "0" : this._volume.toString();
+      const v = this._muted ? 0 : this._volume;
+      volumeSlider.value = v.toString();
+      // Drive the track's fill-up-to-thumb gradient. Native <input
+      // type=range> doesn't expose a separate filled portion across
+      // browsers, so the CSS gradient below reads this custom prop
+      // to draw a coloured segment from 0 to thumb and a muted one
+      // beyond.
+      volumeSlider.style.setProperty(
+        "--movi-volume-pct",
+        `${Math.round(v * 100)}%`,
+      );
     }
 
     // Reset all first
@@ -13915,6 +14015,7 @@ export class MoviElement extends HTMLElement {
     if (value instanceof File) {
       // For File objects, store in memory (can't store in attributes)
       this._src = value;
+      this._hasEverPlayed = false;
       // Remove the src attribute if it was a string
       this.removeAttribute("src");
       // updatePoster gates on hasSource — re-evaluate now that _src is set.
@@ -15760,7 +15861,14 @@ export class MoviElement extends HTMLElement {
       titleText.textContent = this._title;
       titleBar.style.display = "block";
 
-      if (titleAppeared) this.showControls();
+      // Surface the bottom bar alongside the title only after playback
+      // has actually started — otherwise the YouTube-style first paint
+      // (poster + centre play icon only) gets disrupted the moment the
+      // title auto-loads from metadata. The autoplay+muted case the
+      // original showControls() call was added for is still covered:
+      // by the time autoplay reaches "playing" and the title becomes
+      // available, _hasEverPlayed is true.
+      if (titleAppeared && this._hasEverPlayed) this.showControls();
 
       // Show title if controls are currently visible
       const container = this.controlsContainer;
