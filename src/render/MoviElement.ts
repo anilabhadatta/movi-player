@@ -2837,7 +2837,11 @@ export class MoviElement extends HTMLElement {
         case " ":
         case "k":
         case "K": {
-          // Space or K: Play/Pause
+          // Space or K: Play/Pause. Don't surface the bar on this
+          // keyboard toggle — matches mouse click + the stateChange
+          // paused handler, which both stopped re-popping chrome on
+          // every play/pause. The centre play icon flashes as the
+          // confirmation; users that want the bar can hover / tap.
           e.preventDefault();
           const state = this.player?.getState();
           if (state === "playing" || state === "buffering") {
@@ -2845,7 +2849,6 @@ export class MoviElement extends HTMLElement {
           } else {
             this.play();
           }
-          this.showControls();
           break;
         }
         case "ArrowLeft":
@@ -6566,7 +6569,10 @@ export class MoviElement extends HTMLElement {
       container.classList.add("movi-controls-visible");
       container.classList.remove("movi-controls-hidden");
 
-      // Update cursor
+      // Restore cursor — clear the inline `none` on the host so the
+      // CSS-driven cursor (default on the visible-controls path)
+      // takes back over. Mirrors what hideControls does in reverse.
+      this.style.cursor = "";
       if (this.canvas) this.canvas.style.cursor = "default";
       if (this.video) this.video.style.cursor = "default";
     }
@@ -6636,26 +6642,26 @@ export class MoviElement extends HTMLElement {
       this.controlsTimeout = null;
     }
 
-    // Auto-hide only if:
-    // 1. Player is playing (as requested)
-    // 2. Not dragging
-    // 3. Mouse is NOT over the controls bar (traditional behavior to keep it visible if manually hovering)
-    // 4. No menu is currently open
-    const state = this.player?.getState();
-    const isPlaying = state === "playing";
-
+    // Auto-hide whenever the player isn't "actively held open":
+    // 1. Not dragging the scrubber
+    // 2. Mouse is NOT over the controls bar
+    // 3. No menu (speed / audio / subtitle / quality) is open
+    //
+    // Previously this only fired during `playing`, which left the
+    // bar stuck on screen indefinitely after a pause + cursor-away.
+    // YouTube hides the bar on pause too once you stop interacting,
+    // so we match that — the player will only stay open while the
+    // user is actually hovering / scrubbing / has a menu out.
     if (
-      isPlaying &&
       !this.isOverControls &&
       !this.isDragging &&
       !this.isTouchDragging &&
       !this.isAnyMenuOpen()
     ) {
       this.controlsTimeout = window.setTimeout(() => {
-        // Double check state before hiding
-        const currentState = this.player?.getState();
+        // Re-check gating conditions before hiding — a menu may have
+        // been opened, the cursor may have moved over the bar, etc.
         if (
-          currentState === "playing" &&
           !this.isOverControls &&
           !this.isDragging &&
           !this.isTouchDragging &&
@@ -6876,7 +6882,14 @@ export class MoviElement extends HTMLElement {
       container.classList.remove("movi-controls-visible");
       container.classList.add("movi-controls-hidden");
 
-      // Hide cursor
+      // Hide cursor. Setting the host element's inline cursor is the
+      // single most reliable signal — the :has-based CSS rule below
+      // does the right thing in spec terms, but Safari (and Chrome
+      // on idle frames without mouse movement) sometimes doesn't
+      // repaint the cursor until the pointer moves. Forcing the host
+      // (and canvas/video, which sit underneath the overlay) via
+      // inline style makes the change take effect immediately.
+      this.style.cursor = "none";
       if (this.canvas) this.canvas.style.cursor = "none";
       if (this.video) this.video.style.cursor = "none";
     }
@@ -12866,14 +12879,13 @@ export class MoviElement extends HTMLElement {
         }
       } else if (state === "paused") {
         this.dispatchEvent(new Event("pause"));
-        // Only surface the bar if this is a real user pause — i.e.
-        // playback has actually started at least once. The initial
-        // seek(0, suppressSpinner) the no-autoplay branch fires for
-        // the poster frame also lands in "paused" (see MoviPlayer's
-        // seek completion path), and we don't want that synthetic
-        // transition to flash the bottom bar over the first frame.
-        // The center play icon is enough on first paint.
-        if (this._hasEverPlayed) this.showControls();
+        // Don't auto-surface the bar on pause anymore — the centre
+        // play button already comes back (via updatePlayPauseIcon's
+        // paused branch) and tells the user playback is paused. The
+        // old showControls() here re-popped the entire chrome on
+        // every space-press or remote pause, which felt noisy after
+        // the auto-hide cleanly faded it away. Hover / tap still
+        // surfaces the bar manually.
         if (this._resume) this.saveResumePosition();
       } else if (state === "ended") {
         this.dispatchEvent(new Event("ended"));
