@@ -3842,9 +3842,14 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (videoTrack) {
       stats["Video Codec"] = videoTrack.codec ?? "N/A";
       stats["Resolution"] = `${videoTrack.width}x${videoTrack.height}`;
-      // Quality label
+      // Quality label — classify by the larger of actual height and the
+      // 16:9-normalised height (width * 9 / 16). Cinematic / ultrawide
+      // sources letterbox horizontally, so a 3840×2080 cut of 4K UHD
+      // would otherwise misreport as "2K" purely because its pixel
+      // height is < 2160.
       const h = videoTrack.height;
-      stats["Quality"] = h >= 8640 ? "16K" : h >= 4320 ? "8K" : h >= 2160 ? "4K" : h >= 1440 ? "2K" : h >= 1080 ? "1080p" : h >= 720 ? "720p" : h >= 480 ? "480p" : "SD";
+      const eff = Math.max(h, Math.round(videoTrack.width * 9 / 16));
+      stats["Quality"] = eff >= 8640 ? "16K" : eff >= 4320 ? "8K" : eff >= 2160 ? "4K" : eff >= 1440 ? "2K" : eff >= 1080 ? "1080p" : eff >= 720 ? "720p" : eff >= 480 ? "480p" : "SD";
       stats["Frame Rate"] = `${videoTrack.frameRate} fps`;
       stats["Video Bitrate"] = videoTrack.bitRate
         ? `${(videoTrack.bitRate / 1000).toFixed(0)} kbps`

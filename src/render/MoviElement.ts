@@ -4975,14 +4975,16 @@ export class MoviElement extends HTMLElement {
     // MoviPlayer exposes the wrapper as `hlsWrapper`; the previous `.hls`
     // path silently resolved to undefined, leaving the badge blank in Auto.
     let activeHeight = activeTrack?.height || 0;
+    let activeWidth = (activeTrack as any)?.width || 0;
     if (!activeHeight && activeTrack?.id === -1) {
       try {
         const hls = (this.player as any).hlsWrapper?.hls
         const hlsLevel = hls?.levels?.[hls?.currentLevel];
         activeHeight = hlsLevel?.height || 0;
+        activeWidth = hlsLevel?.width || 0;
       } catch {}
     }
-    this._updateQualityBtnBadge(this._heightBadge(activeHeight));
+    this._updateQualityBtnBadge(this._heightBadge(activeHeight, activeWidth));
 
     qualityList.innerHTML = uniqueTracks
       .map((track) => {
@@ -4990,10 +4992,12 @@ export class MoviElement extends HTMLElement {
         const label =
           track.label || (track.height ? `${track.height}p` : "Auto");
         const h = track.height || 0;
+        const w = (track as any).width || 0;
+        const eff = w > 0 ? Math.max(h, Math.round(w * 9 / 16)) : h;
         let badge = "";
-        if (h >= 4320) badge = "8K";
-        else if (h >= 2160) badge = "4K";
-        else if (h >= 1080) badge = "HD";
+        if (eff >= 4320) badge = "8K";
+        else if (eff >= 2160) badge = "4K";
+        else if (eff >= 1080) badge = "HD";
         const badgeHtml = badge
           ? `<span class="movi-quality-badge movi-quality-badge-${badge.toLowerCase()}">${badge}</span>`
           : "";
@@ -5044,10 +5048,13 @@ export class MoviElement extends HTMLElement {
    * Map a video height to its YouTube-style quality badge (HD/4K/8K) or
    * empty string when the resolution doesn't qualify.
    */
-  private _heightBadge(height: number): string {
-    if (height >= 4320) return "8K";
-    if (height >= 2160) return "4K";
-    if (height >= 1080) return "HD";
+  private _heightBadge(height: number, width: number = 0): string {
+    // Use the 16:9-normalised height when a width is known so ultrawide /
+    // letterboxed tracks (e.g. 3840×2080) still tier as 4K rather than HD.
+    const eff = width > 0 ? Math.max(height, Math.round(width * 9 / 16)) : height;
+    if (eff >= 4320) return "8K";
+    if (eff >= 2160) return "4K";
+    if (eff >= 1080) return "HD";
     return "";
   }
 
