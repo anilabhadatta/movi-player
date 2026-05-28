@@ -70,6 +70,9 @@ customElements.whenDefined("movi-player").then(() => {
     document.querySelector(".player-main")?.classList.toggle("is-audio-strip", strip);
   });
   playerEl.addEventListener("ended", () => {
+    // Loop is on → the element replays the current video itself; don't let
+    // playlist auto-advance steal the end event and jump to the next item.
+    if (playerEl.loop) return;
     if (playlistIndex >= 0) {
       const f = playlist[playlistIndex];
       if (f) {
@@ -1185,12 +1188,18 @@ function walkEntry(entry, path, out) {
   return new Promise((resolve) => {
     if (entry.isFile) {
       entry.file((file) => {
-        try {
-          Object.defineProperty(file, "webkitRelativePath", {
-            value: path + entry.name,
-            configurable: true,
-          });
-        } catch {}
+        // Only tag a relative path when the file came from inside a dropped
+        // folder (path is non-empty). A bare top-level file must keep an empty
+        // webkitRelativePath so the drop handler loads it directly instead of
+        // mistaking it for a folder member and building a 1-item playlist.
+        if (path) {
+          try {
+            Object.defineProperty(file, "webkitRelativePath", {
+              value: path + entry.name,
+              configurable: true,
+            });
+          } catch {}
+        }
         out.push(file);
         resolve();
       }, () => resolve());
