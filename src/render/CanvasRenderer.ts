@@ -43,6 +43,12 @@ export class CanvasRenderer {
   // Presentation loop
   private rafId: number | null = null;
   private isPlaying: boolean = false;
+  // Set once configure() runs, which only happens when a real video track is
+  // active. Audio-only sources (incl. cover-art "video" streams that
+  // TrackManager classifies as attached-pic) never configure the renderer, so
+  // this stays false and the presentation loop is skipped — no point spinning a
+  // 60fps rAF + A/V sync against frames that never arrive.
+  private isVideoConfigured: boolean = false;
 
   // Adaptive DPR — measure first second of playback at full 2x DPR. If
   // average paint takes more than ~half a frame at 60Hz, the device is
@@ -212,6 +218,7 @@ export class CanvasRenderer {
     isHDR?: boolean,
     pixelFormat?: string,
   ): void {
+    this.isVideoConfigured = true;
     // Detect high bit-depth (12-bit+) content that needs RGBA16F textures
     const pf = (pixelFormat || "").toLowerCase();
     this.isHighBitDepth = pf.includes("12") || pf.includes("14") || pf.includes("16");
@@ -1121,6 +1128,10 @@ export class CanvasRenderer {
    * Start the presentation loop for smooth playback
    */
   startPresentationLoop(): void {
+    // Audio-only source (no video track configured): nothing to present, and
+    // running A/V sync against a non-existent video stream is meaningless. The
+    // cover art, if any, is drawn separately via the overlay canvas.
+    if (!this.isVideoConfigured) return;
     if (this.rafId !== null) return;
 
     this.isPlaying = true;
