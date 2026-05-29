@@ -12637,6 +12637,13 @@ export class MoviElement extends HTMLElement {
         // Update loop handler if player exists
         if (this.player) {
           this.setupEventHandlers();
+          // Turning loop on while already at the end won't fire a fresh
+          // "ended" event, so the just-bound loop handler never runs and
+          // playback sits stuck. Kick off the replay here instead.
+          if (this._loop && this.player.getState() === "ended") {
+            this._loopRestartInFlight = true;
+            this.play();
+          }
         }
         break;
       case "muted":
