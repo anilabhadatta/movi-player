@@ -1066,6 +1066,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       // decoder, making first frame jump ahead instead of starting at targetTime).
       this.pendingPrebufferPackets = [];
       this.eofReached = false;
+      this.eofSince = 0;
     } else {
       // Resume from pause — just resume AudioContext
       if (!this.disableAudio) {
@@ -1215,6 +1216,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private demuxInFlightStartTime: number = 0;
   private static readonly DEMUX_TIMEOUT = 35000; // 35 seconds timeout (slightly more than HTTP timeout of 30s)
   private eofReached = false;
+  // Wall-clock time (performance.now) when eofReached first flipped true.
+  // Used as a watchdog: if the normal drained-and-played-out conditions
+  // never all line up (e.g. a marginal float mismatch between the audio
+  // playout head and the last video frame), force the ended transition
+  // rather than freezing one frame short of the end forever.
+  private eofSince = 0;
 
   /**
    * Internal handler for seek completion when first target frame is found.
@@ -1538,8 +1545,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         !!this.trackManager?.getActiveAudioTrack() && !this.disableAudio;
 
       if (hasAudioTrack) {
-        const videoDone =
-          !this.videoRenderer || this.videoRenderer.getQueueSize() === 0;
         const decodersDone =
           this.videoDecoder.queueSize === 0 && this.audioDecoder.queueSize === 0;
         // The audio renderer keeps playing buffers it already scheduled for
@@ -1556,9 +1561,54 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         // reach, audioPlayedOut never trips, and EOF never transitions to
         // ended (timer freezes short of duration).
         const maxScheduled = this.audioRenderer.getMaxScheduledMediaTime();
+        // Normally audio is "played out" once the clock catches the furthest
+        // scheduled buffer. But maxScheduled can be stale/runaway — e.g. when
+        // a prior decoder instance scheduled audio out to a wrong (longer)
+        // duration and the AudioRenderer carried that value into the new
+        // player (HW→software fallback on the same element). The clock is also
+        // clamped to the true container duration in getTime(), so it plateaus
+        // at `duration` and can never reach an inflated maxScheduled. Treat
+        // audio as done if EITHER the playout head is reached OR the clock has
+        // arrived at the real end of content — whichever the clock can attain.
+        const reachedContentEnd =
+          duration > 0 && currentTime >= duration + this.startTime - 0.25;
         const audioPlayedOut =
-          maxScheduled > 0 && currentTime >= maxScheduled - 0.1;
+          (maxScheduled > 0 && currentTime >= maxScheduled - 0.1) ||
+          reachedContentEnd;
+        // The clock is clamped to the audio playout head (getAudioClock caps
+        // at maxScheduledMediaTime). When the last video frame's PTS sits past
+        // that head — e.g. video runs a few ms longer than the audio track —
+        // the presentation loop never reaches it, so it lingers in the queue
+        // forever and a strict queue-empty check would block the ended
+        // transition indefinitely (EOF reached, but never ends). Once the
+        // demuxer and video decoder are both drained, treat the renderer as
+        // done if its queue is empty OR only holds this unpresentable tail
+        // (head frame at/after the audio playout head).
+        const headFrameTime = this.videoRenderer?.getHeadFrameTime() ?? -1;
+        const videoDone =
+          !this.videoRenderer ||
+          this.videoRenderer.getQueueSize() === 0 ||
+          (decodersDone &&
+            maxScheduled > 0 &&
+            headFrameTime >= maxScheduled - 0.05);
         if ((decodersDone && videoDone && audioPlayedOut) || duration === 0) {
+          this.handleEnded();
+          return;
+        }
+        // Watchdog: the audio has fully played out (it's the master clock and
+        // its playout head has been reached) but the strict conditions above
+        // never all aligned — a marginal float mismatch between the audio tail
+        // and the last video frame can leave one frame unpresentable forever.
+        // Once audio is done and we've waited a beat, end rather than freeze.
+        if (
+          audioPlayedOut &&
+          this.eofSince > 0 &&
+          performance.now() - this.eofSince > 750
+        ) {
+          Logger.warn(
+            TAG,
+            "EOF watchdog: audio played out but pipeline never fully drained; forcing ended",
+          );
           this.handleEnded();
           return;
         }
@@ -1860,6 +1910,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         if (!packet) {
           // EOF reached - mark it but don't stop immediately
           // Let the decoders finish processing
+          if (!this.eofReached) this.eofSince = performance.now();
           this.eofReached = true;
 
           // Clear seeking flag if we hit EOF before finding keyframe
@@ -2253,6 +2304,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
       // Reset EOF flag after seek - we're now at a new position
       this.eofReached = false;
+      this.eofSince = 0;
 
       // Buffered region restarts from the new position; drop the
       // monotonic clamp so the bar can shrink to reflect the new range.
@@ -3832,6 +3884,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.pendingAudioPackets = [];
       this.pendingPrebufferPackets = [];
       this.eofReached = false;
+      this.eofSince = 0;
     } catch (err) {
       Logger.error(TAG, "Subtitle prefetch failed", err);
     } finally {
@@ -4285,6 +4338,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
             // video, background processLoop may have raced to EOF; without this
             // reset, processLoop would early-return and playback stalls.
             this.eofReached = false;
+            this.eofSince = 0;
 
             // Seek demuxer to nearest keyframe before current audio position
             if (this.demuxer) {

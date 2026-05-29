@@ -2880,6 +2880,17 @@ export class CanvasRenderer {
   }
 
   /**
+   * Timestamp (seconds) of the oldest frame still queued for presentation,
+   * or -1 when the queue is empty. Used at EOF to tell whether the residual
+   * frames are an unpresentable tail (PTS past the audio playout head, which
+   * caps the clock) vs. frames that are still genuinely due.
+   */
+  getHeadFrameTime(): number {
+    if (this.frameQueue.length === 0) return -1;
+    return this.frameQueue[0].timestamp / 1_000_000;
+  }
+
+  /**
    * Get video rendering stats for nerd stats overlay
    */
   getStats(): { framesPresented: number; frameQueueSize: number; colorSpace: string; resolution: string; syncedToAudio: boolean } {
