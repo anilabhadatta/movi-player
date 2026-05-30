@@ -380,8 +380,10 @@ export class AudioRenderer {
 
     // Apply pitch preservation via Signalsmith if enabled and playback rate
     // is not 1.0. If the stretcher isn't ready yet (WASM still loading) we
-    // fall back to scaling source.playbackRate — pitch shifts but audio
-    // keeps playing until the stretcher kicks in on a subsequent chunk.
+    // schedule expected-duration silence instead of falling back to scaling
+    // source.playbackRate — that fallback shifts pitch (chipmunk audio) for
+    // the ~1s of startup before the WASM stretcher kicks in. A brief silent
+    // gap at the start is preferable to an audible pitch-shifted blip.
     let processedBuffer = audioBuffer;
     let usedStretcher = false;
     if (this.preservePitch && Math.abs(this._playbackRate - 1.0) > 0.01) {
@@ -389,16 +391,15 @@ export class AudioRenderer {
       if (stOutput && stOutput.length > 1) {
         processedBuffer = stOutput;
         usedStretcher = true;
-      } else if (this.signalsmith) {
-        // Stretcher ready but warming — schedule expected-duration silence
-        // so timing stays correct. Brief gap, no pitch shift.
+      } else {
+        // Stretcher ready-but-warming OR not loaded yet — schedule
+        // expected-duration silence so timing stays correct. Brief gap,
+        // no pitch shift (no chipmunk).
         const expectedDuration = audioBuffer.duration / this._playbackRate;
         const silenceFrames = Math.max(1, Math.ceil(expectedDuration * sampleRate));
         processedBuffer = this.audioContext.createBuffer(numberOfChannels, silenceFrames, sampleRate);
         usedStretcher = true;
       }
-      // else: stretcher not loaded yet — fall through with usedStretcher=false
-      // so source.playbackRate scales the rate (pitch will shift briefly).
     }
 
     const source = this.audioContext.createBufferSource();
@@ -557,6 +558,19 @@ export class AudioRenderer {
     // It will be initialized when user unmutes (user gesture)
     if (!this.audioContext && !this._muted) {
       await this.init();
+    }
+
+    // Eager stretcher warmup when starting playback already at a non-1x rate
+    // (saved preference, or rate set while paused). Kicks WASM construction
+    // off now so it's ready before the first decoded chunk needs stretching,
+    // avoiding the opening silence gap the chunk-time lazy init would leave.
+    if (
+      this.preservePitch &&
+      this.audioContext &&
+      !this.signalsmith &&
+      Math.abs(this._playbackRate - 1.0) > 0.01
+    ) {
+      this.maybeInitSignalsmith(this.audioContext.sampleRate);
     }
 
     // Resume the AudioContext when either (a) we're not muted so audio
@@ -813,6 +827,20 @@ export class AudioRenderer {
     if (this.preservePitch && this.signalsmith) {
       this.signalsmith.tempo = newRate;
       this.signalsmith.clear();
+    } else if (
+      this.preservePitch &&
+      Math.abs(newRate - 1.0) > 0.01 &&
+      this.audioContext
+    ) {
+      // Eager warmup: kick off WASM stretcher construction the moment a
+      // non-1x rate is chosen, BEFORE the first audio chunk arrives. Without
+      // this the stretcher only starts loading inside processStretch() on the
+      // first chunk, leaving the opening ~1s with no stretcher — which falls
+      // through to the silence path (no chipmunk, but a brief audio gap).
+      // Warming it ahead of the chunks closes that gap in the common case.
+      // sampleRate matches the AudioContext; processStretch rebuilds the
+      // instance if a decoded chunk ever arrives at a different rate.
+      this.maybeInitSignalsmith(this.audioContext.sampleRate);
     }
 
     // Anchor the audio→media clock at the current play position so reads
