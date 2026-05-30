@@ -3290,11 +3290,8 @@ export class MoviElement extends HTMLElement {
       this.setAttribute("tabindex", "0");
     }
 
-    // Auto-focus on mouse enter so keyboard shortcuts work without clicking.
-    // preventScroll: focus() would otherwise scroll the player into view,
-    // which yanks the page mid-hover when the player is partly off-screen.
+    // Surface controls the moment the cursor enters the player.
     this.addEventListener("mouseenter", () => {
-      this.focus({ preventScroll: true });
       // Surface the controls the moment the cursor enters the player,
       // regardless of which child element is under it. The canvas/video/
       // overlay mousemove handlers miss the case where the cursor is
