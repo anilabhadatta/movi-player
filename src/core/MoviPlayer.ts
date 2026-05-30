@@ -980,11 +980,19 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (wasEnded && this.demuxer) {
       Logger.debug(TAG, "Replaying from beginning after ended state");
       this.requestWakeLock();
+      // Set the resume intent BEFORE awaiting seek(0). Replay data is always
+      // already buffered, so notifySeekCompletion can fire synchronously
+      // inside the await — if wasPlayingBeforeSeek is still false at that
+      // point, seek completion takes the "paused" branch and replay stalls at
+      // the first frame instead of resuming. seek() itself derives
+      // wasPlayingBeforeSeek from the entry state ("ended" → false), which is
+      // why we must force it true here up front rather than after the await.
+      this.wasPlayingBeforeSeek = true;
       try {
         await this.seek(0, { suppressSpinner: true });
-        this.wasPlayingBeforeSeek = true;
       } catch (error) {
         this.suppressSeekSpinner = false;
+        this.wasPlayingBeforeSeek = false;
         Logger.warn(TAG, "Failed to seek to start on replay", error);
       }
       return;
@@ -1005,20 +1013,26 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // seeked to startTime here, which silently discarded a pre-play scrub
     // and restarted from the beginning.
     if (this._playStartTime === 0 && this.demuxer && !this.nativeAudioEl) {
-      // First play: delegate to seek() using the current UI time. With no
-      // pre-play scrub this is 0 (start); a pre-play scrub lands at the
-      // scrubbed position. The full seek pipeline runs waitingForVideoSync +
-      // keyframe wait and notifySeekCompletion syncs the clock to the actual
-      // first decodable PTS — same path as replay, so buffering UI, A/V sync
-      // and EOF timing all behave identically. wasPlayingBeforeSeek (set
-      // after the await) makes seek completion resume straight into playing.
-      const uiTarget = this.getCurrentTime();
+      // First play: always seek to 0. The poster seek's processLoop reads the
+      // demuxer ~1s ahead while decoding the first video frame, so the cursor
+      // is out of sync with the start. Re-seeking to 0 realigns it so playback
+      // begins cleanly from the beginning. The full seek pipeline runs
+      // waitingForVideoSync + keyframe wait and notifySeekCompletion syncs the
+      // clock to the actual first decodable PTS — same path as replay, so
+      // buffering UI, A/V sync and EOF timing all behave identically.
+      // Set wasPlayingBeforeSeek BEFORE the await: seek() enters from the
+      // "paused" state and would otherwise derive it as false, so a fast
+      // (already-buffered) completion firing inside the await would take the
+      // paused branch and stall instead of starting playback. seek()'s
+      // re-derivation now skips when this is already true.
+      const uiTarget = 0;
+      this.wasPlayingBeforeSeek = true;
       try {
         await this.seek(uiTarget, { suppressSpinner: true });
-        this.wasPlayingBeforeSeek = true;
         this._playStartTime = performance.now();
       } catch (error) {
         this.suppressSeekSpinner = false;
+        this.wasPlayingBeforeSeek = false;
         Logger.warn(TAG, "First-play seek failed", error);
       }
       return;
@@ -1323,6 +1337,11 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Transition to final state
     if (this.wasPlayingBeforeSeek || this.wasPlayingBeforeRebuffer) {
       Logger.info(TAG, "Resuming playback after seek");
+      // Consume the resume intent so it doesn't leak into the next seek. It's
+      // never reset elsewhere, so a stale `true` would make a later paused
+      // user-seek wrongly auto-resume (and would defeat seek()'s re-derivation
+      // guard that now skips re-deriving when this is already true).
+      this.wasPlayingBeforeSeek = false;
       this.wasPlayingBeforeRebuffer = false;
       this.stateManager.setState("playing");
       this.clock.start();
@@ -1344,6 +1363,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       }
     } else {
       Logger.info(TAG, "Seek completed in paused state");
+      this.wasPlayingBeforeSeek = false;
       this.stateManager.setState("paused");
 
       // Don't decode audio now (AudioRenderer not playing — would drop all data).
@@ -2216,6 +2236,15 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // spinner shows; play()-initiated seeks pass suppressSpinner to hide it.
     this.suppressSeekSpinner = opts?.suppressSpinner ?? false;
 
+    // A genuine user seek (non-suppressed) cancels a pending debounced
+    // rate-change corrective seek so it doesn't fire a redundant re-seek
+    // right after the user lands somewhere. The corrective seek itself is
+    // suppressed, so it never cancels its own (already-cleared) timer.
+    if (!opts?.suppressSpinner && this.rateChangeSeekTimer !== null) {
+      clearTimeout(this.rateChangeSeekTimer);
+      this.rateChangeSeekTimer = null;
+    }
+
     const currentState = this.stateManager.getState();
     Logger.info(TAG, `seek(${seconds.toFixed(2)}): state=${currentState}, waitingForVideoSync=${this.waitingForVideoSync}, demuxInFlight=${this.demuxInFlight}, seekSessionId=${this.seekSessionId}`);
 
@@ -2233,8 +2262,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     this.stopPauseBuffering();
 
     // Track intent: if we were playing (or already seeking but originally playing), we want to resume
-    // During buffering, preserve the pre-buffering play/pause intent
-    if (currentState !== "seeking") {
+    // During buffering, preserve the pre-buffering play/pause intent.
+    // Don't clobber an explicit pre-seek resume intent (e.g. the replay path
+    // sets wasPlayingBeforeSeek=true before calling seek(0) from the "ended"
+    // state — "ended" isn't "playing", so re-deriving here would wrongly reset
+    // it to false and seek completion would land paused instead of replaying).
+    if (currentState !== "seeking" && !this.wasPlayingBeforeSeek) {
       this.wasPlayingBeforeSeek = currentState === "playing" || (currentState === "buffering" && this.wasPlayingBeforeRebuffer);
     }
 
@@ -3418,6 +3451,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /**
    * Set playback rate
    */
+  private rateChangeSeekTimer: ReturnType<typeof setTimeout> | null = null;
   setPlaybackRate(rate: number): void {
     if (this.hlsWrapper) {
       this.hlsWrapper.setPlaybackRate(rate);
@@ -3447,6 +3481,29 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // flowing means the audible transition is just whatever output buffer
     // the AudioContext has — small with latencyHint="interactive" — and
     // the new rate is applied to subsequent stretcher output naturally.
+
+    // Debounced corrective seek to the current position. The no-flush path
+    // above keeps audio glitch-free during the rate change itself, but the
+    // stretcher/clock can drift by the time the rate settles. A short while
+    // after the last rate change we re-seek to where we are — suppressSpinner
+    // keeps the seek invisible (no loading UI). Debounced so dragging the
+    // speed slider only triggers one seek at the end, not one per step.
+    // Skip for HLS / native-audio paths which manage their own rate
+    // internally, and only fire while actually playing.
+    if (this.hlsWrapper || this.nativeAudioEl) return;
+    if (this.rateChangeSeekTimer !== null) {
+      clearTimeout(this.rateChangeSeekTimer);
+    }
+    this.rateChangeSeekTimer = setTimeout(() => {
+      this.rateChangeSeekTimer = null;
+      if (!this.demuxer) return;
+      if (this.stateManager.getState() !== "playing") return;
+      const target = this.getCurrentTime();
+      this.seek(target, { suppressSpinner: true }).catch((error) => {
+        this.suppressSeekSpinner = false;
+        Logger.warn(TAG, "Rate-change corrective seek failed", error);
+      });
+    }, 150);
   }
 
   /**
@@ -4861,6 +4918,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
     this.stopBackgroundTimer();
     this.stopPauseBuffering();
+    if (this.rateChangeSeekTimer !== null) {
+      clearTimeout(this.rateChangeSeekTimer);
+      this.rateChangeSeekTimer = null;
+    }
 
     // Destroy HLS wrapper
     if (this.hlsWrapper) {

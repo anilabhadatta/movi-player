@@ -14077,6 +14077,17 @@ export class MoviElement extends HTMLElement {
     ) as HTMLElement;
     const isLoading = loadingIndicator?.style.display === "flex";
 
+    // A suppressed seek (rate-change correction, first play, replay,
+    // poster seek) briefly drops state to "seeking" with the spinner
+    // hidden. Treat it like loading here so the centre play/pause icon
+    // doesn't flash play→pause during that invisible seek — without this
+    // it momentarily flips to the play icon and back, which reads as a
+    // glitchy blink even though nothing is actually loading.
+    const playerState = this.player?.getState();
+    const isSuppressedSeek =
+      (playerState === "seeking" || playerState === "buffering") &&
+      !!this.player?.suppressSeekSpinner;
+
     const contextMenuPlayIcon = this.shadowRoot?.querySelector(
       ".movi-context-menu-play-icon",
     ) as HTMLElement;
@@ -14124,6 +14135,7 @@ export class MoviElement extends HTMLElement {
         // player has settled back into "playing".
         if (
           isLoading ||
+          isSuppressedSeek ||
           this._isUnsupported ||
           controlsHidden ||
           this._autoplayStarting ||
@@ -14153,6 +14165,7 @@ export class MoviElement extends HTMLElement {
       const isLoopingEndedTransition = currentState === "ended" && this._loop;
       if (
         isLoading ||
+        isSuppressedSeek ||
         this._isUnsupported ||
         this._autoplayStarting ||
         isLoopingEndedTransition

@@ -540,6 +540,19 @@ export class AudioRenderer {
    * Start playback
    */
   async play(): Promise<void> {
+    // Flip isPlaying up front, BEFORE any await. The resume branch in the
+    // player's notifySeekCompletion calls play() fire-and-forget and then
+    // immediately decodes the first post-seek audio packets. If we only set
+    // isPlaying after awaiting audioContext.resume() (which on replay can take
+    // tens of ms while the context wakes from suspended), every frame decoded
+    // during that window — the 0s frame and the next ~1s of audio — hits
+    // render()'s `!isPlaying` guard and gets dropped. The first surviving
+    // frame is then ~1s in, so replay starts playing ahead of 0. Setting the
+    // flag synchronously here lets those early frames schedule; they sit in
+    // the AudioContext queue and play once it resumes.
+    this.isPlaying = true;
+    this.intentionalSuspend = false;
+
     // Don't initialize AudioContext during muted autoplay (browser policy)
     // It will be initialized when user unmutes (user gesture)
     if (!this.audioContext && !this._muted) {
@@ -583,8 +596,8 @@ export class AudioRenderer {
     // Reset last decode time to prevent false unhealthy buffer detection after long pause
     this.lastDecodeTime = performance.now();
 
-    this.isPlaying = true;
-    this.intentionalSuspend = false;
+    // isPlaying / intentionalSuspend already set synchronously at the top of
+    // play() so no decoded frames are dropped during the async resume window.
 
     // NOTE: We do NOT reset scheduledTime or sync anchors here.
     // If we are resuming from pause (suspend), the buffer is preserved
