@@ -185,7 +185,7 @@ export class AudioRenderer {
       }
 
       // Apply muted state if set before initialization
-      this.gainNode.gain.value = this._muted ? 0 : this.volume;
+      this.gainNode.gain.value = this._muted ? 0 : this.perceptualGain(this.volume);
 
       // Don't resume here — play() handles resume when user clicks play.
       // Pre-init creates AudioContext during load for fast startup;
@@ -798,10 +798,11 @@ export class AudioRenderer {
   setVolume(volume: number): void {
     this.volume = Math.max(0, Math.min(1, volume));
     if (this.gainNode && !this._muted) {
+      const g = this.perceptualGain(this.volume);
       if (this._stableAudio) {
-        this.rampGain(this.volume);
+        this.rampGain(g);
       } else {
-        this.gainNode.gain.value = this.volume;
+        this.gainNode.gain.value = g;
       }
     }
     Logger.debug(TAG, `Volume: ${this.volume} (muted: ${this._muted})`);
@@ -926,10 +927,11 @@ export class AudioRenderer {
     }
 
     if (this.gainNode) {
+      const g = this.perceptualGain(this.volume);
       if (this._stableAudio) {
-        this.rampGain(this.volume);
+        this.rampGain(g);
       } else {
-        this.gainNode.gain.value = this.volume;
+        this.gainNode.gain.value = g;
       }
     }
 
@@ -994,12 +996,12 @@ export class AudioRenderer {
       try {
         const restoreTime = this.audioContext.currentTime + AudioRenderer.FADE_OUT_TIME + 0.005;
         this.gainNode.gain.linearRampToValueAtTime(
-          this._muted ? 0 : this.volume,
+          this._muted ? 0 : this.perceptualGain(this.volume),
           restoreTime
         );
       } catch {
         // Fallback: set directly
-        this.gainNode.gain.value = this._muted ? 0 : this.volume;
+        this.gainNode.gain.value = this._muted ? 0 : this.perceptualGain(this.volume);
       }
     }
   }
@@ -1179,6 +1181,23 @@ export class AudioRenderer {
   /**
    * Smoothly ramp gain to target value to prevent clicks/pops
    */
+  /**
+   * Convert a linear slider value (0-1) to a perceptual gain value.
+   *
+   * Human loudness perception is logarithmic, so a linear gain feels like
+   * "almost everything happens in the first 10%" and the top 90% feels flat.
+   * We map the slider through an exponential (dB-based) curve so that equal
+   * slider movement produces a roughly equal perceived loudness change across
+   * the whole range. 0 -> silence, 1 -> unity gain.
+   */
+  private perceptualGain(v: number): number {
+    if (v <= 0) return 0;
+    if (v >= 1) return 1;
+    // ~60 dB usable range: gain = (e^(k*v) - 1) / (e^k - 1), k tuned for feel.
+    const k = 6.908; // ln(1000) -> ~60 dB dynamic range
+    return (Math.exp(k * v) - 1) / (Math.exp(k) - 1);
+  }
+
   private rampGain(targetValue: number): void {
     if (!this.gainNode || !this.audioContext) {
       return;
