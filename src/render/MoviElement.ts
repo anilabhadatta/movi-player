@@ -14227,11 +14227,19 @@ export class MoviElement extends HTMLElement {
       // Also hide during the brief end→play transition when loop is on
       // — the player is about to restart, so popping the centre play
       // icon there reads as a glitchy flash on every loop boundary.
+      //
+      // Deliberately NOT gating on isSuppressedSeek here. A suppressed seek
+      // is a spinner-less internal buffering blip — and on a huge streaming
+      // file the player dips paused→buffering→paused constantly while data
+      // loads in the background. Hiding the centre icon on each of those
+      // dips (then re-showing on the paused tick) is exactly the blink the
+      // user sees while paused on the poster. The spinner stays gated by
+      // isLoading, so nothing visible is "loading" during these blips —
+      // keep the resume affordance steady through them.
       const currentState = this.player?.getState();
       const isLoopingEndedTransition = currentState === "ended" && this._loop;
       if (
         isLoading ||
-        isSuppressedSeek ||
         this._isUnsupported ||
         this._autoplayStarting ||
         isLoopingEndedTransition
@@ -14254,7 +14262,30 @@ export class MoviElement extends HTMLElement {
           // the bar — that's about the click-confirmation flow, not
           // the resume affordance.
           if (this._controls) {
+            // Re-check on the next frame before committing the class. This
+            // method runs on the 250ms UI tick, so by the time the rAF
+            // fires the player may have flipped paused→buffering/seeking
+            // (background load on a huge file keeps re-entering buffering),
+            // or the spinner may have come up. Adding the class from a stale
+            // closure then races a sync remove on the following tick — that
+            // add/remove churn is the centre-icon flicker. Bail if the world
+            // moved on so the icon only appears when we're genuinely settled.
             requestAnimationFrame(() => {
+              const st = this.player?.getState();
+              const spinnerUp =
+                (this.shadowRoot?.querySelector(
+                  ".movi-loading-indicator",
+                ) as HTMLElement | null)?.style.display === "flex";
+              if (
+                st === "playing" ||
+                st === "buffering" ||
+                st === "seeking" ||
+                spinnerUp ||
+                this._isUnsupported ||
+                this._autoplayStarting
+              ) {
+                return;
+              }
               centerPlayPauseBtn.classList.add("movi-center-visible");
             });
           } else {
