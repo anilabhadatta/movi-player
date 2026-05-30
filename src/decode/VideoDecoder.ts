@@ -557,6 +557,17 @@ export class MoviVideoDecoder {
   private static TINY_PACKET_DROP_WINDOW = 120;
   private chunksSinceKeyframeWait = 0;
 
+  // Current playback rate, mirrored from the player. At 1x the HW decoder
+  // handles AV1 show_existing_frame (sub-4-byte) packets fine, so we must NOT
+  // drop them there — dropping breaks the reference chain and a later keyframe
+  // ends up rejected (EncodingError → buffering freeze). Only at non-1x, where
+  // feeding these packets itself crashes the decoder, do we screen them out.
+  private playbackRate = 1;
+
+  setPlaybackRate(rate: number): void {
+    this.playbackRate = rate;
+  }
+
   decode(
     data: Uint8Array,
     timestamp: number,
@@ -570,18 +581,20 @@ export class MoviVideoDecoder {
     this.chunksSinceKeyframeWait++;
 
     // Drop tiny corrupt non-keyframe packets before they crash the decoder —
-    // but only within the startup window after a (re)configure/flush, where
-    // these malformed sub-4-byte packets actually cluster. Past that we leave
-    // the stream alone so a legitimate tiny packet in steady state isn't lost.
-    // Keyframes are never dropped — losing one breaks the whole GOP.
+    // but ONLY at non-1x rates and within the startup window after a
+    // (re)configure/flush. At 1x these sub-4-byte show_existing_frame packets
+    // decode fine; dropping them there breaks the reference chain and trips a
+    // later keyframe reject. Keyframes are never dropped — losing one breaks
+    // the whole GOP.
     if (
+      this.playbackRate !== 1 &&
       !keyframe &&
       data.byteLength < MoviVideoDecoder.MIN_DELTA_PACKET_BYTES &&
       this.chunksSinceKeyframeWait <= MoviVideoDecoder.TINY_PACKET_DROP_WINDOW
     ) {
       Logger.debug(
         TAG,
-        `Dropping ${data.byteLength}-byte non-keyframe packet at ${timestamp.toFixed(3)}s (corrupt/too small, startup window)`,
+        `Dropping ${data.byteLength}-byte non-keyframe packet at ${timestamp.toFixed(3)}s (corrupt/too small, startup window at ${this.playbackRate}x)`,
       );
       return;
     }

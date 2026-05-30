@@ -3491,6 +3491,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (this.videoRenderer) {
       this.videoRenderer.setPlaybackRate(rate);
     }
+    // Tell the decoder the rate: it only screens out crash-inducing tiny
+    // show_existing_frame packets at non-1x (at 1x they decode fine and
+    // dropping them breaks the reference chain → later keyframe reject).
+    if (this.videoDecoder) {
+      this.videoDecoder.setPlaybackRate(rate);
+    }
     if (this.nativeAudioEl) {
       this.nativeAudioEl.playbackRate = rate;
     }
