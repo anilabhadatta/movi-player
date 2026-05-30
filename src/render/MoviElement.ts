@@ -2197,6 +2197,11 @@ export class MoviElement extends HTMLElement {
       // toggles playback like normal.
       if (this.isAnyMenuOpen()) {
         this.closeAllBottomMenus();
+        // Re-arm the auto-hide timer now that the menu is gone. While a
+        // menu is open showControls() refuses to set the timer (the
+        // isAnyMenuOpen gate), so on touch devices the bar would otherwise
+        // stay up indefinitely after closing a popup this way.
+        this.showControls();
         e.stopPropagation();
         return;
       }
@@ -2275,10 +2280,15 @@ export class MoviElement extends HTMLElement {
       () => {
         setTimeout(() => {
           this.isOverControls = false;
-          // Restart hide timer if playing
-          if (this.player?.getState() === "playing") {
-            this.showControls();
-          }
+          // Re-arm the auto-hide timer after a touch interaction with the
+          // bar or a popup menu. Always call showControls() — it re-checks
+          // its own gating (isOverControls / menu open / dragging) and sets
+          // the timer when nothing's holding the bar open. The old `if
+          // playing` guard meant a touch while PAUSED cleared isOverControls
+          // but never re-armed the timer, so the controls stayed up forever
+          // on touch devices. showControls auto-hides on pause too (YouTube
+          // parity), so this is safe.
+          this.showControls();
         }, 1000);
       },
       { passive: true },
@@ -3303,8 +3313,27 @@ export class MoviElement extends HTMLElement {
       this.setAttribute("tabindex", "0");
     }
 
+    // Record every touch on the player so the synthetic mouse events the
+    // browser fires right after a tap (mouseenter/mousemove/mousedown/...)
+    // can be told apart from a real mouse hover. Without this, tapping a
+    // surface like the Resume button — whose own handler never touches the
+    // controls — still flashed the bar for a beat, because the synthetic
+    // mouseenter/mousemove below ran showControls(). Touch devices drive the
+    // chrome through handleTap (tap toggles the bar), so the hover path
+    // should stay inert for touch.
+    this.addEventListener(
+      "touchstart",
+      () => {
+        this.lastTouchTime = Date.now();
+      },
+      { passive: true, capture: true },
+    );
+
     // Surface controls the moment the cursor enters the player.
     this.addEventListener("mouseenter", () => {
+      // Skip when this is a touch-induced synthetic mouse event (a real
+      // hover never follows a recent touchstart).
+      if (Date.now() - this.lastTouchTime < 800) return;
       // Surface the controls the moment the cursor enters the player,
       // regardless of which child element is under it. The canvas/video/
       // overlay mousemove handlers miss the case where the cursor is
@@ -3315,6 +3344,7 @@ export class MoviElement extends HTMLElement {
     });
 
     this.addEventListener("mousemove", () => {
+      if (Date.now() - this.lastTouchTime < 800) return;
       if (this._controls) this.showControls();
     });
 
@@ -6834,6 +6864,15 @@ export class MoviElement extends HTMLElement {
       ) as HTMLElement | null;
       if (ctx && ctx.style.display !== "none") ctx.style.display = "none";
     }
+
+    // Full close (not the open-one/close-others case): re-arm the auto-hide
+    // timer. Selecting a menu item or closing a popup leaves the bar with no
+    // menu open and nothing scheduled to hide it — on touch devices, where
+    // there's no mouseleave to re-trigger showControls(), the bar would stay
+    // up. With `keep` set a different menu is opening, so leave it alone.
+    if (!keep) {
+      this.showControls();
+    }
   }
 
   /**
@@ -6882,6 +6921,13 @@ export class MoviElement extends HTMLElement {
       el.style.left = "";
       el.style.right = "";
       el.style.bottom = "";
+      // Menu fully closed — if nothing else is open, re-arm the auto-hide
+      // timer. Covers toggling a popup shut from its own button (no
+      // closeAllBottomMenus / mouseleave fires on touch), which otherwise
+      // left the bar pinned open on touch devices.
+      if (!this.isAnyMenuOpen()) {
+        this.showControls();
+      }
     };
     el.addEventListener("transitionend", finish, { once: true });
     setTimeout(finish, 240); // safety net if transitionend doesn't fire
@@ -9769,6 +9815,9 @@ export class MoviElement extends HTMLElement {
       ======================================== */
       .movi-resume-dialog {
         position: absolute;
+        /* Sits just above the controls bar while it's visible; drops to the
+           bottom edge when the bar auto-hides. The :has() rule below swaps
+           between the two, transition makes it glide rather than jump. */
         bottom: 90px;
         right: 16px;
         z-index: 50;
@@ -9783,6 +9832,13 @@ export class MoviElement extends HTMLElement {
         font-family: 'Inter', -apple-system, sans-serif;
         pointer-events: auto;
         animation: movi-resume-slide-up 0.3s ease;
+        transition: bottom 0.2s ease;
+      }
+
+      /* Controls hidden (or absent) → drop the dialog to the bottom edge. */
+      :host:has(.movi-controls-container.movi-controls-hidden) .movi-resume-dialog,
+      :host(:not([controls])) .movi-resume-dialog {
+        bottom: 16px;
       }
 
       @keyframes movi-resume-slide-up {
