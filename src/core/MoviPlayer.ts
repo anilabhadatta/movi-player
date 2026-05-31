@@ -1019,7 +1019,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // seeked position), NOT the hardcoded startTime. Previously we always
     // seeked to startTime here, which silently discarded a pre-play scrub
     // and restarted from the beginning.
-    if (this._playStartTime === 0 && this.demuxer && !this.nativeAudioEl) {
+    // Guard: only treat this as the first play when the clock is still parked
+    // at the start. _playStartTime is the primary signal, but if anything ever
+    // leaves it at 0 mid-session, this stops the first-play seek(0) from
+    // dragging an in-progress video (clock well past startTime) back to zero.
+    const atStart =
+      this.clock.getTime() <= this.startTime + 1;
+    if (
+      this._playStartTime === 0 &&
+      atStart &&
+      this.demuxer &&
+      !this.nativeAudioEl
+    ) {
       // First play: always seek to 0. The poster seek's processLoop reads the
       // demuxer ~1s ahead while decoding the first video frame, so the cursor
       // is out of sync with the start. Re-seeking to 0 realigns it so playback
@@ -1351,6 +1362,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.wasPlayingBeforeSeek = false;
       this.wasPlayingBeforeRebuffer = false;
       this.stateManager.setState("playing");
+      // Mark that playback has actually started. When play() is pressed during
+      // the initial poster-seek it early-returns before reaching the body that
+      // normally sets _playStartTime, and the seek-completion resume path takes
+      // over here instead — so _playStartTime would stay 0 for the whole
+      // session. A later mid-playback recovery (decode-error → buffering →
+      // this.play()) would then see _playStartTime === 0, mistake itself for
+      // the "first play", and seek(0) — yanking a video that's an hour in back
+      // to the start. Stamp it here so the first-play branch only ever fires
+      // for a genuine first play.
+      if (this._playStartTime === 0) {
+        this._playStartTime = performance.now();
+      }
       this.clock.start();
       if (!this.disableAudio && !this.audioRenderer.isAudioPlaying()) {
         this.audioRenderer.play();
