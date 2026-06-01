@@ -45,11 +45,13 @@
 | No server transcoding | Yes | No | No | No |
 | Canvas rendering (no `<video>`) | Yes | No | No | No |
 | Encrypted playback | Yes | No | No | No |
+| Audio-only mode (cover art + strip UI) | Yes | No | No | No |
 | Built-in subtitle rendering | Yes | Plugin | No | No |
 | Multi-audio track switching | Yes | Plugin | Yes | No |
 | Chapters on progress bar | Yes | Plugin | No | No |
 | Picture-in-Picture | Document PiP | Basic | No | No |
 | DRM (Widevine/FairPlay) | Optional | Plugin | Yes | No |
+| Custom SourceAdapter (any protocol) | Yes | No | No | No |
 | Bundle size | 50-410KB | 500KB+ | 60KB | 25KB |
 
 ## Install
@@ -171,9 +173,9 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 ## Features
 
-**Playback** -- MP4, MKV, WebM, MOV, TS, AVI. H.264, HEVC, VP9, AV1. Hardware decode with software fallback.
+**Playback** -- MP4, MKV, WebM, MOV, TS, AVI. H.264, HEVC, VP9, AV1. Hardware decode with software fallback. Pitch-preserving time-stretch via Signalsmith Stretch.
 
-**Audio** -- AAC, MP3, Opus, FLAC, AC-3, E-AC-3. Multi-track switching. Stable volume (loudness normalization).
+**Audio** -- AAC, MP3, Opus, FLAC, AC-3, E-AC-3. Multi-track switching. Stable volume (loudness normalization). First-class audio-only mode with cover art extraction and a dedicated strip UI. Perceptual (log) volume curve. Muted-autoplay fallback with tap-to-unmute.
 
 **Subtitles** -- SRT, ASS, WebVTT, PGS (image-based), DVB. Multi-track with on-the-fly switching. Per-source delay/offset (`Z` / `X` to nudge ±100ms), full transcript browser with search + click-to-seek, customizable size/color/background/edge (persisted), karaoke-aligned VTT.
 
@@ -200,6 +202,8 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 **Poster from Timestamp** -- `postertime="10%"` (or `"5"`, `"1:30"`, `"0:01:30"`) generates a native-resolution poster frame from any timestamp. Runs on an isolated thumbnail pipeline, respects rotation metadata, and never paints stale frames after a `src` change.
 
 **Encrypted** -- AES-256-GCM chunked encryption with HMAC-signed token auth. See encrypted-server/.
+
+**Custom SourceAdapter** -- Plug any byte protocol (WebSocket, WebRTC, IndexedDB, custom encryption) directly into the element or player. Same `SourceAdapter` contract works across `<movi-player>`, `MoviPlayer`, and `Demuxer`.
 
 **DRM** -- Optional Widevine/FairPlay for HLS streams via `drm` + `licenseurl` attributes. Uses native `<video>` + EME API.
 
@@ -331,9 +335,9 @@ Videos served over HTTP need:
 
 | Browser | WebCodecs | HDR |
 |---|---|---|
-| Chrome 94+ | Yes | Yes |
-| Edge 94+ | Yes | Yes |
-| Safari 16.4+ | Yes | Yes |
+| Chrome 110+ | Yes | Yes |
+| Edge 110+ | Yes | Yes |
+| Safari 18+ | Yes | Yes |
 | Firefox 130+ | Yes | Limited |
 
 ## Development
