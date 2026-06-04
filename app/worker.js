@@ -758,7 +758,18 @@ async function handleProxy(request, url, env) {
     // mid-file. HEAD requests have no body to check, and the follow-up
     // GET will get magic-checked anyway — skip the subrequest on HEAD
     // so a flaky CF-to-CF probe can't fail the metadata request.
-    const startsAtZero = !rangeHeader || /^bytes=0[-=]/i.test(rangeHeader);
+    //
+    // A range that starts at 0 but stops before the sniff window (e.g. the
+    // `bytes=0-0` size probe the player uses to read Content-Range) can't carry
+    // a signature inline — sniffing it would wrongly 415. Treat those like a
+    // mid-file range so they're verified via a separate preflight fetch and the
+    // tiny body passes through untouched.
+    const zeroRange = rangeHeader ? /^bytes=0-(\d*)$/i.exec(rangeHeader) : null;
+    const startsAtZero =
+      !rangeHeader ||
+      (!!zeroRange &&
+        (zeroRange[1] === "" ||
+          parseInt(zeroRange[1], 10) >= MAGIC_SNIFF_SIZE - 1));
     let body = response.body;
     if (request.method !== "HEAD") {
       if (!startsAtZero) {
