@@ -148,6 +148,7 @@ export interface PlayerConfig {
   enablePreviews?: boolean; // Enable thumbnail preview pipeline (default: false)
   frameRate?: number; // Override frame rate (fps) - 0 = auto
   headers?: Record<string, string>; // Custom HTTP headers for media network requests — adaptive manifest + segments (HLS/DASH) and progressive downloads alike (e.g. auth tokens, signed cookies)
+  audioOnly?: boolean; // Audio-only mode: skip video decode (CPU) and, for adaptive streams, fetch only audio renditions (bandwidth). UI shows album art / strip.
   drm?: boolean; // Enable DRM mode for HLS (native video element, no canvas)
   licenseUrl?: string; // Widevine/FairPlay license server URL
   licenseHeaders?: Record<string, string>; // Custom headers for license requests (e.g., auth tokens)

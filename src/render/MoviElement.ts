@@ -69,6 +69,16 @@ export class MoviElement extends HTMLElement {
   private coverArtOverlay: HTMLDivElement | null = null;
   private coverArtCanvas: HTMLCanvasElement | null = null;
   private coverArtBitmap: ImageBitmap | null = null;
+  // For an audio-only source with NO embedded album art but a `poster` URL, the
+  // poster is loaded into a bitmap and painted through the same cover-art canvas
+  // (blurred backdrop + centered) so it reads as album art instead of the bare
+  // strip. Embedded art (coverArtBitmap) always wins over this.
+  private _posterCoverBitmap: ImageBitmap | null = null;
+  private _posterCoverUrl: string = ""; // URL the poster bitmap was loaded from
+  private _posterCoverLoading: boolean = false;
+  // Blurred-backdrop element behind the sharp-art canvas — CSS filter:blur()
+  // (cross-browser Gaussian, unlike canvas ctx.filter).
+  private _coverArtBgEl: HTMLDivElement | null = null;
   // True once cover-art extraction has settled for the current source (bitmap
   // arrived OR extraction failed). Until then, if the source has an art track,
   // we hold the audio-strip layout off so the player doesn't flash strip→cover.
@@ -120,6 +130,10 @@ export class MoviElement extends HTMLElement {
   // segments for streams, progressive downloads too). Set declaratively via the
   // `headers` attribute (JSON) or programmatically via the `headers` property.
   private _headers: Record<string, string> | null = null;
+  // Audio-only (data-saver) mode: skip video decode (CPU) and, for adaptive
+  // streams, fetch only audio (bandwidth). Toggleable via the `audioonly`
+  // attribute or the `audioOnly` property. The UI shows the album-art / strip.
+  private _audioOnly: boolean = false;
   private _audioSrc: string | null = null; // Separate audio source URL
   // Pre-muxed video qualities declared via multiple <source> tags with
   // data-height / data-label. Lets the player drive a YouTube-style quality
@@ -375,6 +389,7 @@ export class MoviElement extends HTMLElement {
       "licenseurl",
       "licenseheaders",
       "headers",
+      "audioonly",
       "lcevc",
       "lcevcurl",
       "postertime",
@@ -471,7 +486,16 @@ export class MoviElement extends HTMLElement {
     this.coverArtOverlay.style.zIndex = "1";
     this.coverArtOverlay.style.pointerEvents = "none";
     this.coverArtOverlay.style.background = "#000";
+    this.coverArtOverlay.style.overflow = "hidden"; // contain the blur bleed
+    // Blurred backdrop via CSS filter:blur() — a real Gaussian in EVERY browser
+    // (Chrome/Firefox/Safari incl. old versions), unlike canvas ctx.filter which
+    // Safari < 17 ignores. Sits behind the sharp-art canvas.
+    this._coverArtBgEl = document.createElement("div");
+    this._coverArtBgEl.className = "movi-cover-art-bg";
+    this.coverArtOverlay.appendChild(this._coverArtBgEl);
     this.coverArtCanvas = document.createElement("canvas");
+    this.coverArtCanvas.style.position = "absolute";
+    this.coverArtCanvas.style.inset = "0";
     this.coverArtCanvas.style.width = "100%";
     this.coverArtCanvas.style.height = "100%";
     this.coverArtCanvas.style.display = "block";
@@ -3461,6 +3485,16 @@ export class MoviElement extends HTMLElement {
     const preventDefaultContextMenu = (e: MouseEvent) => {
       // If we are currently scrubbing/dragging, just kill the menu event silently
       if (this.isDragging || this.isTouchDragging) {
+        e.preventDefault();
+        e.stopPropagation();
+        return false;
+      }
+
+      // No `controls` attribute → the player exposes no UI, so the custom
+      // context menu (Play/Pause/Speed/…) shouldn't appear either. Suppress the
+      // event (the browser default is already blocked by the canvas/video
+      // oncontextmenu handlers) so right-click is a clean no-op.
+      if (!this._controls) {
         e.preventDefault();
         e.stopPropagation();
         return false;
@@ -12091,6 +12125,27 @@ export class MoviElement extends HTMLElement {
       :host(.movi-audio-mode) .movi-fullscreen-btn {
         display: none !important;
       }
+      /* In audio mode the album art is painted by the cover-art canvas (which
+         persists through playback, unlike the pre-play poster overlay) — hide
+         the raw poster <img> so it doesn't double up over the canvas. The
+         poster URL still feeds the canvas via ensurePosterCoverArt(). */
+      :host(.movi-audio-mode) .movi-poster-overlay {
+        display: none !important;
+      }
+      /* Cover-art blurred backdrop. CSS filter:blur() is a real Gaussian in
+         every browser (Chrome/Firefox/Safari, including old Safari) — unlike
+         canvas ctx.filter, which Safari < 17 ignores. Oversized + scaled so the
+         blur's soft edges stay outside the (overflow:hidden) overlay. */
+      .movi-cover-art-bg {
+        position: absolute;
+        inset: -12%;
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        filter: blur(40px) brightness(0.5);
+        transform: scale(1.18);
+        will-change: filter;
+      }
       /* Strip-mode keyboard-shortcuts panel: the base CSS centres it
          inside the host via position:absolute + top:50%/left:50%, but
          the host is only 56px tall in strip mode so the panel lands
@@ -12541,6 +12596,7 @@ export class MoviElement extends HTMLElement {
     this._videoId = this.getAttribute("videoid") || "";
     this._resume = this.hasAttribute("resume");
     this._stableVolume = this.hasAttribute("stablevolume");
+    this._audioOnly = this.hasAttribute("audioonly");
 
     // If no src attribute, check for <source> child elements (Video.js-style)
     if (!this._src && !this._encrypted) {
@@ -12941,6 +12997,15 @@ export class MoviElement extends HTMLElement {
         }
         break;
       }
+      case "audioonly": {
+        // Data-saver toggle: skip video decode (CPU) and, for adaptive streams,
+        // fetch only audio (bandwidth). Demuxer flips live; streams reload.
+        const enabled = newValue !== null;
+        if (enabled === this._audioOnly) break;
+        this._audioOnly = enabled;
+        if (this.isConnected) this.applyAudioOnly();
+        break;
+      }
       case "autoplay":
         this._autoplay = newValue !== null;
         this.updateUnmuteOverlay();
@@ -13209,12 +13274,69 @@ export class MoviElement extends HTMLElement {
    * with the sharp artwork centred and sized to ~60% of the smaller host
    * dimension. Matches the YouTube Music / Apple Music aesthetic.
    */
+  /**
+   * For an audio-only source with a `poster` URL and no embedded album art,
+   * lazily load the poster into an ImageBitmap so updateCoverArtOverlay can
+   * paint it as album art (via the same blurred-backdrop cover-art canvas).
+   * Idempotent: loads once per URL, clears when no longer applicable (source
+   * became video, poster cleared, or embedded art arrived). Re-runs
+   * updateCoverArtOverlay once the bitmap is ready.
+   */
+  private ensurePosterCoverArt(audioMode: boolean): void {
+    const url =
+      audioMode && !this.coverArtBitmap
+        ? this._poster || this._generatedPosterUrl || ""
+        : "";
+
+    if (!url) {
+      // No longer applicable — drop any loaded poster-cover bitmap.
+      if (this._posterCoverBitmap) {
+        try { this._posterCoverBitmap.close(); } catch {}
+        this._posterCoverBitmap = null;
+      }
+      this._posterCoverUrl = "";
+      this._posterCoverLoading = false;
+      return;
+    }
+
+    // Already have it (or already loading it) for this exact URL — no-op.
+    if (this._posterCoverUrl === url) return;
+
+    this._posterCoverUrl = url;
+    this._posterCoverLoading = true;
+    const img = new Image();
+    img.crossOrigin = "anonymous"; // album art must be CORS-clean to bitmap
+    img.referrerPolicy = "no-referrer";
+    img.decoding = "async";
+    img.onload = () => {
+      if (this._posterCoverUrl !== url) return; // superseded mid-load
+      createImageBitmap(img)
+        .then((bmp) => {
+          if (this._posterCoverUrl !== url) { try { bmp.close(); } catch {}; return; }
+          if (this._posterCoverBitmap) { try { this._posterCoverBitmap.close(); } catch {} }
+          this._posterCoverBitmap = bmp;
+          this._posterCoverLoading = false;
+          this.updateCoverArtOverlay();
+        })
+        .catch(() => {
+          this._posterCoverLoading = false;
+          this.updateCoverArtOverlay(); // fall back to the strip
+        });
+    };
+    img.onerror = () => {
+      if (this._posterCoverUrl !== url) return;
+      this._posterCoverLoading = false;
+      this._posterCoverUrl = ""; // allow a retry if the URL is set again
+      this.updateCoverArtOverlay();
+    };
+    img.src = url;
+  }
+
   private updateCoverArtOverlay(): void {
     const overlay = this.coverArtOverlay;
     const canvas = this.coverArtCanvas;
     if (!overlay || !canvas) return;
 
-    const bitmap = this.coverArtBitmap;
     const hasVideoTrack = !!this.player?.trackManager?.getActiveVideoTrack?.();
     const hasAudio = !!this.player?.hasAudibleSource?.();
 
@@ -13248,7 +13370,19 @@ export class MoviElement extends HTMLElement {
     const srcIsAudio =
       typeof this._src === "string" &&
       this.guessMediaType(this._src).startsWith("audio/");
-    const audioMode = tracksUnresolved ? srcIsAudio : !hasVideoTrack && hasAudio;
+    // Audio-only (data-saver) forces the audio surface even on a video source —
+    // we're deliberately not decoding the video, so show album art / strip.
+    const audioMode =
+      this._audioOnly ||
+      (tracksUnresolved ? srcIsAudio : !hasVideoTrack && hasAudio);
+
+    // Audio-only with a `poster` URL but no embedded album art: load the poster
+    // into a bitmap and paint it through the cover-art canvas so it reads as
+    // album art. Embedded art always wins. The effective bitmap below feeds the
+    // strip decision + rendering just like real cover art.
+    this.ensurePosterCoverArt(audioMode);
+    const bitmap = this.coverArtBitmap ?? this._posterCoverBitmap;
+
     // VLC-like: if the source HAS an attached-picture track and previews are
     // on, cover art is on its way — hold the strip layout off until extraction
     // settles (_coverArtResolved) so we don't flash the 56px strip and then
@@ -13258,7 +13392,12 @@ export class MoviElement extends HTMLElement {
       (this.player?.trackManager?.getAttachedPicTracks?.()?.length ?? 0) > 0;
     const coverArtPending =
       audioMode && !bitmap && this._thumb && hasArtTrack && !this._coverArtResolved;
-    const stripMode = audioMode && !bitmap && !coverArtPending;
+    // Same idea for a poster acting as album art: while its bitmap is still
+    // loading, hold the strip off so we don't flash strip → album-art.
+    const posterCoverPending =
+      audioMode && !bitmap && this._posterCoverLoading;
+    const stripMode =
+      audioMode && !bitmap && !coverArtPending && !posterCoverPending;
     this.classList.toggle("movi-audio-mode", audioMode);
     const wasStrip = this.classList.contains("movi-audio-strip");
     this.classList.toggle("movi-audio-strip", stripMode);
@@ -13294,8 +13433,13 @@ export class MoviElement extends HTMLElement {
       }
     }
 
-    if (!bitmap || hasVideoTrack) {
+    // Show the album-art overlay only when there's art AND we're in audio mode.
+    // Keying off !audioMode (not hasVideoTrack) is what makes audio-only work on
+    // a VIDEO source: the video track still exists (we just don't decode it), so
+    // the old hasVideoTrack guard hid the art and left a black screen.
+    if (!bitmap || !audioMode) {
       overlay.style.display = "none";
+      if (this._coverArtBgEl) this._coverArtBgEl.style.backgroundImage = "none";
       return;
     }
 
@@ -13315,26 +13459,20 @@ export class MoviElement extends HTMLElement {
     ctx.save();
     ctx.scale(dpr, dpr);
 
-    // Blurred backdrop. drawImage with ctx.filter is the only way to get
-    // a real Gaussian on a canvas. Cover the full area like background-
-    // size: cover.
-    const bitmapAR = bitmap.width / bitmap.height;
-    const hostAR = cssW / cssH;
-    let bgW: number, bgH: number, bgX: number, bgY: number;
-    if (bitmapAR > hostAR) {
-      bgH = cssH;
-      bgW = cssH * bitmapAR;
-      bgX = (cssW - bgW) / 2;
-      bgY = 0;
-    } else {
-      bgW = cssW;
-      bgH = cssW / bitmapAR;
-      bgX = 0;
-      bgY = (cssH - bgH) / 2;
+    // Blurred backdrop is now a CSS-blurred DOM element BEHIND this canvas — a
+    // real Gaussian in every browser (canvas ctx.filter "blur()" is unsupported
+    // in Safari < 17 and looked bad faked). Point it at the poster URL; embedded
+    // art (an ImageBitmap, currently disabled) has no URL, so it falls back to
+    // the overlay's plain dark background. The canvas paints only the sharp art.
+    if (this._coverArtBgEl) {
+      const bgUrl = this.coverArtBitmap ? "" : this._posterCoverUrl;
+      this._coverArtBgEl.style.backgroundImage = bgUrl
+        ? `url("${bgUrl.replace(/"/g, '\\"')}")`
+        : "none";
     }
-    ctx.filter = "blur(40px) brightness(0.5)";
-    ctx.drawImage(bitmap, bgX, bgY, bgW, bgH);
-    ctx.filter = "none";
+    ctx.clearRect(0, 0, cssW, cssH); // transparent — let the blurred bg show
+
+    const bitmapAR = bitmap.width / bitmap.height;
 
     // Centred sharp artwork — square, 60% of the smaller dimension. The
     // bitmap itself is rarely a perfect square, so contain it inside the
@@ -13660,9 +13798,12 @@ export class MoviElement extends HTMLElement {
         source,
         decoder: this._sw,
         cache: { type: "lru", maxSizeMB: 520 },
-        enablePreviews: this._thumb,
+        // Audio-only disables scrub-preview thumbnails too — they'd decode video
+        // frames and defeat the CPU saving.
+        enablePreviews: this._thumb && !this._audioOnly,
         ...(this._fps > 0 && { frameRate: this._fps }),
         ...(this._headers && { headers: this._headers }),
+        ...(this._audioOnly && { audioOnly: true }),
         ...(this._sourceAdapter && { sourceAdapter: this._sourceAdapter }),
       };
 
@@ -14372,6 +14513,11 @@ export class MoviElement extends HTMLElement {
     // overlay so the new load doesn't briefly show last track's art.
     this.coverArtBitmap = null;
     this._coverArtResolved = false;
+    // Drop the poster-as-album-art bitmap too — we own it, so close to free it.
+    if (this._posterCoverBitmap) { try { this._posterCoverBitmap.close(); } catch {} }
+    this._posterCoverBitmap = null;
+    this._posterCoverUrl = "";
+    this._posterCoverLoading = false;
     if (this.coverArtOverlay) this.coverArtOverlay.style.display = "none";
     // Also drop the audio-mode/strip layout — re-decided once the new
     // source's tracks land via loadEnd → updateCoverArtOverlay.
@@ -14515,6 +14661,10 @@ export class MoviElement extends HTMLElement {
     // audio-mode/strip layout leak into the next track. The classes are
     // re-decided once the new source's tracks land (updateCoverArtOverlay).
     this.coverArtBitmap = null;
+    if (this._posterCoverBitmap) { try { this._posterCoverBitmap.close(); } catch {} }
+    this._posterCoverBitmap = null;
+    this._posterCoverUrl = "";
+    this._posterCoverLoading = false;
     if (this.coverArtOverlay) this.coverArtOverlay.style.display = "none";
     this.classList.remove("movi-audio-strip", "movi-audio-mode");
 
@@ -15778,6 +15928,47 @@ export class MoviElement extends HTMLElement {
     if (this.isConnected && (this._src || this._sourceAdapter)) {
       this.load();
     }
+  }
+
+  /**
+   * Audio-only (data-saver) mode. When true the player skips video decoding to
+   * save CPU and, for adaptive streams (HLS/DASH), fetches only audio
+   * renditions to save bandwidth; the UI shows the album-art / strip surface.
+   * Toggle via this property or the `audioonly` attribute.
+   *
+   *   player.audioOnly = true;  // data saver on
+   */
+  get audioOnly(): boolean {
+    return this._audioOnly;
+  }
+
+  set audioOnly(value: boolean) {
+    const enabled = !!value;
+    if (enabled === this._audioOnly) return;
+    this._audioOnly = enabled;
+    // Reflect to the attribute (without re-triggering this setter — the
+    // attributeChangedCallback no-ops when the flag already matches).
+    if (enabled) this.setAttribute("audioonly", "");
+    else this.removeAttribute("audioonly");
+    if (this.isConnected) this.applyAudioOnly();
+  }
+
+  /**
+   * Apply an audio-only toggle to the live player. Adaptive streams change what
+   * gets downloaded (Shaka ignores video at manifest-parse time), so they
+   * reload; the demuxer path flips video decode on/off in place.
+   */
+  private applyAudioOnly(): void {
+    if (!this.player) return;
+    // Always flip in place — NEVER reload. A reload destroys the player (and,
+    // for a stream, re-runs Shaka's manifest parse, which fails on HLS with
+    // disableVideo and drops the LIVE badge on the hls.js fallback). setAudioOnly
+    // handles every source live: streams pick an audio-only / smallest-video
+    // variant; split sources stop the demux loop; muxed skips the video decode.
+    this.player.setAudioOnly?.(this._audioOnly);
+    this.updateCoverArtOverlay();
+    this.updateControlsVisibility();
+    this.updateLiveState(); // keep the LIVE badge correct (stream stays loaded)
   }
 
   /**

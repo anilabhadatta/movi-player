@@ -534,8 +534,50 @@ export class ShakaPlayerWrapper extends EventEmitter<PlayerEventMap> {
       TAG,
       `Manifest parsed (${url.includes(".m3u8") ? "HLS" : "DASH"}). ${count} video renditions, ${this.audioRenditions.length} audio, ${this.textTracks.length} text`,
     );
+    // Apply audio-only data-saver if requested at load time.
+    if (this.config.audioOnly) this.setAudioOnly(true);
+
     this.setState("ready");
     this.emit("loadEnd", undefined);
+  }
+
+  /**
+   * Audio-only (data-saver) mode. Picks a true audio-only variant when the
+   * manifest exposes one (zero video bandwidth); otherwise pins the SMALLEST
+   * video rendition (most of the saving without breaking a stream whose audio
+   * is only muxed with video). ABR is disabled so it doesn't climb back up.
+   * Toggling off re-enables ABR. NOT done via manifest.disableVideo — that
+   * fails (Shaka 4032) on HLS streams with no separate audio-only variant.
+   */
+  setAudioOnly(enabled: boolean): void {
+    if (!this.player) return;
+    try {
+      if (!enabled) {
+        this.player.configure({ abr: { enabled: true } });
+        Logger.info(TAG, "Audio-only off — ABR re-enabled");
+        return;
+      }
+      const variants: any[] = this.player.getVariantTracks() ?? [];
+      if (!variants.length) return;
+      this.player.configure({ abr: { enabled: false } });
+      const audioOnly = variants.filter((v) => !v.videoCodec && !v.height);
+      const pick = audioOnly.length
+        ? audioOnly[0]
+        : variants
+            .slice()
+            .sort((a, b) => (a.bandwidth || 0) - (b.bandwidth || 0))[0];
+      if (pick) {
+        this.player.selectVariantTrack(pick, true);
+        Logger.info(
+          TAG,
+          audioOnly.length
+            ? "Audio-only mode — selected audio-only variant"
+            : `Audio-only mode — no audio-only variant; pinned smallest video (${pick.height || "?"}p)`,
+        );
+      }
+    } catch (e) {
+      Logger.warn(TAG, "setAudioOnly failed", e);
+    }
   }
 
   /** Build the video/audio/subtitle track lists from Shaka's manifest. */
