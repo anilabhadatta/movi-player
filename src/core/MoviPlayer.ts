@@ -3675,6 +3675,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     if (this.videoRenderer) {
       this.videoRenderer.resize(width, height);
     }
+    // A resize often coincides with a fullscreen / orientation / PiP change —
+    // a good moment to recover a wake lock that dropped or whose first request
+    // failed. Idempotent: no-op when already held / not playing / page hidden.
+    this.ensureWakeLock();
   }
 
   /**
@@ -4669,10 +4673,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /**
    * Request WakeLock to prevent screen sleep
    */
-  private async requestWakeLock(): Promise<void> {
+  private async requestWakeLock(retry: number = 1): Promise<void> {
     // Check if WakeLock API is available
     if (!("wakeLock" in navigator)) {
       Logger.debug(TAG, "WakeLock API not available");
+      return;
+    }
+
+    // The Screen Wake Lock API rejects (NotAllowedError) unless the page is
+    // visible — don't even attempt while hidden. It's the wrong moment, not a
+    // fault; handleVisibilityChange re-requests once the tab is shown.
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+      Logger.debug(TAG, "WakeLock skipped — page not visible");
       return;
     }
 
@@ -4693,9 +4705,41 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         this.wakeLock = null;
       });
     } catch (error) {
-      Logger.warn(TAG, "Failed to acquire WakeLock", error);
       this.wakeLock = null;
+      Logger.warn(TAG, "Failed to acquire WakeLock", error);
+      // Some devices reject the very FIRST request transiently even while
+      // visible (a race as the page becomes fully interactive), then never
+      // re-acquire for the rest of the session. Retry once shortly — but only
+      // if we still want the lock (active playback, visible, none held).
+      if (retry > 0) {
+        setTimeout(() => {
+          const st = this.stateManager.getState();
+          if (
+            !this.wakeLock &&
+            (st === "playing" || st === "buffering") &&
+            typeof document !== "undefined" &&
+            document.visibilityState === "visible"
+          ) {
+            this.requestWakeLock(retry - 1);
+          }
+        }, 600);
+      }
     }
+  }
+
+  /**
+   * Re-acquire the screen wake lock if we should be holding one but aren't.
+   * Called on the moments where the lock can quietly drop, or where a failed
+   * first attempt gets a fresh chance: tab visibility changes and player
+   * resizes (fullscreen / orientation / PiP transitions). Idempotent — no-op
+   * when a lock is already held, playback isn't active, or the page is hidden.
+   */
+  private ensureWakeLock(): void {
+    if (this.wakeLock) return; // already held
+    const st = this.stateManager.getState();
+    if (st !== "playing" && st !== "buffering") return; // not actively playing
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    this.requestWakeLock();
   }
 
   /**
@@ -4767,6 +4811,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       // Tab visible again — stop background timer, RAF takes over
       this.isBackgrounded = false;
       this.stopBackgroundTimer();
+
+      // The system drops the wake lock whenever the tab hides; now that we're
+      // visible again, re-acquire it (idempotent, gated on active playback).
+      this.ensureWakeLock();
 
       if (isPlaying) {
         // Resume AudioContext if needed. On mobile after long background the
@@ -4873,11 +4921,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           this.processLoop();
         }
 
-        setTimeout(() => {
-          if (this.stateManager.getState() === "playing") {
-            this.requestWakeLock();
-          }
-        }, 500);
+        // Re-acquire once playback has settled back in — idempotent, so it's a
+        // no-op if ensureWakeLock above already got it.
+        setTimeout(() => this.ensureWakeLock(), 500);
       }
     }
   };
