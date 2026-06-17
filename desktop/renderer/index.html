@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MoviPlayer</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <!-- Player web component (WASM embedded); registers <movi-player> on load -->
+    <script type="module" src="/vendor/element.js"></script>
+  </head>
+  <body>
+    <!-- Always-present transparent strip to drag the frameless window -->
+    <div class="drag-strip"></div>
+
+    <main class="stage">
+      <section class="welcome" id="welcome">
+        <div class="welcome-inner">
+          <p class="eyebrow">Plays what others can't</p>
+
+          <h1 class="title">Play anything.</h1>
+          <span class="spectrum" aria-hidden="true"></span>
+
+          <p class="lede">
+            MKV, HEVC, AV1, VP9 and 4K&nbsp;HDR — decoded right here on your
+            machine. Nothing's uploaded.
+          </p>
+
+          <ul class="codec-strip" aria-label="Formats this player decodes">
+            <li>MKV</li>
+            <li>HEVC</li>
+            <li>AV1</li>
+            <li>VP9</li>
+            <li>HDR10</li>
+            <li>10-bit</li>
+          </ul>
+
+          <!-- Primary action: the drop target -->
+          <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Open a video file">
+            <span class="dropzone-glow" aria-hidden="true"></span>
+            <span class="dropzone-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="26" height="26">
+                <path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"
+                  d="M12 3v11m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+              </svg>
+            </span>
+            <span class="dropzone-text">
+              <strong>Drop a video to play</strong>
+              <small>or <span class="link">choose a file</span></small>
+            </span>
+          </div>
+
+          <!-- Secondary action: a URL -->
+          <form class="urlbar" id="url-form" autocomplete="off">
+            <span class="urlbar-label">URL</span>
+            <input
+              id="url-input"
+              type="text"
+              inputmode="url"
+              spellcheck="false"
+              placeholder="https://…  paste a direct video link"
+            />
+            <button class="play" type="submit">Play</button>
+          </form>
+
+          <!-- Recent files (populated from main) -->
+          <section class="recents" id="recents" hidden>
+            <header class="recents-head">
+              <span class="section-label">Recent</span>
+              <button class="link link-dim" id="recents-clear" type="button">Clear</button>
+            </header>
+            <ul class="recents-list" id="recents-list"></ul>
+          </section>
+        </div>
+      </section>
+
+      <!-- Full-bleed player. With ambientmode and NO external wrapper, the
+           player tints its own letterbox (black) bars with the sampled frame
+           colour — the ambient lives inside the video area. -->
+      <movi-player
+        id="player"
+        renderer="canvas"
+        controls
+        objectfit="control"
+        gesturefs
+        thumb
+        fastseek
+        showtitle
+        ambientmode
+        resume
+        stablevolume
+        hidden
+      ></movi-player>
+    </main>
+
+    <!-- Full-window drag overlay -->
+    <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
+      <div class="drop-card">
+        <span class="spectrum spectrum-wide" aria-hidden="true"></span>
+        Release to play
+      </div>
+    </div>
+
+    <div class="toast" id="toast" role="status" hidden></div>
+
+    <script type="module" src="/renderer.js"></script>
+  </body>
+</html>

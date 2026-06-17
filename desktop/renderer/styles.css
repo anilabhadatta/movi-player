@@ -1,0 +1,465 @@
+/* ============================================================
+   MoviPlayer desktop — "decode bench"
+   Native grotesque for display, monospace for every technical
+   readout. One signature: the violet→cyan spectrum bar.
+   ============================================================ */
+:root {
+  --ink: #0c0c11;
+  --ink-2: #14141b;
+  --ink-3: #1c1c26;
+  --hairline: rgba(255, 255, 255, 0.08);
+  --hairline-2: rgba(255, 255, 255, 0.14);
+
+  --text: #f2f2f7;
+  --text-dim: #8a8a9c;
+  --text-faint: #5b5b6b;
+
+  --violet: #7c6cf0;
+  --violet-bright: #9d90ff;
+  --cyan: #34d6ff;
+  --spectrum: linear-gradient(90deg, var(--violet) 0%, #8e7bf5 38%, var(--cyan) 100%);
+
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--ink);
+  color: var(--text);
+  font-family: var(--sans);
+  overflow: hidden;
+  -webkit-user-select: none;
+  user-select: none;
+  /* faint cool vignette so flat-black gets some depth */
+  background-image:
+    radial-gradient(120% 80% at 50% -10%, rgba(124, 108, 240, 0.10), transparent 60%),
+    radial-gradient(90% 60% at 100% 110%, rgba(52, 214, 255, 0.06), transparent 55%);
+}
+
+/* Window drag handle (frameless) */
+.drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  z-index: 40;
+  -webkit-app-region: drag;
+}
+
+/* ---------- Stage ---------- */
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* Full-bleed player. ambientmode (no wrapper) tints its own letterbox bars. */
+movi-player {
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  background: #000;
+}
+/* The component's :host{display:block} beats the UA [hidden] rule, so force
+   it off here too (the bundled library also handles this now). */
+movi-player[hidden] {
+  display: none !important;
+}
+
+/* ---------- Welcome ---------- */
+.welcome {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 64px 40px 48px;
+  overflow-y: auto;
+}
+body.mac .welcome {
+  padding-top: 76px; /* clear the floating traffic lights on the welcome screen */
+}
+
+.welcome-inner {
+  width: 100%;
+  max-width: 560px;
+}
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--violet-bright);
+  margin: 0 0 1.1rem;
+}
+
+.title {
+  font-size: clamp(2.4rem, 5vw, 3.2rem);
+  font-weight: 760;
+  letter-spacing: -0.035em;
+  line-height: 0.98;
+  margin: 0;
+}
+
+/* Signature: the spectrum bar */
+.spectrum {
+  display: block;
+  width: 132px;
+  height: 3px;
+  margin-top: 1rem;
+  border-radius: 3px;
+  background: var(--spectrum);
+  transform-origin: left center;
+  box-shadow: 0 0 18px rgba(124, 108, 240, 0.45);
+}
+
+.lede {
+  color: var(--text-dim);
+  font-size: 1rem;
+  line-height: 1.5;
+  margin: 1.3rem 0 1.5rem;
+  max-width: 460px;
+}
+
+/* Codec readout */
+.codec-strip {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.9rem;
+  padding: 0;
+  margin: 0 0 2rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.codec-strip li {
+  position: relative;
+}
+.codec-strip li::after {
+  content: "·";
+  position: absolute;
+  right: -0.55rem;
+  color: var(--text-faint);
+}
+.codec-strip li:last-child::after {
+  content: "";
+}
+
+/* Drop zone (primary) */
+.dropzone {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.15rem 1.25rem;
+  border: 1.5px dashed var(--hairline-2);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.015);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+.dropzone:hover,
+.dropzone:focus-visible {
+  border-color: rgba(124, 108, 240, 0.55);
+  background: rgba(124, 108, 240, 0.05);
+  outline: none;
+}
+.dropzone-glow {
+  position: absolute;
+  inset: -40%;
+  background: var(--spectrum);
+  opacity: 0;
+  filter: blur(48px);
+  transition: opacity 0.25s ease;
+  pointer-events: none;
+}
+.dropzone:hover .dropzone-glow,
+.dropzone:focus-visible .dropzone-glow {
+  opacity: 0.14;
+}
+body.dragging .dropzone-glow {
+  opacity: 0.22;
+}
+.dropzone-icon {
+  flex: 0 0 auto;
+  width: 50px;
+  height: 50px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  color: var(--violet-bright);
+  background: rgba(124, 108, 240, 0.12);
+  border: 1px solid rgba(124, 108, 240, 0.22);
+}
+.dropzone-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.dropzone-text strong {
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.dropzone-text small {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.link {
+  color: var(--violet-bright);
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  border-bottom: 1px solid transparent;
+}
+.link:hover {
+  border-bottom-color: currentColor;
+}
+.link-dim {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.link-dim:hover {
+  color: var(--text-dim);
+}
+
+/* URL bar */
+.urlbar {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+  padding: 0.3rem 0.3rem 0.3rem 0.9rem;
+  border: 1px solid var(--hairline);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.3);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.urlbar:focus-within {
+  border-color: rgba(124, 108, 240, 0.5);
+  box-shadow: 0 0 0 3px rgba(124, 108, 240, 0.14);
+}
+.urlbar-label {
+  font-family: var(--mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.16em;
+  color: var(--text-faint);
+}
+.urlbar input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-family: var(--mono);
+}
+.urlbar input::placeholder {
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+.play {
+  border: none;
+  border-radius: 9px;
+  padding: 0.5rem 1.15rem;
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: #fff;
+  cursor: pointer;
+  background: linear-gradient(135deg, #8a7cf2 0%, #6c5dd3 100%);
+}
+.play:hover {
+  filter: brightness(1.06);
+}
+
+/* Recents */
+.recents {
+  margin-top: 2.2rem;
+  border-top: 1px solid var(--hairline);
+  padding-top: 1.1rem;
+}
+.recents-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.section-label {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.recents-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.recent {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.55rem 0.6rem;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: background 0.14s ease;
+}
+.recent:hover,
+.recent:focus-visible {
+  background: var(--ink-3);
+  outline: none;
+}
+.recent-ext {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--violet-bright);
+  background: rgba(124, 108, 240, 0.12);
+  border: 1px solid rgba(124, 108, 240, 0.2);
+  border-radius: 5px;
+  padding: 0.2rem 0.4rem;
+  min-width: 44px;
+  text-align: center;
+}
+.recent-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recent-meta {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--text-faint);
+}
+
+/* ---------- Drag overlay ---------- */
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 14, 0.78);
+  backdrop-filter: blur(4px);
+  z-index: 50;
+  pointer-events: none;
+}
+.drop-overlay.active {
+  display: flex;
+}
+.drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  border: 1.5px dashed rgba(124, 108, 240, 0.7);
+  border-radius: 20px;
+  padding: 2.6rem 4rem;
+  font-size: 1.15rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: #fff;
+  background: rgba(124, 108, 240, 0.08);
+}
+.spectrum-wide {
+  width: 180px;
+  margin: 0;
+}
+
+/* ---------- Toast ---------- */
+.toast {
+  position: absolute;
+  left: 50%;
+  bottom: 88px;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.88);
+  border: 1px solid var(--hairline);
+  color: #fff;
+  font-size: 0.84rem;
+  padding: 0.6rem 1rem;
+  border-radius: 10px;
+  z-index: 60;
+  max-width: 80%;
+}
+
+/* ---------- Motion (one orchestrated load-in) ---------- */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes drawLine {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.welcome-inner > *:not(.spectrum) {
+  animation: fadeUp 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.welcome-inner .eyebrow { animation-delay: 0.02s; }
+.welcome-inner .title { animation-delay: 0.06s; }
+.welcome-inner .lede { animation-delay: 0.14s; }
+.welcome-inner .codec-strip { animation-delay: 0.2s; }
+.welcome-inner .dropzone { animation-delay: 0.26s; }
+.welcome-inner .urlbar { animation-delay: 0.32s; }
+.welcome-inner .recents { animation-delay: 0.38s; }
+.spectrum {
+  animation: drawLine 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) 0.18s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation: none !important;
+    transition: none !important;
+  }
+}

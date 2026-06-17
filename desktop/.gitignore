@@ -1,0 +1,5 @@
+node_modules/
+dist-desktop/
+renderer/vendor/
+build/icon.png
+*.log

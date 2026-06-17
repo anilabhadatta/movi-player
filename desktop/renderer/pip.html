@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>MoviPlayer — Picture in Picture</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+      }
+      /* Top strip to drag the frameless PiP window. */
+      .pip-drag {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 26px;
+        z-index: 10;
+        -webkit-app-region: drag;
+      }
+      movi-player {
+        width: 100%;
+        height: 100%;
+        background: #000;
+        display: block;
+      }
+      /* Visible "return to the main window" button (frameless window has no
+         close control of its own). Appears on hover. */
+      .pip-exit {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+        z-index: 20;
+        -webkit-app-region: no-drag;
+        width: 30px;
+        height: 30px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0;
+        transition: opacity 0.2s ease, background 0.2s ease;
+      }
+      body:hover .pip-exit {
+        opacity: 1;
+      }
+      .pip-exit:hover {
+        background: rgba(0, 0, 0, 0.85);
+      }
+    </style>
+    <script type="module" src="/vendor/element.js"></script>
+  </head>
+  <body>
+    <div class="pip-drag"></div>
+    <button class="pip-exit" id="pip-exit" title="Back to main window (Esc)" aria-label="Back to main window">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M9 21H5a2 2 0 0 1-2-2v-4M15 3h4a2 2 0 0 1 2 2v4M3 9V5a2 2 0 0 1 2-2h4M21 15v4a2 2 0 0 1-2 2h-4" />
+      </svg>
+    </button>
+    <!-- Same attributes as the main player (minus resume — PiP is handed an
+         explicit start position). -->
+    <movi-player
+      id="pip-player"
+      renderer="canvas"
+      controls
+      objectfit="control"
+      gesturefs
+      thumb
+      fastseek
+      showtitle
+      ambientmode
+      stablevolume
+    ></movi-player>
+    <script type="module" src="/pip.js"></script>
+  </body>
+</html>

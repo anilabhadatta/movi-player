@@ -1,0 +1,81 @@
+appId: com.moviplayer.desktop
+productName: MoviPlayer
+copyright: Copyright © MoviPlayer
+
+directories:
+  output: dist-desktop
+  buildResources: build
+
+# Everything the app needs at runtime. renderer/vendor/element.js is copied
+# in by scripts/sync-assets.mjs (predist) before packaging.
+files:
+  - src/**/*
+  - renderer/**/*
+  - package.json
+
+asar: true
+
+# Register the app as a handler for every supported media file so double-click
+# and Finder ▸ "Open With" route to MoviPlayer on every platform.
+fileAssociations:
+  # Video / containers
+  - { ext: mkv, name: Matroska Video, role: Viewer }
+  - { ext: mp4, name: MPEG-4 Video, role: Viewer }
+  - { ext: m4v, name: MPEG-4 Video, role: Viewer }
+  - { ext: webm, name: WebM Video, role: Viewer }
+  - { ext: mov, name: QuickTime Movie, role: Viewer }
+  - { ext: avi, name: AVI Video, role: Viewer }
+  - { ext: flv, name: Flash Video, role: Viewer }
+  - { ext: wmv, name: Windows Media Video, role: Viewer }
+  - { ext: ts, name: MPEG Transport Stream, role: Viewer }
+  - { ext: m2ts, name: Blu-ray BDAV Video, role: Viewer }
+  - { ext: mts, name: AVCHD Video, role: Viewer }
+  - { ext: mpg, name: MPEG Video, role: Viewer }
+  - { ext: mpeg, name: MPEG Video, role: Viewer }
+  - { ext: ogv, name: Ogg Video, role: Viewer }
+  - { ext: 3gp, name: 3GPP Video, role: Viewer }
+  - { ext: hevc, name: HEVC Video, role: Viewer }
+  - { ext: h265, name: HEVC Video, role: Viewer }
+  - { ext: av1, name: AV1 Video, role: Viewer }
+  # Audio
+  - { ext: mka, name: Matroska Audio, role: Viewer }
+  - { ext: m4b, name: Audiobook, role: Viewer }
+  - { ext: opus, name: Opus Audio, role: Viewer }
+  - { ext: oga, name: Ogg Audio, role: Viewer }
+  - { ext: flac, name: FLAC Audio, role: Viewer }
+  - { ext: mp3, name: MP3 Audio, role: Viewer }
+  - { ext: aac, name: AAC Audio, role: Viewer }
+  - { ext: ac3, name: AC-3 Audio, role: Viewer }
+  - { ext: eac3, name: E-AC-3 Audio, role: Viewer }
+  - { ext: dts, name: DTS Audio, role: Viewer }
+  - { ext: wav, name: WAV Audio, role: Viewer }
+
+mac:
+  category: public.app-category.video
+  icon: build/icon.png
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+
+linux:
+  icon: build/icon.png
+  category: AudioVideo
+  synopsis: Play MKV, HEVC, AV1 & HDR video locally
+  target:
+    - AppImage
+    - deb

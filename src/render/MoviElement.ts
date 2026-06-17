@@ -6951,6 +6951,9 @@ export class MoviElement extends HTMLElement {
         centerPlayPause.classList.add("movi-center-visible");
       }
     }
+    // Bar visible → lift the centre button + loading spinner slightly to
+    // balance against it (host class the CSS keys off; see hideControls).
+    this.classList.add("movi-bar-visible");
 
     // Shift timeline panel up above controls
     const bar = this.shadowRoot?.querySelector(".movi-controls-bar") as HTMLElement;
@@ -7344,6 +7347,11 @@ export class MoviElement extends HTMLElement {
     if (centerPlayPause && state === "playing") {
       centerPlayPause.classList.remove("movi-center-visible");
     }
+    // Bar hidden → centre button + loading spinner sit at the true centre.
+    // (The :host:has(.movi-controls-hidden) CSS rule meant to do this doesn't
+    // apply against the shadow tree in some engines, e.g. Electron's Chromium,
+    // so the CSS keys off this host class we toggle instead.)
+    this.classList.remove("movi-bar-visible");
 
     // Shift timeline panel down when controls hide
     const timelinePanel = this.shadowRoot?.querySelector(".movi-timeline-panel") as HTMLElement;
@@ -7593,6 +7601,14 @@ export class MoviElement extends HTMLElement {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
+      }
+
+      /* The :host{display:block} above is an author rule, so it beats the
+         UA stylesheet's [hidden]{display:none}. Without this, the standard
+         hidden attribute does nothing and the player stays visible. Honour
+         it explicitly. !important so source-order/specificity can't regress it. */
+      :host([hidden]) {
+        display: none !important;
       }
 
       /* Light Theme Override */
@@ -10183,12 +10199,13 @@ export class MoviElement extends HTMLElement {
           height: 64px !important;
         }
 
-        /* Disable animations on mobile */
+        /* Keyframe animations off on small/compact layouts for perf, but keep
+           CSS transitions so the controls + centre button still move smoothly
+           here too (the PiP / mini player is a small container). */
         .movi-controls-overlay,
         .movi-center-play-pause,
         .movi-btn,
         .movi-progress-handle {
-          transition: none !important;
           animation: none !important;
           transform: none !important;
         }
@@ -10680,7 +10697,7 @@ export class MoviElement extends HTMLElement {
          button's bar-hidden and both-bars-visible rules exactly. */
       .movi-loading-indicator {
         position: absolute;
-        top: calc(50% - var(--movi-controls-height) / 2);
+        top: 50%;
         left: 50%;
         transform: translate(-50%, -50%);
         display: flex;
@@ -10689,15 +10706,7 @@ export class MoviElement extends HTMLElement {
         z-index: 1000;
         pointer-events: none;
         background: transparent;
-      }
-
-      :host:has(.movi-controls-container.movi-controls-hidden) .movi-loading-indicator,
-      :host(:not([controls])) .movi-loading-indicator {
-        top: 50%;
-      }
-
-      :host:has(.movi-controls-container.movi-controls-visible):has(.movi-title-bar.movi-title-visible) .movi-loading-indicator {
-        top: calc(50% - (var(--movi-controls-height) - 52px) / 2);
+        transition: top var(--movi-transition-normal);
       }
 
       .movi-loader-container {
@@ -10739,7 +10748,7 @@ export class MoviElement extends HTMLElement {
          down adjust this for the other two layout states. */
       .movi-center-play-pause {
         position: absolute;
-        top: calc(50% - var(--movi-controls-height) / 2);
+        top: 50%;
         left: 50%;
         transform: translate(-50%, -50%) scale(0.8);
         z-index: 5;
@@ -10768,23 +10777,15 @@ export class MoviElement extends HTMLElement {
         transition-delay: 0s;
       }
 
-      /* Bar hidden or no controls attribute → no chrome to balance
-         against, sit at true geometric centre. */
-      :host:has(.movi-controls-container.movi-controls-hidden) .movi-center-play-pause,
-      :host(:not([controls])) .movi-center-play-pause {
-        top: 50%;
-      }
-
-      /* Bar visible AND title bar visible → centre the icon inside
-         the visible video band (between title bottom and controls
-         top), not the full player. The 44% default biases too far up
-         when there's also a title bar to balance the controls; here
-         the offset is just half the *difference* between the two
-         chrome heights (title ≈ 52px, controls 72px → ~10px above
-         centre on desktop). calc() keeps it right on mobile where
-         --movi-controls-height drops to 64px too. */
-      :host:has(.movi-controls-container.movi-controls-visible):has(.movi-title-bar.movi-title-visible) .movi-center-play-pause {
-        top: calc(50% - (var(--movi-controls-height) - 52px) / 2);
+      /* Default (the base rule) is the true geometric centre. When the controls
+         bar is visible, lift the centre button AND the loading spinner a little
+         so they read as centred in the band above the bar. Keyed off a host
+         class toggled in show/hideControls, because :host:has() checks against
+         the shadow tree don't apply in every engine (notably Electron). The
+         transition on top (in each base rule) animates the move. */
+      :host(.movi-bar-visible) .movi-center-play-pause,
+      :host(.movi-bar-visible) .movi-loading-indicator {
+        top: calc(50% - var(--movi-controls-height) / 4);
       }
 
       .movi-center-play-pause:hover {
