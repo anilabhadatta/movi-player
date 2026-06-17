@@ -59,6 +59,12 @@
               spellcheck="false"
               placeholder="https://…  paste a direct video link"
             />
+            <button class="url-paste" id="url-paste" type="button" title="Paste link from clipboard" aria-label="Paste link from clipboard">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="8" y="3" width="8" height="4" rx="1" />
+                <path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2" />
+              </svg>
+            </button>
             <button class="play" type="submit">Play</button>
           </form>
 
@@ -90,6 +96,27 @@
         stablevolume
         hidden
       ></movi-player>
+
+      <!-- Floating button to reopen the playlist (shown when one exists) -->
+      <button class="pl-toggle" id="pl-toggle" hidden aria-label="Show playlist">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 6h13M3 12h13M3 18h9M18 15v6m0 0 3-3m-3 3-3-3" />
+        </svg>
+        <span class="pl-toggle-count" id="pl-toggle-count"></span>
+      </button>
+
+      <!-- Playlist (multi-select) — a flex sibling, so the player shrinks for it -->
+      <aside class="playlist-panel" id="playlist-panel">
+        <header class="pl-head">
+          <span class="pl-title">Playlist <span class="pl-count" id="pl-count"></span></span>
+          <button class="pl-close" id="pl-close" type="button" aria-label="Close playlist">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </button>
+        </header>
+        <ul class="pl-items" id="pl-items"></ul>
+      </aside>
     </main>
 
     <!-- Full-window drag overlay -->
@@ -98,6 +125,27 @@
         <span class="spectrum spectrum-wide" aria-hidden="true"></span>
         Release to play
       </div>
+    </div>
+
+    <!-- Open-URL modal (works during playback, unlike the welcome URL bar) -->
+    <div class="url-modal" id="url-modal" hidden>
+      <form class="url-modal-card" id="url-modal-form" autocomplete="off">
+        <p class="url-modal-title">Open URL</p>
+        <div class="urlbar">
+          <span class="urlbar-label">URL</span>
+          <input id="modal-url-input" type="text" inputmode="url" spellcheck="false" placeholder="https://…  paste a video link" />
+          <button class="url-paste" id="modal-url-paste" type="button" title="Paste link from clipboard" aria-label="Paste from clipboard">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="8" y="3" width="8" height="4" rx="1" />
+              <path d="M16 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2" />
+            </svg>
+          </button>
+        </div>
+        <div class="url-modal-actions">
+          <button type="button" class="modal-cancel" id="url-modal-cancel">Cancel</button>
+          <button type="submit" class="play">Play</button>
+        </div>
+      </form>
     </div>
 
     <div class="toast" id="toast" role="status" hidden></div>

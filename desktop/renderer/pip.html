@@ -64,8 +64,9 @@
         <path d="M9 21H5a2 2 0 0 1-2-2v-4M15 3h4a2 2 0 0 1 2 2v4M3 9V5a2 2 0 0 1 2-2h4M21 15v4a2 2 0 0 1-2 2h-4" />
       </svg>
     </button>
-    <!-- Same attributes as the main player (minus resume — PiP is handed an
-         explicit start position). -->
+    <!-- Same attributes as the main player. resume restores the handoff
+         position (shared localStorage, same title); the player now queues a
+         seek made before it's ready and applies it the moment it is. -->
     <movi-player
       id="pip-player"
       renderer="canvas"
@@ -76,6 +77,7 @@
       fastseek
       showtitle
       ambientmode
+      resume
       stablevolume
     ></movi-player>
     <script type="module" src="/pip.js"></script>

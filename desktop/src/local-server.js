@@ -186,6 +186,10 @@ async function handleProxy(req, res, url) {
   if (cl) out["Content-Length"] = cl;
   const cr = upstream.headers.get("content-range");
   if (cr) out["Content-Range"] = cr;
+  // Forward Content-Disposition so the player can read the real filename for
+  // its title (its priority-2 title source), not just the URL basename.
+  const cd = upstream.headers.get("content-disposition");
+  if (cd) out["Content-Disposition"] = cd;
 
   res.writeHead(upstream.status, out);
   if (req.method === "HEAD" || !upstream.body) return res.end();

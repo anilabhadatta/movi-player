@@ -87,6 +87,7 @@ export class MoviElement extends HTMLElement {
   private isOverControls: boolean = false;
   private isSeeking: boolean = false;
   private pendingSeekTarget: number | null = null; // Coalesces rapid currentTime sets while a seek is in flight
+  private _pendingSeek: number | null = null; // Seek requested before the player was ready; applied on the next seekable state
   private isDragging: boolean = false;
   private isTouchDragging: boolean = false;
 
@@ -14217,6 +14218,17 @@ export class MoviElement extends HTMLElement {
     // Forward player events to element
     const stateChangeHandler = (state: PlayerState) => {
       Logger.info(TAG, `stateChange: ${state}`);
+      // A seek requested before the player was ready was held — apply it now
+      // that we've reached a seekable state (fixes e.g. a PiP/handoff seek that
+      // arrives while the source is still loading).
+      if (
+        this._pendingSeek !== null &&
+        (state === "ready" || state === "paused" || state === "playing")
+      ) {
+        const target = this._pendingSeek;
+        this._pendingSeek = null;
+        this.currentTime = target;
+      }
       // Hide poster on state change to playing
       if (state === "playing" && this.posterElement) {
         // Drop the frozen-frame snapshot overlay used during quality switch
@@ -17239,7 +17251,11 @@ export class MoviElement extends HTMLElement {
   }
 
   set currentTime(value: number) {
-    if (!this.player) return;
+    // Player not built yet — hold the seek and apply it once it's ready.
+    if (!this.player) {
+      this._pendingSeek = value;
+      return;
+    }
     // Linear (non-seekable source) playback — only the bytes in the RAM window
     // are reachable, so clamp the target to the buffered range instead of
     // jumping somewhere that was discarded / not yet downloaded.
@@ -17254,9 +17270,15 @@ export class MoviElement extends HTMLElement {
       state !== "seeking" &&
       state !== "buffering"
     ) {
-      Logger.warn(TAG, `Seek blocked — state=${state} not allowed`);
+      // Not seekable yet (still loading/initialising). Hold the seek; the
+      // stateChange handler applies it the moment the player becomes ready.
+      Logger.info(TAG, `Seek held until ready — state=${state}`);
+      this._pendingSeek = value;
       return;
     }
+
+    // We're committed to seeking now, so any earlier held seek is superseded.
+    this._pendingSeek = null;
 
     // Coalesce: a previous seek is still running. Stash the latest target and
     // bail. The in-flight seek's finally() will pick up the latest target,

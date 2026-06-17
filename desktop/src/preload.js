@@ -32,6 +32,9 @@ contextBridge.exposeInMainWorld("movi", {
   pathForFile: (file) => {
     try { return webUtils.getPathForFile(file) || null; } catch { return null; }
   },
+  // Read the system clipboard (for the "paste link" button). Done in the main
+  // process — the clipboard module isn't available in a sandboxed preload.
+  readClipboard: () => ipcRenderer.invoke("clipboard:read"),
   // Allow-list paths for the /_local endpoint (e.g. dragged files).
   grant: (paths) => ipcRenderer.invoke("files:grant", paths),
 

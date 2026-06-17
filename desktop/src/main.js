@@ -6,7 +6,7 @@
  * wires up file opening from three sources: the in-app dialog, drag & drop
  * (handled in the renderer), and OS "open with" / double-click (here).
  */
-const { app, BrowserWindow, dialog, ipcMain, shell, Menu } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, Menu, clipboard } = require("electron");
 const fs = require("fs");
 const path = require("path");
 const { createLocalServer } = require("./local-server");
@@ -224,6 +224,7 @@ ipcMain.handle("dialog:open", () => openViaDialog());
 ipcMain.handle("recents:get", () => listRecents());
 ipcMain.handle("recents:clear", () => writeRecents([]));
 ipcMain.on("recents:open", (_e, p) => sendPaths([p]));
+ipcMain.handle("clipboard:read", () => clipboard.readText() || "");
 ipcMain.handle("files:grant", (_e, paths) => {
   (paths || []).forEach((p) => {
     grantFile(p);
@@ -247,6 +248,18 @@ function openPip(src, time, playing) {
     pipWindow.focus();
     return;
   }
+  // Leave fullscreen first (covers both the player's HTML fullscreen and the
+  // OS green-button fullscreen) so PiP pops out as a floating window instead of
+  // opening into the main window's fullscreen Space.
+  if (mainWindow && mainWindow.isFullScreen()) {
+    mainWindow.once("leave-full-screen", () => createPipWindow(src, time, playing));
+    mainWindow.setFullScreen(false);
+    return;
+  }
+  createPipWindow(src, time, playing);
+}
+
+function createPipWindow(src, time, playing) {
   pipState = { src, time: time || 0 };
   pipWindow = new BrowserWindow({
     width: 480,
@@ -318,10 +331,21 @@ if (!gotLock) {
     }
   });
 
-  // macOS delivers "open with" via this event, which can fire before ready.
+  // macOS delivers "open with" via this event — once PER FILE, so opening
+  // several files at once fires several events in quick succession. Batch them
+  // so they become a single playlist instead of rapidly replacing each other
+  // (which raced the decoder and errored).
+  let openFileBatch = [];
+  let openFileTimer = null;
   app.on("open-file", (e, p) => {
     e.preventDefault();
-    sendPaths([p]);
+    openFileBatch.push(p);
+    clearTimeout(openFileTimer);
+    openFileTimer = setTimeout(() => {
+      const batch = openFileBatch;
+      openFileBatch = [];
+      sendPaths(batch);
+    }, 150);
   });
 
   app.whenReady().then(async () => {

@@ -16,6 +16,12 @@ const toast = document.getElementById("toast");
 const recentsSection = document.getElementById("recents");
 const recentsList = document.getElementById("recents-list");
 const recentsClear = document.getElementById("recents-clear");
+const playlistPanel = document.getElementById("playlist-panel");
+const plItems = document.getElementById("pl-items");
+const plCount = document.getElementById("pl-count");
+const plClose = document.getElementById("pl-close");
+const plToggle = document.getElementById("pl-toggle");
+const plToggleCount = document.getElementById("pl-toggle-count");
 
 document.body.classList.add(
   window.movi.platform === "darwin" ? "mac" : window.movi.platform === "win32" ? "win" : "linux"
@@ -49,6 +55,7 @@ function loadSrc(src) {
 }
 async function loadFile(file) {
   prime();
+  clearPlaylist();
   // Prefer loading by path (via the local server) so the file also works in
   // the PiP window and lands in Recents. Fall back to a zero-copy File when the
   // path isn't available (then PiP isn't possible for that source).
@@ -63,10 +70,136 @@ async function loadFile(file) {
   }
 }
 function loadPaths(paths) {
-  if (!paths || !paths.length) return;
-  loadSrc(localSrc(paths[0]));
-  if (paths.length > 1) showToast(`Playing 1 of ${paths.length} — playlist is coming`);
+  openPathList(paths);
 }
+
+// ---------- Playlist ----------
+let playlist = [];
+let playlistIndex = -1;
+let panelOpen = false;
+let controlsVisible = true;
+let iconHovered = false;
+
+// The playlist icon rides with the player controls — shown only when the
+// controls are visible, a multi-file playlist exists, and the panel is closed.
+// Stay visible while hovered: the icon is a sibling over the player, so hovering
+// it makes the player hide its controls → icon hides → mouse back on the player
+// → controls show → icon shows … a flicker loop. The hover guard breaks it.
+function updatePlToggle() {
+  const show = playlist.length > 1 && !panelOpen && (controlsVisible || iconHovered);
+  plToggle.hidden = !show;
+}
+function openPanel() {
+  panelOpen = true;
+  playlistPanel.classList.add("open");
+  updatePlToggle();
+}
+function closePanel() {
+  panelOpen = false;
+  playlistPanel.classList.remove("open");
+  updatePlToggle();
+}
+
+// Entry point for any batch of paths: 2+ → playlist, 1 → single play.
+function openPathList(paths) {
+  const list = (paths || []).filter(Boolean);
+  if (!list.length) return;
+  if (list.length > 1) {
+    setPlaylist(list);
+  } else {
+    clearPlaylist();
+    loadSrc(localSrc(list[0]));
+  }
+}
+
+function setPlaylist(paths) {
+  playlist = paths.slice();
+  playlistIndex = -1;
+  renderPlaylist();
+  // Don't auto-open the panel (would shrink the video). The icon surfaces with
+  // the controls; the user opens the list on demand.
+  closePanel();
+  playPlaylistItem(0);
+}
+
+function clearPlaylist() {
+  playlist = [];
+  playlistIndex = -1;
+  plItems.replaceChildren();
+  closePanel();
+}
+
+function playPlaylistItem(i) {
+  if (i < 0 || i >= playlist.length) return;
+  playlistIndex = i;
+  loadSrc(localSrc(playlist[i]));
+  updateActiveItem();
+}
+
+function renderPlaylist() {
+  plItems.replaceChildren();
+  playlist.forEach((p, i) => {
+    const li = document.createElement("li");
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pl-item";
+    btn.title = baseName(p);
+
+    const idx = document.createElement("span");
+    idx.className = "pl-index";
+    idx.textContent = String(i + 1).padStart(2, "0");
+
+    const name = document.createElement("span");
+    name.className = "pl-name";
+    name.textContent = baseName(p);
+
+    btn.append(idx, name);
+    btn.addEventListener("click", () => playPlaylistItem(i));
+    li.append(btn);
+    plItems.append(li);
+  });
+  const n = playlist.length;
+  plCount.textContent = n;
+  plToggleCount.textContent = n;
+}
+
+function updateActiveItem() {
+  Array.from(plItems.children).forEach((li, i) => {
+    li.firstElementChild.classList.toggle("active", i === playlistIndex);
+  });
+  const active = plItems.children[playlistIndex];
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+// Auto-advance to the next track when one ends (unless looping the current).
+player.addEventListener("ended", () => {
+  if (player.loop) return;
+  if (playlistIndex >= 0 && playlistIndex < playlist.length - 1) {
+    playPlaylistItem(playlistIndex + 1);
+  }
+});
+
+plClose.addEventListener("click", closePanel);
+plToggle.addEventListener("click", openPanel);
+plToggle.addEventListener("mouseenter", () => { iconHovered = true; updatePlToggle(); });
+plToggle.addEventListener("mouseleave", () => { iconHovered = false; updatePlToggle(); });
+
+// Sync the playlist icon with the player's own controls visibility.
+function observeControls(attempt = 0) {
+  const sr = player.shadowRoot;
+  const container = sr && sr.querySelector(".movi-controls-container");
+  if (!container) {
+    if (attempt < 30) setTimeout(() => observeControls(attempt + 1), 100);
+    return;
+  }
+  const sync = () => {
+    controlsVisible = !container.classList.contains("movi-controls-hidden");
+    updatePlToggle();
+  };
+  new MutationObserver(sync).observe(container, { attributes: true, attributeFilter: ["class"] });
+  sync();
+}
+observeControls();
 
 // ---------- Recents ----------
 function fmtSize(bytes) {
@@ -131,8 +264,24 @@ urlForm.addEventListener("submit", (e) => {
   const u = urlInput.value.trim();
   if (!u) return;
   if (!/^https?:\/\//i.test(u)) return showToast("Enter a full http(s):// link");
+  clearPlaylist();
   loadSrc(proxySrc(u));
   urlInput.blur();
+});
+
+// Paste a link from the clipboard, and play it if it's a valid URL.
+document.getElementById("url-paste").addEventListener("click", async () => {
+  const text = ((await window.movi.readClipboard()) || "").trim();
+  if (!text) return showToast("Clipboard is empty");
+  urlInput.value = text;
+  if (/^https?:\/\//i.test(text)) {
+    clearPlaylist();
+    loadSrc(proxySrc(text));
+    urlInput.blur();
+  } else {
+    urlInput.focus();
+    showToast("Clipboard isn't a http(s) link");
+  }
 });
 
 const pickFile = () => window.movi.openDialog();
@@ -161,13 +310,21 @@ window.addEventListener("dragleave", () => {
     document.body.classList.remove("dragging");
   }
 });
-window.addEventListener("drop", (e) => {
+window.addEventListener("drop", async (e) => {
   e.preventDefault();
   dragDepth = 0;
   dropOverlay.classList.remove("active");
   document.body.classList.remove("dragging");
-  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-  if (file) loadFile(file);
+  const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+  if (!files.length) return;
+  // Resolve to paths so they work in the playlist (and PiP). Multiple → playlist.
+  const paths = files.map((f) => window.movi.pathForFile(f)).filter(Boolean);
+  if (paths.length) {
+    try { await window.movi.grant(paths); } catch {}
+    openPathList(paths);
+  } else {
+    loadFile(files[0]); // no path available → single, zero-copy
+  }
 });
 
 // Surface player errors instead of failing silently
@@ -178,11 +335,90 @@ player.addEventListener("error", (e) => {
 
 // ---------- Wires from main ----------
 window.movi.onLoadPaths(loadPaths);
-window.movi.onFocusUrl(() => {
-  urlInput.focus();
-  urlInput.select();
-});
 window.movi.onFullscreen((on) => document.body.classList.toggle("osfs", on));
+
+// ---------- Open-URL modal (works during playback; the welcome URL bar is hidden then) ----------
+function playUrl(u) {
+  u = (u || "").trim();
+  if (!/^https?:\/\//i.test(u)) {
+    showToast("Enter a full http(s):// link");
+    return false;
+  }
+  clearPlaylist();
+  loadSrc(proxySrc(u));
+  return true;
+}
+
+const urlModal = document.getElementById("url-modal");
+const modalUrlInput = document.getElementById("modal-url-input");
+
+async function showUrlPrompt() {
+  urlModal.hidden = false;
+  try {
+    const c = ((await window.movi.readClipboard()) || "").trim();
+    if (/^https?:\/\//i.test(c)) modalUrlInput.value = c;
+  } catch {}
+  modalUrlInput.focus();
+  modalUrlInput.select();
+}
+function hideUrlPrompt() {
+  urlModal.hidden = true;
+  modalUrlInput.value = "";
+}
+
+document.getElementById("url-modal-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (playUrl(modalUrlInput.value)) hideUrlPrompt();
+});
+document.getElementById("url-modal-cancel").addEventListener("click", hideUrlPrompt);
+document.getElementById("modal-url-paste").addEventListener("click", async () => {
+  const text = ((await window.movi.readClipboard()) || "").trim();
+  if (!text) return showToast("Clipboard is empty");
+  modalUrlInput.value = text;
+  modalUrlInput.focus();
+});
+urlModal.addEventListener("mousedown", (e) => {
+  if (e.target === urlModal) hideUrlPrompt();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !urlModal.hidden) hideUrlPrompt();
+});
+
+// Menu "Open URL…" and Cmd/Ctrl+L. The keydown is captured before the player's
+// own handler so it doesn't also toggle loop (its "l" case has no modifier guard).
+window.movi.onFocusUrl(showUrlPrompt);
+window.addEventListener(
+  "keydown",
+  (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      showUrlPrompt();
+    }
+  },
+  true
+);
+
+// Forward window key presses to the player so its shortcuts (space, arrows, f,
+// m, l …) work anywhere — without the user having to click the player first.
+// (Runs in the bubble phase, after the capture-phase PiP/URL intercepts above.)
+window.addEventListener("keydown", (e) => {
+  if (player.hidden) return; // only while a video is showing
+  if (e.metaKey || e.ctrlKey || e.altKey) return; // leave menu/app shortcuts alone
+  const ae = document.activeElement;
+  if (ae && (/^(INPUT|TEXTAREA|SELECT|BUTTON|A)$/.test(ae.tagName) || ae.isContentEditable)) return;
+  if (e.composedPath().includes(player)) return; // player already received it
+  const fwd = new KeyboardEvent("keydown", {
+    key: e.key,
+    code: e.code,
+    shiftKey: e.shiftKey,
+    repeat: e.repeat,
+    bubbles: false,
+    cancelable: true,
+  });
+  player.dispatchEvent(fwd);
+  if (fwd.defaultPrevented) e.preventDefault();
+});
 
 // The player's shadow root is open, so patch desktop-only things into it.
 function patchPlayerShadow(attempt = 0) {
@@ -261,6 +497,15 @@ window.movi.onPipClosed((state) => {
   const apply = () => {
     if (src && src !== player.src) {
       // PiP switched to a different file — bring it back to the main window.
+      // If it's a playlist item, stay in the playlist; otherwise it's a new
+      // single track, so drop the old playlist.
+      const idx = playlist.findIndex((p) => localSrc(p) === src);
+      if (idx >= 0) {
+        playlistIndex = idx;
+        updateActiveItem();
+      } else {
+        clearPlaylist();
+      }
       prime();
       player.src = src;
       let n = 0;

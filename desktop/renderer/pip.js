@@ -10,23 +10,15 @@ const params = new URLSearchParams(location.search);
 const baseName = (x) => String(x).split(/[?#]/)[0].split(/[\\/]/).pop() || String(x);
 const localSrc = (fp) => "/_local/" + encodeURIComponent(baseName(fp)) + "?p=" + encodeURIComponent(fp);
 
-function seekWhenReady(t) {
-  if (!(t > 0)) return;
-  let n = 0;
-  const iv = setInterval(() => {
-    if (++n > 80) return clearInterval(iv);
-    if (p.duration > 0) {
-      clearInterval(iv);
-      try { p.currentTime = t; } catch {}
-    }
-  }, 100);
-}
-
 function load(src, time, playing) {
   if (!src) return;
   if (playing) p.setAttribute("autoplay", "");
   p.src = src;
-  seekWhenReady(time || 0);
+  // Set it right away — the player now holds a seek made before it's ready and
+  // applies it the moment it can (and resume covers it from saved position too).
+  if (time > 0) {
+    try { p.currentTime = time; } catch {}
+  }
   reportState();
 }
 
