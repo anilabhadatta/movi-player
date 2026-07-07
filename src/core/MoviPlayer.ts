@@ -182,7 +182,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private _stallStartTime: number = 0; // When stall was first detected
   private _bufferingEntryTime: number = 0; // When we entered buffering state
   private _playStartTime: number = 0; // When play() was called — grace period for stall detection
-  private _coldAudioPrimed = false; // one-shot: has the first-play audio-prime run for this media?
   private _primingAudio = false; // true while the first-play buffer is filling its startup cushion
   private _decoderStuckSince: number = 0; // When video decoder was first detected stuck
   private _lastDesyncSeekTime: number = 0; // performance.now() of last desync-triggered resync
@@ -1120,11 +1119,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       // a ~full-duration "behind" and kicks off a spurious resync seek (an
       // audible trip at the start of every replay).
       this._playStartTime = performance.now();
-      // Re-arm the first-play audio prime so a replay of a heavy software codec
-      // (TrueHD/DTS) rebuilds its startup cushion just like the first play —
-      // otherwise the one-shot prime is spent and the cold-ish decode can trip.
-      // No effect on hardware/lightweight audio (the prime is codec-gated).
-      this._coldAudioPrimed = false;
+      // The replay seek(0) flushes the audio decoder like any seek, so heavy
+      // software audio (TrueHD/DTS) re-primes automatically via the seek-resume
+      // path — no separate first-play re-arm needed. Codec-gated, so
+      // hardware/lightweight audio replays stay instant.
       try {
         await this.seek(0, { suppressSpinner: true });
         // The separate native <audio> track ended with the video; seek(0)
@@ -1604,6 +1602,17 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.wasPlayingBeforeRebuffer = true; // resume intent for buffering→play
       this._bufferingEntryTime = performance.now();
       this.stateManager.setState("buffering");
+      // Heavy software audio is flushed-cold by the seek. This branch waits for
+      // the first video frame — which on an open-GOP CRA source can take a few
+      // seconds (HW decoder recreate + CRA wait). Without priming, the audio
+      // context keeps running through that wait and drains its buffer, so when
+      // the first frame finally lands and we resume, the sub-realtime cold
+      // decode underruns into gap-fill jitter. Hold the context suspended so
+      // the catch-up decode instead accumulates a cushion, and flag the resume
+      // gate to wait for it (issue #11, seek case).
+      if (this.activeAudioNeedsColdPrime()) {
+        this.beginAudioPrime();
+      }
       if (this._playStartTime === 0) {
         this._playStartTime = performance.now();
       }
@@ -1618,54 +1627,28 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         this._playStartTime = performance.now();
       }
 
-      // First-play cold-start audio prime. Software audio (TrueHD/DTS via WASM)
-      // decodes sub-realtime for ~1-2s while the decode path warms up. If we
-      // start now, the fast HW video races ahead while audio underruns —
+      // Cold-start audio prime for heavy software audio (TrueHD/DTS via WASM),
+      // which decodes sub-realtime for ~1-2s while the decode path warms up. If
+      // we start now, the fast HW video races ahead while audio underruns —
       // gap-fills ("atak-atak") then a ~2s A/V resync once the buffer empties.
-      // Instead, route the FIRST play through the same buffering machinery the
-      // stall path uses: keep the AudioContext suspended (isPlaying=true so
-      // decoded audio still accumulates), hold the clock and video presentation,
-      // and let the buffering→resume gate below start both together once a real
-      // audio cushion exists. Reached at media 0 (not mid-stream), so the resume
-      // has no drift. One-shot — warm mid-playback seeks skip it.
-      // Only the heavy lossless/complex software codecs — TrueHD/MLP and
-      // DTS/DCA — decode sub-realtime on a cold start and actually need the
-      // prime. WebCodecs hardware audio (AAC) and the *lightweight* software
-      // codecs (Opus, FLAC, AC-3, E-AC-3) all decode faster than realtime even
-      // cold, so priming them would just add a needless ~2s startup buffer.
-      // Gate on the codec so only TrueHD/DTS pay the startup cushion.
-      const activeAudioCodec = (
-        this.trackManager.getActiveAudioTrack()?.codec ?? ""
-      ).toLowerCase();
-      const needsColdPrime = /truehd|mlp|dts|dca/.test(activeAudioCodec);
-      const hasAudioTrack =
-        !this.disableAudio &&
-        needsColdPrime &&
-        this.audioDecoder.usesSoftware;
-      if (!this._coldAudioPrimed && hasAudioTrack) {
-        this._coldAudioPrimed = true; // one-shot; warm re-seeks skip this
-        // Prime WITHOUT resuming the context. On a replay the context is left
-        // suspended by pause() at `ended`; the old play()+suspendForBuffering
-        // pair raced there — play()'s fire-and-forget resume() completed AFTER
-        // suspendForBuffering()'s state check, so the context stayed running
-        // for the whole prime and the primed audio drained into underrun
-        // gap-fills. primeForBuffering() sets isPlaying=true and holds the
-        // context suspended without ever issuing a resume(), so buffers fill
-        // silently until the resume gate below (same as a clean first play).
-        this.audioRenderer.primeForBuffering(); // isPlaying=true, context held suspended
-        if (this.pendingAudioPackets.length > 0) {
-          for (const pkt of this.pendingAudioPackets) {
-            this.audioDecoder.decode(pkt.data, pkt.timestamp, pkt.keyframe);
-          }
-          this.pendingAudioPackets = [];
-        }
-        this._primingAudio = true; // gate resume on a solid cushion, not 0.1s
+      // Route the resume through the same buffering machinery the stall path
+      // uses: hold the AudioContext suspended (isPlaying=true so decoded audio
+      // still accumulates), hold the clock and video presentation, and let the
+      // buffering→resume gate below start both together once a real audio
+      // cushion exists. NOT one-shot — every seek flushes the decoder, so each
+      // post-seek resume is a cold start that needs the cushion too, else a
+      // mid-playback seek resumes thin and underruns into ~2s of jitter (issue
+      // #11, seek case). Hardware audio (AAC) and lightweight software codecs
+      // (Opus/FLAC/AC-3/E-AC-3) decode faster than realtime even cold, so
+      // activeAudioNeedsColdPrime() gates them out — no needless buffer for them.
+      if (this.activeAudioNeedsColdPrime()) {
+        this.beginAudioPrime();
         this.wasPlayingBeforeRebuffer = true; // resume intent for buffering→play
         this._bufferingEntryTime = performance.now();
         this.stateManager.setState("buffering");
         this.clock.pause();
         if (this.videoRenderer) this.videoRenderer.stopPresentationLoop();
-        Logger.info(TAG, "First-play audio prime: buffering until cushion");
+        Logger.info(TAG, "Audio cold-prime: buffering until cushion");
         return;
       }
 
@@ -1720,6 +1703,43 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     // Emit seeked event now that we are actually ready
     // Convert back from media time to UI time
     this.emit("seeked", Math.max(0, time - this.startTime));
+  }
+
+  /**
+   * Heavy lossless/complex software audio codecs (TrueHD/MLP, DTS/DCA) decode
+   * sub-realtime for ~1-2s from a cold start. Every seek flushes the decoder,
+   * so each post-seek resume is a cold start that needs the audio prime cushion
+   * — not just the first play/replay. Hardware audio (AAC) and lightweight
+   * software codecs (Opus/FLAC/AC-3/E-AC-3) decode faster than realtime even
+   * cold and don't need it. (issue #11)
+   */
+  private activeAudioNeedsColdPrime(): boolean {
+    const codec = (
+      this.trackManager.getActiveAudioTrack()?.codec ?? ""
+    ).toLowerCase();
+    return (
+      !this.disableAudio &&
+      this.audioDecoder.usesSoftware &&
+      /truehd|mlp|dts|dca/.test(codec)
+    );
+  }
+
+  /**
+   * Begin an audio prime: hold the AudioContext suspended (primeForBuffering,
+   * which never issues a resume() so it can't drain/race), flush any pending
+   * post-seek audio packets into the decoder so the cushion starts filling, and
+   * flag _primingAudio so the buffering→resume gate waits for a real cushion
+   * (2s) rather than the thin 0.1s default before resuming.
+   */
+  private beginAudioPrime(): void {
+    this.audioRenderer.primeForBuffering();
+    if (this.pendingAudioPackets.length > 0) {
+      for (const pkt of this.pendingAudioPackets) {
+        this.audioDecoder.decode(pkt.data, pkt.timestamp, pkt.keyframe);
+      }
+      this.pendingAudioPackets = [];
+    }
+    this._primingAudio = true;
   }
 
   /**
@@ -3745,7 +3765,6 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     this.seekTargetTime = -1; // clear any lingering pre-target frame-drop filter
     this.waitingForVideoSync = false; // no stale seek-completion armed
     this._playStartTime = 0; // keep first-play branch eligible
-    this._coldAudioPrimed = false; // re-arm the first-play audio prime for this source
     this._primingAudio = false;
     this.pendingAudioPackets = []; // poster-era audio is stale; play() re-seeks
     this.pendingPrebufferPackets = [];
