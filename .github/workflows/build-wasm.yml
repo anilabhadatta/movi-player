@@ -1,0 +1,123 @@
+name: Build WASM
+
+# Builds the FFmpeg + dav1d + movi WebAssembly module via the project's Docker
+# pipeline (docker/build-ffmpeg.sh -> movi.js), so changes to the FFmpeg
+# configure flags (decoders/parsers/demuxers) can be verified in CI without a
+# local Docker/Emscripten toolchain.
+#
+# The build image is linux/arm64 (see docker/Dockerfile), so this runs under
+# QEMU emulation on the standard x86_64 GitHub-hosted runner.
+
+on:
+  # push:
+  #   branches:
+  #     - "fix/**"
+  #     - "feat/**"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build/deploy (leave empty for current)"
+        type: string
+        default: ""
+      force_ffmpeg:
+        description: "Force-rebuild FFmpeg (ignore cached static libs)"
+        type: boolean
+        default: false
+      force_dav1d:
+        description: "Force-rebuild dav1d (ignore cached static libs)"
+        type: boolean
+        default: false
+
+jobs:
+  build-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      - name: Set up QEMU (linux/arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Cache the compiled FFmpeg/dav1d static libs (dist/ffmpeg, dist/dav1d)
+      # keyed on the build script + Dockerfile + FFmpeg/dav1d version pins, so
+      # unrelated reruns (e.g. only movi.c changed) skip the slow C library
+      # rebuild and go straight to the final movi WASM link step.
+      - name: Cache FFmpeg / dav1d static libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            dist/ffmpeg
+            dist/dav1d
+          key: >-
+            ffmpeg-wasm-${{ runner.os }}-
+            ${{ hashFiles('docker/Dockerfile', 'docker/build-ffmpeg.sh') }}
+
+      - name: Prepare output directory
+        run: mkdir -p dist/wasm
+
+      - name: Build WASM module (docker compose)
+        env:
+          FORCE_FFMPEG: ${{ github.event.inputs.force_ffmpeg == 'true' && 'true' || '' }}
+          FORCE_DAV1D: ${{ github.event.inputs.force_dav1d == 'true' && 'true' || '' }}
+          DOCKER_DEFAULT_PLATFORM: linux/arm64
+        run: docker compose run --rm build
+
+      - name: Verify movi.js was produced
+        run: |
+          ls -la dist/wasm/
+          test -f dist/wasm/movi.js
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: movi-wasm-${{ github.sha }}
+          path: dist/wasm/movi.js
+          retention-days: 14
+
+  build-ts:
+    needs: build-wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # NOTE: `npm ci` fails on upstream main today — package-lock.json is out
+      # of sync with package.json (missing esbuild@0.28.1 + its platform
+      # packages, pulled in transitively via vite/vitest). That drift is
+      # unrelated to this branch's change, so we use `npm install` here
+      # rather than editing someone else's lockfile speculatively.
+      - name: Install dependencies
+        run: npm install
+
+      - name: Download WASM artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: movi-wasm-${{ github.sha }}
+          path: dist/wasm
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build TS bundles (element / player / demuxer)
+        run: npm run build:ts
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: movi-player-dist-${{ github.sha }}
+          path: dist
+          retention-days: 14
