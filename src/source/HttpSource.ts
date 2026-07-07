@@ -1622,36 +1622,40 @@ export class HttpSource implements SourceAdapter {
       }
     }
 
-    // If the main stream is actively filling a full-file-cache buffer,
-    // do a one-off range fetch instead of restarting the stream (which would
-    // discard all already-downloaded data and start over from the new offset).
-    // This handles WebM/MKV Cues reads from the end of file during open().
-    const fileCanFitInBuffer = this.size > 0 && this.bufferSize >= this.size;
-    if (fileCanFitInBuffer && this.atomicIsStreaming() && gap > GAP_RESTART_THRESHOLD) {
-      Logger.info(TAG, `Read: one-off range fetch for offset=${offset}, length=${length} (gap=${(gap / 1024).toFixed(0)}KB, main stream continues)`);
+    // If the main stream is active, and the read is outside the stream window (either far ahead or behind),
+    // we can do a one-off range fetch instead of restarting the stream if the requested length is small
+    // (e.g. metadata/index/packet reads, which are typically < 15MB).
+    // This prevents thrashing/restarting the sequential stream for random access reads.
+    const isMetadataRead = length < 15 * 1024 * 1024;
+    const isOutsideStream = !isCoveredByStream;
+    if (isOutsideStream && this.atomicIsStreaming() && isMetadataRead) {
+      Logger.info(TAG, `Read: one-off range fetch for offset=${offset}, length=${length} (outside stream, main stream continues)`);
       try {
-        const rangeEnd = Math.min(offset + length - 1, this.size - 1);
+        const rangeEnd = this.size > 0 ? Math.min(offset + length - 1, this.size - 1) : offset + length - 1;
         const rangeLen = rangeEnd - offset + 1;
         const response = await fetch(this.url, {
           headers: await this.buildRequestHeaders({ offset, length: rangeLen }),
         });
-        if (response.ok || response.status === 206) {
+        if (response.status === 206 || response.ok) {
+          const contentLength = response.headers.get("content-length");
+          if (contentLength) {
+            const len = parseInt(contentLength, 10);
+            if (len > rangeLen * 1.5) {
+              throw new Error(`Server ignored range request (returned ${len} bytes instead of ${rangeLen})`);
+            }
+          }
           const arrayBuffer = await response.arrayBuffer();
+          if (response.status !== 206 && arrayBuffer.byteLength > rangeLen * 1.5) {
+            throw new Error(`Server ignored range request (returned ${arrayBuffer.byteLength} bytes)`);
+          }
           const data = new Uint8Array(arrayBuffer);
 
-          // Write the fetched data into the buffer at the correct position
-          // (the buffer is sized for the full file, so the offset maps directly)
+          // Write the fetched data into the buffer at the correct position if it fits
           const buffer = this.getBuffer();
           const bufStart = this.atomicGetBufferStart();
           const localOffset = offset - bufStart;
           if (localOffset >= 0 && localOffset + data.length <= buffer.length) {
             buffer.set(data, localOffset);
-            // Extend writePos if this fetch goes beyond current end
-            const newEnd = localOffset + data.length;
-            if (newEnd > this.atomicGetWritePos()) {
-              // Don't extend writePos — the main stream owns it sequentially.
-              // Instead, just serve the data directly.
-            }
           }
 
           // Serve the fetched data directly
