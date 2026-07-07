@@ -77,7 +77,7 @@ jobs:
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: movi-wasm-${{ github.sha }}
+          name: movi-wasm-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/wasm/movi.js
           retention-days: 14
 
@@ -106,7 +106,7 @@ jobs:
       - name: Download WASM artifact
         uses: actions/download-artifact@v4
         with:
-          name: movi-wasm-${{ github.sha }}
+          name: movi-wasm-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/wasm
 
       - name: Typecheck
@@ -118,6 +118,6 @@ jobs:
       - name: Upload dist artifact
         uses: actions/upload-artifact@v4
         with:
-          name: movi-player-dist-${{ github.sha }}
+          name: movi-player-dist-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist
           retention-days: 14
