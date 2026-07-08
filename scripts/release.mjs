@@ -100,6 +100,7 @@ ${C.b("Flags")}
   -h, --help         show this help
 
 ${C.b("Bumps")}     ${C.dim("package.json · desktop · vscode-extension · chrome-extension/manifest (+ locks)")}
+${C.b("Stamps")}    ${C.dim("CHANGELOG + docs/changelog ([Unreleased] → version) · VitePress nav · app JSON-LD")}
 ${C.b("Builds")}    ${C.dim("element.js once → chrome-extension/dist · vscode webview/dist · desktop vendor")}
 ${C.b("Safe")}      ${C.dim("never publishes/pushes/deploys unless you pass --deploy / --commit")}
 
@@ -205,6 +206,71 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Release date (local YYYY-MM-DD) + changelog/VitePress anchor for `next`.
+const today = (() => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+})();
+const anchor = next.replace(/\./g, "-"); // 0.4.0 → 0-4-0
+
+/**
+ * Keep-a-Changelog: rename the `## [Unreleased]` section to the new version +
+ * date and open a fresh empty Unreleased above it. Warns when there were no
+ * accumulated notes (an empty release is almost always a mistake).
+ */
+function stampChangelog(relPath) {
+  const p = join(ROOT, relPath);
+  if (!existsSync(p)) return console.log(C.y(`  ~ skip (missing): ${relPath}`));
+  const txt = readFileSync(p, "utf8");
+  const re = /^## \[Unreleased\][^\n]*\n/m;
+  if (!re.test(txt)) {
+    return console.log(C.y(`  ~ ${relPath}: no "## [Unreleased]" section`));
+  }
+  const body = txt.split(re)[1] || "";
+  const nextSec = body.search(/\n## \[/);
+  const notes = (nextSec >= 0 ? body.slice(0, nextSec) : body).trim();
+  if (!notes) {
+    console.log(C.y(`  ! ${relPath}: Unreleased is EMPTY — add notes before releasing`));
+  }
+  const out = txt.replace(re, `## [Unreleased]\n\n## [${next}] - ${today}\n`);
+  if (!DRY) writeFileSync(p, out);
+  console.log(C.g(`  ✓ ${relPath}  ${C.dim("[Unreleased] →")} [${next}] - ${today}`));
+}
+
+/** VitePress nav: bump the version-dropdown label and mark the new version
+ *  "(Latest)" in the Versions list, demoting the previous latest. */
+function bumpDocsConfig(relPath = "docs/.vitepress/config.mts") {
+  const p = join(ROOT, relPath);
+  if (!existsSync(p)) return console.log(C.y(`  ~ skip (missing): ${relPath}`));
+  let txt = readFileSync(p, "utf8");
+  txt = txt.replace(/text:\s*"v\d+\.\d+\.\d+"/, `text: "v${next}"`); // dropdown label
+  const latestRe =
+    /(\n\s*)\{ text: "v(\d+\.\d+\.\d+) \(Latest\)", link: "([^"]+)" \},/;
+  const mm = latestRe.exec(txt);
+  if (mm && mm[2] !== next) {
+    const [, ind, oldV, oldLink] = mm;
+    txt = txt.replace(
+      latestRe,
+      `${ind}{ text: "v${next} (Latest)", link: "/changelog#${anchor}" },` +
+        `${ind}{ text: "v${oldV}", link: "${oldLink}" },`,
+    );
+  }
+  if (!DRY) writeFileSync(p, txt);
+  console.log(C.g(`  ✓ ${relPath} ${C.dim("(nav label + Latest)")}`));
+}
+
+/** Web app JSON-LD softwareVersion (drift-tolerant). */
+function bumpAppMeta(relPath = "app/index.html") {
+  const p = join(ROOT, relPath);
+  if (!existsSync(p)) return;
+  const txt = readFileSync(p, "utf8");
+  const re = /("softwareVersion"\s*:\s*")\d+\.\d+\.\d+(")/;
+  if (!re.test(txt)) return;
+  if (!DRY) writeFileSync(p, txt.replace(re, `$1${next}$2`));
+  console.log(C.g(`  ✓ ${relPath} ${C.dim("(softwareVersion)")}`));
+}
+
 step(`Bump version → ${next}`);
 bumpJsonVersion("package.json");
 bumpJsonVersion("desktop/package.json");
@@ -213,6 +279,16 @@ bumpJsonVersion("chrome-extension/manifest.json");
 bumpLockVersion("package-lock.json");
 bumpLockVersion("desktop/package-lock.json");
 bumpLockVersion("vscode-extension/package-lock.json");
+
+// ── Changelog + docs + web metadata ─────────────────────────────────────────
+step(`Update changelog + docs → ${next} (${today})`);
+stampChangelog("CHANGELOG.md");
+stampChangelog("docs/changelog.md");
+bumpDocsConfig();
+bumpAppMeta();
+// README carries no pinned version (npm badge + jsdelivr are dynamic) — nothing
+// to bump there; noted so a future pinned reference isn't silently missed.
+console.log(C.dim("  = README.md: no pinned version (npm/jsdelivr dynamic)"));
 
 // ── Build the player bundle ONCE ────────────────────────────────────────────
 step("Build player bundle (dist/element.js)");
@@ -278,7 +354,7 @@ console.log(C.b(`\n✓ Release ${next} prepared${DRY ? " (dry run)" : ""}.`));
 const todo = [];
 if (!flags.has("--package"))
   todo.push("package distributables:  npm run release -- " + next + " --package");
-todo.push("update CHANGELOG.md + docs/changelog.md (curated notes)");
+todo.push("write the release notes under ## [Unreleased] BEFORE bumping (the script stamps them)");
 if (!flags.has("--commit")) todo.push('commit:  git add -A && git commit -m "chore(release): ' + next + '"');
 if (!flags.has("--deploy")) todo.push("deploy web:  npm run app:release   (outward)");
 todo.push("publish vsix / chrome zip manually (outward)");
