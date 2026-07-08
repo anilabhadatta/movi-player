@@ -94,6 +94,26 @@ void movi_set_skip_frame(MoviContext *ctx, int stream_index, int skip_val) {
   }
 }
 
+// Persistently mark a stream as discarded (or re-enabled) at the demuxer level.
+// With AVDISCARD_ALL, av_read_frame skips that stream's packets INTERNALLY (for
+// matroska, an avio_skip over the cluster body) and never returns them to JS —
+// so a file with an unused second audio track (e.g. a dual-TrueHD source, ~933
+// packets/s per track) stops flooding the read path with packets we throw away.
+// That roughly halves the packets the JS demux loop must pull per second, which
+// is what lets audio stay fed on slower engines (Safari processes ~half the
+// packets/s of Chromium, so the wasted inactive-track reads starved the active
+// audio into repeated stalls — issue #11). discard_all!=0 → AVDISCARD_ALL,
+// else AVDISCARD_DEFAULT (normal). Caller re-applies on track switch.
+EMSCRIPTEN_KEEPALIVE
+void movi_set_stream_discard(MoviContext *ctx, int stream_index,
+                             int discard_all) {
+  if (!ctx || !ctx->fmt_ctx || stream_index < 0 ||
+      stream_index >= (int)ctx->fmt_ctx->nb_streams)
+    return;
+  ctx->fmt_ctx->streams[stream_index]->discard =
+      discard_all ? AVDISCARD_ALL : AVDISCARD_DEFAULT;
+}
+
 EMSCRIPTEN_KEEPALIVE
 int movi_receive_frame(MoviContext *ctx, int stream_index) {
   if (!ctx || !ctx->frame)

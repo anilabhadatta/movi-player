@@ -513,6 +513,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           );
         }
       }
+
+      // Re-apply demuxer discard: re-enable the newly-selected audio track and
+      // discard the previously-active one (issue #11).
+      this.applyStreamDiscard();
     });
 
     this.trackManager.on("tracksChange", (tracks) => {
@@ -905,6 +909,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     } else if (audioTrack && this.disableAudio) {
       Logger.info(TAG, "Audio processing disabled for debugging");
     }
+
+    // Drop unused audio tracks from the demuxer read path (issue #11).
+    this.applyStreamDiscard();
 
     // Configure subtitle decoder
     const subtitleTrack = this.trackManager.getActiveSubtitleTrack();
@@ -1725,6 +1732,29 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   }
 
   /**
+   * Tell the demuxer to skip every audio track except the active one. A file
+   * with a second, unused audio track (e.g. a dual-TrueHD source with ~933
+   * packets/s PER track) otherwise floods the read path with packets the loop
+   * immediately throws away — roughly doubling the reads needed per second. On
+   * a slower engine (Safari pulls ~half the packets/s of Chromium) that starved
+   * the ACTIVE audio below realtime and stalled every few seconds (issue #11).
+   * AVDISCARD_ALL makes av_read_frame skip them internally so each read returns
+   * a useful packet. Only audio streams are touched — video and subtitles keep
+   * their demuxer defaults (subtitles are read on demand). Re-applied on every
+   * audio-track switch so the newly-selected track is re-enabled.
+   */
+  private applyStreamDiscard(): void {
+    const bindings = this.demuxer?.getBindings();
+    if (!bindings) return;
+    const activeAudioId = this.trackManager.getActiveAudioTrack()?.id;
+    for (const t of this.trackManager.getTracks()) {
+      if (t.type === "audio") {
+        bindings.setStreamDiscard(t.id, t.id !== activeAudioId);
+      }
+    }
+  }
+
+  /**
    * Begin an audio prime: hold the AudioContext suspended (primeForBuffering,
    * which never issues a resume() so it can't drain/race), flush any pending
    * post-seek audio packets into the decoder so the cushion starts filling, and
@@ -2228,7 +2258,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           if (inPlayGrace && !this.muted && !this.disableAudio && !isSoftware) {
             burstSize = 20 * fpsScale; // Gentler ramp during initial fill with audio
           } else {
-            burstSize = (isSoftware ? 80 : 40) * fpsScale;
+            // Burst is a PACKET cap, but what matters for a cushion is how many
+            // VIDEO packets it reads — and in a heavily-interleaved file that
+            // can be a tiny fraction. e.g. a dual-audio 1080p TrueHD source
+            // reads ~933 pkt/s PER audio track vs ~19 video pkt/s, so a
+            // 40-packet burst pulls only ~0.4 video packets and video can never
+            // read ahead of realtime → no cushion → a stall on any hiccup
+            // (issue #11, "stalls every ~60s" on a 2×TrueHD file). A larger cap
+            // lets video outpace consumption and build a cushion; it stays
+            // self-limiting because the outer backpressure gate stops reading
+            // once videoBuffered/audioBuffered pass their targets, and the
+            // periodic MessageChannel yield below keeps the tick non-blocking.
+            burstSize = (isSoftware ? 160 : 160) * fpsScale;
           }
         }
       }
