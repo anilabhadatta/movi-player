@@ -8,6 +8,23 @@ import type { SubtitleCue } from "../types";
 
 const TAG = "CanvasRenderer";
 
+/**
+ * A snapshot of the live 360° camera + projection, enough to reproject an
+ * equirectangular frame to exactly what the user currently sees. Consumed by
+ * the thumbnail/preview renderer so seek-bar previews match the on-screen view.
+ */
+export interface VRView {
+  yaw: number; // radians, look left/right (current, post-spring)
+  pitch: number; // radians, look up/down
+  fov: number; // vertical field of view (radians)
+  aspect: number; // player viewport width / height (frames the preview to match)
+  half: boolean; // VR180 (front hemisphere)
+  fisheye: boolean; // equidistant fisheye
+  sbs: boolean; // side-by-side stereo (left eye)
+  stereographic: boolean; // little-planet
+  texAspect: number; // source frame width / height
+}
+
 export class CanvasRenderer {
   private canvas: HTMLCanvasElement | OffscreenCanvas;
   private gl: WebGL2RenderingContext | null = null;
@@ -1026,6 +1043,27 @@ export class CanvasRenderer {
 
   isVR360Enabled(): boolean {
     return this.vr360Enabled;
+  }
+
+  /**
+   * Snapshot the live 360° camera + projection so a thumbnail/preview can be
+   * reprojected to exactly what the user currently sees. Returns the CURRENT
+   * (rendered, post-spring) yaw/pitch/fov — i.e. the on-screen view, not the
+   * drag target. Null when 360 is off.
+   */
+  getVRView(): VRView | null {
+    if (!this.vr360Enabled) return null;
+    return {
+      yaw: this.vrYaw,
+      pitch: this.vrPitch,
+      fov: this.vrFov,
+      aspect: this.height > 0 ? this.width / this.height : 16 / 9,
+      half: this.vrHalf,
+      fisheye: this.vrFisheye,
+      sbs: this.vrStereoSbs,
+      stereographic: this.vrStereographic,
+      texAspect: this.vrTexAspect,
+    };
   }
 
   /** Choose the VR projection/layout:

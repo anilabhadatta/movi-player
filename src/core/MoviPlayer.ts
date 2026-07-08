@@ -35,7 +35,7 @@ import { Logger, LogLevel } from "../utils/Logger";
 import { MoviVideoDecoder } from "../decode/VideoDecoder";
 import { MoviAudioDecoder } from "../decode/AudioDecoder";
 import { SubtitleDecoder } from "../decode/SubtitleDecoder";
-import { CanvasRenderer } from "../render/CanvasRenderer";
+import { CanvasRenderer, type VRView } from "../render/CanvasRenderer";
 import { AudioRenderer } from "../render/AudioRenderer";
 import { updateAllBindingsLogLevel, ThumbnailBindings } from "../wasm/bindings";
 import { loadWasmModuleNew } from "../wasm/FFmpegLoader";
@@ -2977,7 +2977,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /**
    * Generates a preview frame for the given time using C for demuxing and WebCodecs for decoding.
    */
-  async getPreviewFrame(time: number): Promise<Blob | null> {
+  async getPreviewFrame(
+    time: number,
+    view?: VRView | null,
+  ): Promise<Blob | null> {
     if (this._audioOnly) return null; // Data-saver: never decode video for previews
     if (!this.previewsAllowed()) return null; // Disabled, or source too large for a 2nd WASM context
     // Adaptive streams: use the manifest's own thumbnail track via Shaka
@@ -3028,6 +3031,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         Logger.warn(TAG, "Thumbnail bindings or renderer not available");
         return null;
       }
+
+      // 360°: reproject the equirect keyframe to the current viewing angle so
+      // the seek-bar preview matches what's on screen. Must be set BEFORE the
+      // decode/render below — draw() happens synchronously inside the WebCodecs
+      // output callback. Null (2D sources) keeps the flat passthrough path.
+      this.thumbnailRenderer.setProjection(view ?? null);
 
       // Read keyframe from thumbnailer
       // Convert time to media time (PTS) by adding startTime
@@ -4069,6 +4078,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
   isVR360Enabled(): boolean {
     return this.videoRenderer?.isVR360Enabled() ?? false;
+  }
+
+  /** Live 360° camera + projection snapshot for reprojecting seek-bar previews
+   *  to the current view. Null when not in 360. */
+  getVR360View(): VRView | null {
+    return this.videoRenderer?.getVRView() ?? null;
   }
 
   /** Select the VR projection/layout: half = VR180, fisheye = equidistant

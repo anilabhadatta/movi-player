@@ -8,6 +8,7 @@
 import { CodecParser } from "../decode/CodecParser";
 import { MoviVideoDecoder } from "../decode/VideoDecoder";
 import { Logger } from "./Logger";
+import type { VRView } from "../render/CanvasRenderer";
 
 const TAG = "ThumbnailRenderer";
 
@@ -27,6 +28,22 @@ export class ThumbnailRenderer {
   private texture: WebGLTexture | null = null;
   private vao: WebGLVertexArrayObject | null = null;
   private rotation: number = 0;
+
+  // 360° preview reprojection. When _vrView is set, draw() reprojects the
+  // equirectangular texture to the current viewing angle (mirrors
+  // CanvasRenderer's VR shader) instead of the flat passthrough. Its own
+  // program + unrotated fullscreen quad; compiled lazily on first 360 preview.
+  private vrProgram: WebGLProgram | null = null;
+  private vrVao: WebGLVertexArrayObject | null = null;
+  private vrLocs: Record<string, WebGLUniformLocation | null> | null = null;
+  private vrView: VRView | null = null;
+  // The flat (source-sized) canvas dimensions from initialize(), restored when
+  // a preview flips back to the flat path after a 360 draw resized the canvas.
+  private flatWidth: number = 0;
+  private flatHeight: number = 0;
+  private static readonly VR_PREVIEW_HEIGHT = 256;
+  private static readonly VR_FISHEYE_FOV = Math.PI;
+  private static readonly VR_PLANET_SCALE = 0.5;
 
   // WebCodecs support
   private decoder: VideoDecoder | null = null;
@@ -129,6 +146,10 @@ export class ThumbnailRenderer {
     const isRotated = rotation % 180 !== 0;
     this.canvas.width = isRotated ? height : width;
     this.canvas.height = isRotated ? width : height;
+    // Remember the flat render size so the VR path can resize the shared canvas
+    // for a preview-shaped view and the flat path can restore it afterwards.
+    this.flatWidth = this.canvas.width;
+    this.flatHeight = this.canvas.height;
 
     // Detect if source is HDR
     const primaries = (colorPrimaries || "").toLowerCase();
@@ -832,11 +853,182 @@ export class ThumbnailRenderer {
     this.draw();
   }
 
-  private draw(): void {
-    if (!this.gl || !this.program || !this.vao) return;
+  /**
+   * Set (or clear) the 360° reprojection view. When non-null, the next draw()
+   * reprojects the equirectangular texture to this camera angle; null restores
+   * the flat passthrough. Must be set BEFORE render()/decodeAndRender(), since
+   * draw() runs synchronously inside those.
+   */
+  setProjection(view: VRView | null): void {
+    this.vrView = view;
+  }
+
+  /**
+   * Lazily compile the equirect/fisheye/stereographic raycast program (ported
+   * verbatim from CanvasRenderer.initVRProgram) plus its own unrotated
+   * fullscreen quad feeding v_ndc. Returns true when ready.
+   */
+  private initVRProgram(): boolean {
+    if (this.vrProgram && this.vrVao) return true;
+    if (!this.gl) return false;
     const gl = this.gl;
 
-    // Render
+    const vsSource = `#version 300 es
+    layout(location = 0) in vec2 a_position;
+    out vec2 v_ndc;
+    void main() {
+      v_ndc = a_position;
+      gl_Position = vec4(a_position, 0.0, 1.0);
+    }`;
+
+    const fsSource = `#version 300 es
+    precision highp float;
+    uniform sampler2D u_image;
+    uniform float u_yaw;
+    uniform float u_pitch;
+    uniform float u_fov;
+    uniform float u_aspect;
+    uniform float u_lonDiv;
+    uniform float u_latDiv;
+    uniform float u_proj;
+    uniform float u_fishFov;
+    uniform float u_uScale;
+    uniform float u_uOffset;
+    uniform float u_planetScale;
+    uniform float u_srcAspect;
+    in vec2 v_ndc;
+    out vec4 outColor;
+    const float PI = 3.14159265358979323846;
+    void main() {
+      float t = tan(u_fov * 0.5);
+      vec3 dir = normalize(vec3(v_ndc.x * t * u_aspect, v_ndc.y * t, -1.0));
+      float cp = cos(u_pitch), sp = sin(u_pitch);
+      dir = vec3(dir.x, cp * dir.y - sp * dir.z, sp * dir.y + cp * dir.z);
+      float cy = cos(u_yaw), sy = sin(u_yaw);
+      dir = vec3(cy * dir.x + sy * dir.z, dir.y, -sy * dir.x + cy * dir.z);
+      vec2 eye;
+      if (u_proj < 0.5) {
+        float lon = atan(dir.x, -dir.z);
+        float lat = asin(clamp(dir.y, -1.0, 1.0));
+        eye = vec2(lon / u_lonDiv + 0.5, 0.5 - lat / u_latDiv);
+      } else if (u_proj < 1.5) {
+        float theta = acos(clamp(-dir.z, -1.0, 1.0));
+        float phi = atan(dir.y, dir.x);
+        float r = theta / (u_fishFov * 0.5);
+        eye = vec2(0.5 + 0.5 * r * cos(phi), 0.5 - 0.5 * r * sin(phi));
+      } else {
+        float a = acos(clamp(-dir.y, -1.0, 1.0));
+        float az = atan(dir.z, dir.x);
+        float r = tan(a * 0.5) * u_planetScale;
+        eye = vec2(0.5 + r * cos(az) / u_srcAspect, 0.5 + r * sin(az));
+      }
+      vec2 uv = vec2(eye.x * u_uScale + u_uOffset, eye.y);
+      outColor = texture(u_image, uv);
+    }`;
+
+    const program = this.createProgram(vsSource, fsSource);
+    if (!program) {
+      Logger.warn(TAG, "Failed to compile VR preview program");
+      return false;
+    }
+    this.vrProgram = program;
+    this.vrLocs = {
+      image: gl.getUniformLocation(program, "u_image"),
+      yaw: gl.getUniformLocation(program, "u_yaw"),
+      pitch: gl.getUniformLocation(program, "u_pitch"),
+      fov: gl.getUniformLocation(program, "u_fov"),
+      aspect: gl.getUniformLocation(program, "u_aspect"),
+      lonDiv: gl.getUniformLocation(program, "u_lonDiv"),
+      latDiv: gl.getUniformLocation(program, "u_latDiv"),
+      proj: gl.getUniformLocation(program, "u_proj"),
+      fishFov: gl.getUniformLocation(program, "u_fishFov"),
+      uScale: gl.getUniformLocation(program, "u_uScale"),
+      uOffset: gl.getUniformLocation(program, "u_uOffset"),
+      planetScale: gl.getUniformLocation(program, "u_planetScale"),
+      srcAspect: gl.getUniformLocation(program, "u_srcAspect"),
+    };
+    gl.useProgram(program);
+    if (this.vrLocs.image) gl.uniform1i(this.vrLocs.image, 0);
+
+    // Unrotated fullscreen quad (position only at location 0) → v_ndc.
+    this.vrVao = gl.createVertexArray();
+    gl.bindVertexArray(this.vrVao);
+    const vbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(
+      gl.ARRAY_BUFFER,
+      new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]),
+      gl.STATIC_DRAW,
+    );
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+    return true;
+  }
+
+  /** Reproject the bound equirect texture to the current 360 view. */
+  private drawVR(gl: WebGL2RenderingContext, view: VRView): void {
+    // Size the preview to the player's aspect so the framing matches on-screen.
+    const aspect = view.aspect > 0 ? view.aspect : 16 / 9;
+    const H = ThumbnailRenderer.VR_PREVIEW_HEIGHT;
+    const W = Math.max(64, Math.min(768, Math.round(H * aspect)));
+    if (this.canvas.width !== W || this.canvas.height !== H) {
+      this.canvas.width = W;
+      this.canvas.height = H;
+    }
+
+    // Full 360° equirect wraps horizontally; VR180 / little-planet clamp.
+    gl.bindTexture(gl.TEXTURE_2D, this.texture);
+    gl.texParameteri(
+      gl.TEXTURE_2D,
+      gl.TEXTURE_WRAP_S,
+      view.half || view.stereographic ? gl.CLAMP_TO_EDGE : gl.REPEAT,
+    );
+
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(this.vrProgram);
+    gl.bindVertexArray(this.vrVao);
+
+    const locs = this.vrLocs!;
+    const eyeAspect = view.sbs ? view.texAspect / 2 : view.texAspect;
+    const lonDiv = view.half ? Math.PI : 2 * Math.PI;
+    const latDiv = Math.min(Math.PI, lonDiv / (eyeAspect || 2));
+    const projMode = view.stereographic ? 2 : view.fisheye ? 1 : 0;
+    if (locs.yaw) gl.uniform1f(locs.yaw, view.yaw);
+    if (locs.pitch) gl.uniform1f(locs.pitch, view.pitch);
+    if (locs.fov) gl.uniform1f(locs.fov, view.fov);
+    if (locs.aspect) gl.uniform1f(locs.aspect, W / H);
+    if (locs.lonDiv) gl.uniform1f(locs.lonDiv, lonDiv);
+    if (locs.latDiv) gl.uniform1f(locs.latDiv, latDiv);
+    if (locs.proj) gl.uniform1f(locs.proj, projMode);
+    if (locs.fishFov)
+      gl.uniform1f(locs.fishFov, ThumbnailRenderer.VR_FISHEYE_FOV);
+    if (locs.uScale) gl.uniform1f(locs.uScale, view.sbs ? 0.5 : 1);
+    if (locs.uOffset) gl.uniform1f(locs.uOffset, 0);
+    if (locs.planetScale)
+      gl.uniform1f(locs.planetScale, ThumbnailRenderer.VR_PLANET_SCALE);
+    if (locs.srcAspect) gl.uniform1f(locs.srcAspect, view.texAspect || 1);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  private draw(): void {
+    if (!this.gl || !this.vao) return;
+    const gl = this.gl;
+
+    // 360° preview: reproject the equirect texture to the current view.
+    if (this.vrView && this.initVRProgram()) {
+      this.drawVR(gl, this.vrView);
+      return;
+    }
+
+    if (!this.program) return;
+    // Restore the flat (source-sized) canvas if a prior 360 draw resized it.
+    if (this.flatWidth && this.canvas.width !== this.flatWidth) {
+      this.canvas.width = this.flatWidth;
+      this.canvas.height = this.flatHeight;
+    }
     gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
@@ -935,6 +1127,14 @@ export class ThumbnailRenderer {
       if (this.program) {
         this.gl.deleteProgram(this.program);
         this.program = null;
+      }
+      if (this.vrVao) {
+        this.gl.deleteVertexArray(this.vrVao);
+        this.vrVao = null;
+      }
+      if (this.vrProgram) {
+        this.gl.deleteProgram(this.vrProgram);
+        this.vrProgram = null;
       }
     }
     this.gl = null;

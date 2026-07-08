@@ -1619,7 +1619,15 @@ export class MoviElement extends HTMLElement {
 
       try {
         if (!this.player) return;
-        const blob = await (this.player as any).getPreviewFrame?.(timeToFetch);
+        // 360°: pass the live viewing angle so the preview reprojects the
+        // equirect frame to what the user currently sees (2D → undefined).
+        const vrView = this._vr360
+          ? (this.player as any).getVR360View?.()
+          : undefined;
+        const blob = await (this.player as any).getPreviewFrame?.(
+          timeToFetch,
+          vrView,
+        );
 
         // Update UI if we got a blob
         if (blob && thumbnailImg) {
@@ -1634,8 +1642,11 @@ export class MoviElement extends HTMLElement {
           if (thumbnailPlaceholder) thumbnailPlaceholder.style.display = "none";
           thumbnailImg.style.display = "block";
 
-          // Re-apply rotation transform + margin on each preview load
-          this.applyThumbnailRotation(thumbnailImg);
+          // Re-apply rotation transform + margin on each preview load. Skip for
+          // 360° previews — those are already reprojected to the upright view,
+          // so a CSS rotate would double-transform them.
+          if (!this._vr360) this.applyThumbnailRotation(thumbnailImg);
+          else thumbnailImg.style.transform = "";
         }
       } catch (e) {
         // Ignore aborts
