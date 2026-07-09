@@ -4219,6 +4219,7 @@ export class MoviElement extends HTMLElement {
           if (fy < 10) fy = 10;
           contextMenu.style.left = `${fx}px`;
           contextMenu.style.top = `${fy}px`;
+          this.clampMenuToViewport(contextMenu);
           // skip the host-relative absolute-position path below
           requestAnimationFrame(() => contextMenu.classList.add("visible"));
           this._contextMenuVisible = true;
@@ -4280,6 +4281,7 @@ export class MoviElement extends HTMLElement {
 
         contextMenu.style.left = `${x}px`;
         contextMenu.style.top = `${y}px`;
+        this.clampMenuToViewport(contextMenu);
       }
 
       // Delay adding visible class slightly to ensure transition works
@@ -19832,6 +19834,33 @@ export class MoviElement extends HTMLElement {
       img.onerror = () => resolve(true);
       img.src = dataUrl;
     });
+  }
+
+  /**
+   * Final safety net for context-menu placement. Whatever a path computed
+   * (strip-mode position:fixed, host-relative absolute, …), the host's
+   * `contain` re-anchors fixed/absolute to the host box — so a clamp done in
+   * window coordinates can still leave the menu spilling off the real viewport
+   * (seen in audio-strip mode on touch). Re-measure the ACTUAL rect and nudge
+   * left/top by the overflow. Translation isn't affected by the containing
+   * block, so this works regardless. The mobile drawer is a deliberate
+   * right-edge panel — skip it.
+   */
+  private clampMenuToViewport(menu: HTMLElement): void {
+    if (menu.classList.contains("movi-context-menu-mobile")) return;
+    const m = 8;
+    const r = menu.getBoundingClientRect();
+    if (r.width === 0) return;
+    const curLeft = parseFloat(menu.style.left) || 0;
+    const curTop = parseFloat(menu.style.top) || 0;
+    let dx = 0;
+    let dy = 0;
+    if (r.right > window.innerWidth - m) dx = window.innerWidth - m - r.right;
+    if (r.left + dx < m) dx = m - r.left;
+    if (r.bottom > window.innerHeight - m) dy = window.innerHeight - m - r.bottom;
+    if (r.top + dy < m) dy = m - r.top;
+    if (dx) menu.style.left = `${curLeft + dx}px`;
+    if (dy) menu.style.top = `${curTop + dy}px`;
   }
 
   private updateHDRVisibility(): void {
