@@ -901,7 +901,8 @@ export class AudioRenderer {
    * Set volume (0-1) with smooth ramping to prevent clicks/pops
    */
   setVolume(volume: number): void {
-    this.volume = Math.max(0, Math.min(1, volume));
+    // 0–2: values above 1 boost up to 200% (VLC-style).
+    this.volume = Math.max(0, Math.min(2, volume));
     if (this.gainNode && !this._muted) {
       const g = this.perceptualGain(this.volume);
       if (this._stableAudio) {
@@ -1366,7 +1367,10 @@ export class AudioRenderer {
    */
   private perceptualGain(v: number): number {
     if (v <= 0) return 0;
-    if (v >= 1) return 1;
+    // Above 100% we boost LINEARLY (VLC-style, up to 200% = 2x gain). Unity at
+    // v=1. Loud content near 0 dBFS can clip when boosted — enabling stable
+    // audio inserts the limiter that tames it.
+    if (v >= 1) return v;
     // ~60 dB usable range: gain = (e^(k*v) - 1) / (e^k - 1), k tuned for feel.
     const k = 6.908; // ln(1000) -> ~60 dB dynamic range
     return (Math.exp(k * v) - 1) / (Math.exp(k) - 1);

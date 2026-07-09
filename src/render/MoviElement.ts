@@ -24,6 +24,7 @@ import { Logger, LogLevel } from "../utils/Logger";
 import type { SourceAdapter } from "../source/SourceAdapter";
 
 import { SettingsStorage } from "../utils/SettingsStorage";
+import { QoECollector, beaconSink, type QoESink, type QoESession } from "../utils/QoE";
 
 const TAG = "MoviElement";
 
@@ -49,6 +50,16 @@ export class MoviElement extends HTMLElement {
   private canvas: HTMLCanvasElement;
   private video: HTMLVideoElement;
   private subtitleOverlay: HTMLElement;
+  // Off-screen aria-live region that mirrors the current caption text so screen
+  // readers announce each cue (the visual overlay is canvas-aligned + holds
+  // image-based PGS/DVB cues, so it isn't a reliable SR source on its own).
+  private _captionLive: HTMLElement | null = null;
+  private _captionObserver: MutationObserver | null = null;
+  private _lastCaptionText: string = "";
+  // QoE analytics: collects startup/rebuffer/error/decode metrics and fans them
+  // to sinks (and a `movi-qoe` DOM event). Heartbeats while playing.
+  private _qoe = new QoECollector();
+  private _qoeHeartbeat: number | null = null;
   private player: MoviPlayer | null = null;
   private isLoading: boolean = false;
   private _isUnsupported: boolean = false;
@@ -561,10 +572,35 @@ export class MoviElement extends HTMLElement {
     this.coverArtOverlay.appendChild(this.coverArtCanvas);
     shadowRoot.appendChild(this.coverArtOverlay);
 
-    // Create subtitle overlay element
+    // Create subtitle overlay element. Decorative for screen readers — the
+    // live region below is their source, so the overlay is aria-hidden.
     this.subtitleOverlay = document.createElement("div");
     this.subtitleOverlay.className = "movi-subtitle-overlay";
+    this.subtitleOverlay.setAttribute("aria-hidden", "true");
     shadowRoot.appendChild(this.subtitleOverlay);
+
+    // Off-screen aria-live region: announce each caption to screen readers.
+    this._captionLive = document.createElement("div");
+    this._captionLive.className = "movi-caption-live";
+    this._captionLive.setAttribute("aria-live", "polite");
+    this._captionLive.setAttribute("aria-atomic", "true");
+    this._captionLive.setAttribute("role", "status");
+    shadowRoot.appendChild(this._captionLive);
+    // Mirror the visible cue's text into the live region whenever it changes.
+    this._captionObserver = new MutationObserver(() => this.mirrorCaption());
+    this._captionObserver.observe(this.subtitleOverlay, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+
+    // QoE: mirror every analytics event out as a `movi-qoe` DOM event so
+    // embedders can forward it without registering a JS sink.
+    this._qoe.addSink((e) =>
+      this.dispatchEvent(
+        new CustomEvent("movi-qoe", { detail: e, bubbles: true, composed: true }),
+      ),
+    );
 
     // Click on the live caption text → open the transcript browser
     // (scrolled to the current cue). The overlay itself stays
@@ -970,7 +1006,7 @@ export class MoviElement extends HTMLElement {
     container.innerHTML = `
       <div class="movi-controls-bar" style="position: relative;">
         <div class="movi-progress-container">
-          <div class="movi-progress-bar">
+          <div class="movi-progress-bar" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuenow="0" aria-valuetext="0:00">
             <div class="movi-progress-buffer"></div>
             <div class="movi-progress-filled"></div>
             <div class="movi-chapter-markers"></div>
@@ -1028,7 +1064,7 @@ export class MoviElement extends HTMLElement {
                 </svg>
               </button>
               <div class="movi-volume-slider-container">
-                <input type="range" class="movi-volume-slider" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+                <input type="range" class="movi-volume-slider" min="0" max="2" step="0.01" value="1" aria-label="Volume" aria-valuemin="0" aria-valuemax="200" aria-valuenow="100" aria-valuetext="Volume 100%">
               </div>
             </div>
 
@@ -2991,7 +3027,7 @@ export class MoviElement extends HTMLElement {
                 const volumeChange = -deltaY / 200;
                 const newVolume = Math.max(
                   0,
-                  Math.min(1, initialVolume + volumeChange),
+                  Math.min(2, initialVolume + volumeChange),
                 );
                 this.volume = newVolume;
               }
@@ -3607,7 +3643,7 @@ export class MoviElement extends HTMLElement {
           // Up Arrow: Increase volume
           e.preventDefault();
           if (this.player && this.player.hasAudibleSource()) {
-            this.volume = Math.min(1, this.volume + 0.1);
+            this.volume = Math.min(2, this.volume + 0.1);
           }
           break;
         case "ArrowDown":
@@ -9549,6 +9585,19 @@ export class MoviElement extends HTMLElement {
           rgba(255, 255, 255, 0.2) 100%
         );
         border-radius: 100px;
+      }
+      /* Boosting above 100% (VLC-style): amber fill flags the boost zone, and
+         a tick at the 50%-of-track unity point marks where "normal" sits. */
+      .movi-volume-slider.movi-volume-boosted {
+        background: linear-gradient(
+          to right,
+          var(--movi-primary) 0%,
+          var(--movi-primary) 50%,
+          var(--movi-volume-boost, #f5a623) 50%,
+          var(--movi-volume-boost, #f5a623) var(--movi-volume-pct, 100%),
+          rgba(255, 255, 255, 0.2) var(--movi-volume-pct, 100%),
+          rgba(255, 255, 255, 0.2) 100%
+        );
         outline: none !important;
         pointer-events: auto !important;
         cursor: pointer;
@@ -12000,6 +12049,19 @@ export class MoviElement extends HTMLElement {
          block so it survives the !important cascade. */
 
       /* Subtitle overlay - HTML element for better performance */
+      /* Off-screen live region for screen-reader caption announcements. */
+      .movi-caption-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
       .movi-subtitle-overlay {
         position: absolute;
         bottom: 12%;
@@ -14974,6 +15036,8 @@ export class MoviElement extends HTMLElement {
    * Automatically create and initialize MoviPlayer
    */
   private async initializePlayer(): Promise<void> {
+    // QoE: begin a new analytics session and start the startup timer.
+    this._qoe.sessionStart(typeof this._src === "string" ? this._src : "");
     // Re-run the security-header check before any FFmpeg init. load() resets
     // _isUnsupported on every source change, which would otherwise let a
     // non-isolated context (e.g. embed iframe inside a third-party page that
@@ -15474,6 +15538,10 @@ export class MoviElement extends HTMLElement {
     // Forward player events to element
     const stateChangeHandler = (state: PlayerState) => {
       Logger.info(TAG, `stateChange: ${state}`);
+      // QoE: track stalls. Entering "buffering" starts a rebuffer timer; any
+      // other state ends it (the first stall, before first frame, is startup).
+      if (state === "buffering") this._qoe.bufferingStartNow();
+      else this._qoe.bufferingEndNow();
       // A seek requested before the player was ready was held — apply it now
       // that we've reached a seekable state (fixes e.g. a PiP/handoff seek that
       // arrives while the source is still loading).
@@ -15549,6 +15617,9 @@ export class MoviElement extends HTMLElement {
           this.updateMediaSessionPosition();
           this.captureMediaSessionArtwork();
           this.startStutterMonitor();
+          this._qoe.firstFrame();
+          this._qoe.playing();
+          this.startQoeHeartbeat();
           return;
         }
 
@@ -15594,10 +15665,16 @@ export class MoviElement extends HTMLElement {
         this.captureMediaSessionArtwork();
         // Watch for decode-can't-keep-up stutter to hint "play at 1x".
         this.startStutterMonitor();
+        // QoE: first "playing" marks the first frame (startup time).
+        this._qoe.firstFrame();
+        this._qoe.playing();
+        this.startQoeHeartbeat();
       } else if (state === "paused") {
         this.dispatchEvent(new Event("pause"));
         this.updateMediaSession();
         this.stopStutterMonitor();
+        this._qoe.paused();
+        this.stopQoeHeartbeat();
         // Don't auto-surface the bar on pause anymore — the centre
         // play button already comes back (via updatePlayPauseIcon's
         // paused branch) and tells the user playback is paused. The
@@ -15617,6 +15694,8 @@ export class MoviElement extends HTMLElement {
         if (this._resume) this.clearResumePosition();
         this.updateMediaSession();
         this.stopStutterMonitor();
+        this._qoe.ended();
+        this.stopQoeHeartbeat();
       }
     };
     this.player.on("stateChange", stateChangeHandler);
@@ -15685,6 +15764,9 @@ export class MoviElement extends HTMLElement {
     const timeUpdateHandler = (time: number) => {
       this.dispatchEvent(new CustomEvent("timeupdate", { detail: time }));
       this.updateLiveState();
+      // Keep the seek slider's screen-reader ARIA current even while the visual
+      // chrome is auto-hidden (updateTimeDisplay is gated on visible controls).
+      this.updateSeekAria();
       // Refresh the OS scrubber at ~1s granularity, or immediately on a jump
       // (seek) so the lock-screen position doesn't lag.
       if (Math.abs(time - this._mediaSessionLastPos) >= 1) {
@@ -15706,6 +15788,10 @@ export class MoviElement extends HTMLElement {
     );
 
     const errorHandler = (error: unknown) => {
+      this._qoe.error(
+        error instanceof Error ? error.message : String(error),
+        true,
+      );
       this.dispatchEvent(new CustomEvent("error", { detail: error }));
       // Always log the raw error before the message gets prettified for
       // the overlay — without this, "State: ... -> error" appears in
@@ -16138,6 +16224,9 @@ export class MoviElement extends HTMLElement {
     this._mediaSessionArtworkUrl = null;
     this.stopStutterMonitor();
     this.resetStutterHint();
+    if (this._captionLive) this._captionLive.textContent = "";
+    this._lastCaptionText = "";
+    this.stopQoeHeartbeat();
 
     // Tear down internal player
     if (this.player) {
@@ -16460,12 +16549,98 @@ export class MoviElement extends HTMLElement {
       durationEl.textContent = this.formatTime(this.duration);
     }
 
+    this.updateSeekAria();
+
     // Trigger title auto-load when duration first becomes available
     if (this._lastDuration === 0 && this.duration > 0) {
       this._lastDuration = this.duration;
       // Call updateTitle to check if we need to auto-load from metadata
       this.updateTitle();
     }
+  }
+
+  /**
+   * Update the seek slider's ARIA so screen readers announce the position as a
+   * real slider ("1:23 of 4:56"), not a bare number. Driven off timeUpdate so
+   * it stays current even while the visual chrome is auto-hidden.
+   */
+  private updateSeekAria(): void {
+    const bar = this.shadowRoot?.querySelector(
+      ".movi-progress-bar",
+    ) as HTMLElement | null;
+    if (!bar) return;
+    const ct = this._posterSeekActive ? 0 : this.currentTime;
+    const live = this.player?.isLiveStream?.();
+    const dur =
+      Number.isFinite(this.duration) && this.duration > 0 ? this.duration : 0;
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", live ? "0" : String(Math.round(dur)));
+    bar.setAttribute("aria-valuenow", String(Math.round(ct)));
+    bar.setAttribute(
+      "aria-valuetext",
+      live
+        ? "Live"
+        : dur > 0
+          ? `${this.formatTime(ct)} of ${this.formatTime(dur)}`
+          : this.formatTime(ct),
+    );
+  }
+
+  /** Push the visible caption's text into the off-screen aria-live region so
+   *  screen readers announce it. Deduped so identical re-renders stay quiet. */
+  private mirrorCaption(): void {
+    if (!this._captionLive || !this.subtitleOverlay) return;
+    const text = (this.subtitleOverlay.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text === this._lastCaptionText) return;
+    this._lastCaptionText = text;
+    this._captionLive.textContent = text;
+  }
+
+  // ── QoE analytics ─────────────────────────────────────────────────────────
+
+  private startQoeHeartbeat(): void {
+    if (this._qoeHeartbeat !== null) return;
+    this._qoeHeartbeat = window.setInterval(() => {
+      if (this.player?.getState?.() !== "playing") return;
+      const stats = this.player?.getStats?.() as
+        | Record<string, unknown>
+        | undefined;
+      const decoder = String(stats?.["Video Decoder"] ?? "unknown");
+      // No dropped-frame counter is exposed yet; rebufferRatio carries the
+      // stall cost. Report 0 so the schema stays stable for consumers.
+      this._qoe.heartbeat(this.currentTime, 0, decoder);
+    }, 10000);
+  }
+
+  private stopQoeHeartbeat(): void {
+    if (this._qoeHeartbeat !== null) {
+      clearInterval(this._qoeHeartbeat);
+      this._qoeHeartbeat = null;
+    }
+  }
+
+  /** Register a QoE analytics sink; returns an unsubscribe fn. Every event is
+   *  also dispatched as a `movi-qoe` CustomEvent. */
+  addQoeSink(sink: QoESink): () => void {
+    this._qoe.addSink(sink);
+    return () => this._qoe.removeSink(sink);
+  }
+
+  removeQoeSink(sink: QoESink): void {
+    this._qoe.removeSink(sink);
+  }
+
+  /** POST every QoE event to `url` via sendBeacon — shorthand for
+   *  addQoeSink(beaconSink(url)). Returns an unsubscribe fn. */
+  setAnalyticsBeacon(url: string): () => void {
+    return this.addQoeSink(beaconSink(url));
+  }
+
+  /** A rolled-up snapshot of the current QoE session. */
+  getQoeSession(): QoESession {
+    return this._qoe.getSession();
   }
 
   /**
@@ -16637,10 +16812,19 @@ export class MoviElement extends HTMLElement {
       // type=range> doesn't expose a separate filled portion across
       // browsers, so the CSS gradient below reads this custom prop
       // to draw a coloured segment from 0 to thumb and a muted one
-      // beyond.
+      // beyond. Track max is 2 (200%), so the thumb sits at v/2 of the width.
       volumeSlider.style.setProperty(
         "--movi-volume-pct",
-        `${Math.round(v * 100)}%`,
+        `${Math.round((v / 2) * 100)}%`,
+      );
+      // Above 100% we're boosting — tint the fill so the boost zone is obvious.
+      volumeSlider.classList.toggle("movi-volume-boosted", v > 1);
+      // Real ARIA for screen readers: announce the percentage, not 0–2.
+      const pct = Math.round(v * 100);
+      volumeSlider.setAttribute("aria-valuenow", String(pct));
+      volumeSlider.setAttribute(
+        "aria-valuetext",
+        this._muted ? "Muted" : `Volume ${pct}%${v > 1 ? " (boosted)" : ""}`,
       );
     }
 
@@ -18640,7 +18824,8 @@ export class MoviElement extends HTMLElement {
   }
 
   set volume(value: number) {
-    this._volume = Math.max(0, Math.min(1, value));
+    // 0–2: values above 1 boost audio up to 200% (VLC-style).
+    this._volume = Math.max(0, Math.min(2, value));
     this.setAttribute("volume", this._volume.toString());
 
     // If user increases volume while muted, automatically unmute (like YouTube)
