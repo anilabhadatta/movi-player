@@ -5366,6 +5366,9 @@ export class MoviElement extends HTMLElement {
 
       // Move canvas to PiP window
       pipWindow.document.body.appendChild(this.canvas);
+      // Clear any leftover cursor:none (from a hidden-controls state before
+      // entering PiP) so the pointer is visible in the PiP window immediately.
+      this.canvas.style.cursor = "default";
       Logger.info(TAG, `PiP: canvas moved to PiP window, isConnected=${this.canvas.isConnected}`);
 
       // Build PiP controls
@@ -8394,7 +8397,12 @@ export class MoviElement extends HTMLElement {
       // (and canvas/video, which sit underneath the overlay) via
       // inline style makes the change take effect immediately.
       this.style.cursor = "none";
-      if (this.canvas) this.canvas.style.cursor = "none";
+      // In document-PiP the canvas is MOVED into the PiP window (out of the
+      // shadow tree, so the cursor-hiding CSS can't reach it) — this inline
+      // style still travels with the element and would hide the pointer over
+      // the whole PiP video area above its own controls. Keep it visible there.
+      if (this.canvas)
+        this.canvas.style.cursor = this._pipWindow ? "default" : "none";
       if (this.video) this.video.style.cursor = "none";
 
       // The center play/pause button stays visible with pointer-events:auto
