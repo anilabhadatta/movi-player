@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **OS Media Session — lock-screen & hardware-key controls**: title metadata, artwork, and play/pause/stop/seek controls on the OS lock screen and notification shade via `navigator.mediaSession`, with a synced position scrubber.
+- **Press-and-hold to 2x (touch)**: YouTube-style long-press speeds playback to 2x while held, reverts on release.
+- **Settings (gear) button**: touch-friendly way to open the context menu now that long-press drives hold-to-2x.
+- **"Play at 1x" stutter hint**: OSD nudge when a heavy source can't sustain above 1x (dropped video frames, smooth audio), with a cooldown.
+- **360°/VR seek-bar preview reprojection**: seek-bar hover preview now matches your current viewing angle instead of the raw flat frame.
+- **Themeable control-bar colors**: more chrome colors driven by overridable `--movi-*` CSS custom properties for embedder theming.
+- **Volume boost to 200%**: the volume slider now reaches 200% (VLC-style) with a tinted boost zone above the unity mark, for quiet sources.
+- **Screen-reader accessibility**: an off-screen `aria-live` region announces captions, and the seek/volume controls are now real `role="slider"` widgets with spoken position text.
+- **QoE analytics (`movi-qoe`)**: a versioned QoE event stream (startup, rebuffering, bitrate switches, decode-fallback, errors, heartbeats) via a DOM event, `addQoeSink()` / `getQoeSession()`, and a built-in `beaconSink(url)`.
+- **Framework wrappers + typed element**: official typed `@movi-player/react` / `vue` / `svelte` wrappers, plus `HTMLElementTagNameMap` typing for `<movi-player>`.
+
+### Fixed
+- **Open-GOP CRA-opening HEVC stuck buffering**: a seek now accepts a CRA at or before the target instead of waiting indefinitely for an IDR.
+- **TrueHD/DTS buzzy/jittery audio around seeks and replays**: software decoder now flushes on seek, a cold-start cushion applies on every seek/replay (not just first play), and replay no longer trips a spurious desync resync.
+- **Multi-audio-track files stalling repeatedly**: unused audio streams are now discarded at the demuxer level so the active track isn't starved by interleaved packets from a track nobody's listening to.
+- **Crash on load with newer WASM builds**: heap bytes are now copied out before `TextDecoder.decode()` (resizable `ArrayBuffer` heaps threw and blocked every file from loading).
+- **Playback stalling after resuming from the background**: the un-throttled background decode timer now restarts on resume (including via Media Session), so audio no longer starves and video no longer jumps ahead of audio.
+- **SigV4 presigned URLs (S3 / R2 / GCS) failing to load**: falls back to ranged/plain `GET` when a `HEAD` probe returns 403/401 instead of treating it as access-denied; extension link probe also recognizes presigned links without a file extension.
+- **Context-menu submenu options all showing "active" (touch)**: Fit and Speed submenus no longer accumulate a stale highlight.
+- **Selected-track text unreadable in light theme + auto-hide stuck open**: readable codec/language text in light theme; switching audio tracks restarts the auto-hide timer.
+- **VS Code extension bundle out of date**: republished with the current player build (was missing the 0.3.3 audio-output/VR/FLAC fixes).
+
 ## [0.3.3] - 2026-06-29
 
 ### Added

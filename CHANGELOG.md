@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **OS Media Session — lock-screen & hardware-key controls**: playback now surfaces on the OS lock screen / notification shade with title metadata, artwork (poster, a captured frame, or embedded cover art), and play / pause / stop / seek controls — driven by `navigator.mediaSession` and reachable from hardware and Bluetooth media keys, with a position scrubber kept in sync as you seek or change rate.
+- **Press-and-hold to 2x (touch)**: a YouTube-style long-press on the video speeds playback up to 2x while held and reverts on release, with an on-screen "2×" pill.
+- **Settings (gear) button**: since long-press now drives the hold-to-2x gesture on touch, a discoverable gear button in the top-right opens the same menu right-click opens on desktop.
+- **"Play at 1x" stutter hint**: on a source the decoder can't sustain above 1x (e.g. 8K60 AV1) — video drops frames while audio stays smooth — the player shows a one-off OSD nudge to drop back to 1x, with a cooldown so it doesn't nag.
+- **360°/VR seek-bar preview reprojection**: hovering the seek bar on a 360°/VR source now shows the same perspective you're currently looking at, instead of the raw flat equirectangular frame.
+- **Themeable control-bar colors**: additional chrome colors (icon foreground, surfaces, PiP accent, hairline border) are now driven by overridable `--movi-*` CSS custom properties for easier embedder theming — no visual change out of the box.
+- **Volume boost to 200%**: the volume slider now goes above 100% up to 200% (VLC-style), with a tinted boost zone above the unity mark, for quiet sources. Enabling stable audio tames clipping on already-loud content.
+- **Screen-reader accessibility**: an off-screen `aria-live` region announces each caption as it appears (the canvas-aligned overlay isn't a reliable source on its own), and the seek and volume controls are now real `role="slider"` widgets that announce position as text ("1:23 of 4:56", "Volume 150%").
+- **QoE analytics (`movi-qoe`)**: a versioned quality-of-experience event stream — startup time, rebuffering, bitrate switches, decode-fallback, errors and periodic heartbeats — surfaced as a DOM event and via `addQoeSink()` / `getQoeSession()`, with a built-in `beaconSink(url)` for cookieless POST to Mux / GA4 / your own endpoint.
+- **Framework wrappers + typed element**: official typed `@movi-player/react`, `@movi-player/vue`, and `@movi-player/svelte` wrappers, plus `HTMLElementTagNameMap` typing so `<movi-player>` is typed in plain TypeScript.
+
+### Fixed
+- **Open-GOP CRA-opening HEVC stuck on "buffering"**: files that open mid-stream on an open-GOP CRA frame (common with cut/re-encoded clips) no longer hang forever — a seek now accepts a CRA at or before the target instead of waiting indefinitely for an IDR.
+- **TrueHD/DTS buzzy or jittery audio around seeks and replays**: a cluster of fixes removes choppy/buzzy audio and gap-fill jitter on TrueHD/DTS (MLP/DCA) sources — the software audio decoder now flushes its state correctly on seek, a cold-start priming cushion is applied on every seek and replay (not just the first play) so the sub-realtime decode doesn't underrun, and replaying no longer trips a spurious A/V-desync resync. Lightweight/hardware codecs (AAC, Opus, FLAC, AC-3) stay instant.
+- **Multi-audio-track files stalling every few seconds**: files carrying a second, unused audio track (e.g. dual-TrueHD releases) no longer stall repeatedly — unused audio streams are now discarded at the demuxer level so the active track's packets aren't starved by the interleaved packets of the track nobody's listening to.
+- **Crash on load with newer WASM builds**: builds whose WASM heap uses a resizable `ArrayBuffer` threw inside `TextDecoder.decode()` and blocked every file from loading; heap bytes are now copied out before decoding.
+- **Playback stalling after resuming from the background**: resuming a hidden tab (including via the new Media Session lock-screen controls) now restarts the un-throttled background decode timer, so audio no longer starves and video no longer jumps ahead of audio when you return to the tab.
+- **SigV4 presigned URLs (S3 / R2 / GCS) failing to load**: a `HEAD` size-probe on a presigned URL legitimately returns 403/401 (the signature is bound to the HTTP method) — the player now falls back to a ranged/plain `GET` instead of treating it as access-denied. The Chrome extension's link probe also now recognizes presigned download links that carry no file extension in the URL path.
+- **Context-menu submenu options all showing "active" (touch)**: the Fit and Speed submenus, which move outside the menu's overflow area at runtime, no longer accumulate a stale highlight on every option tapped.
+- **Selected-track text unreadable in light theme + auto-hide stuck open**: the active track's codec/language text is now readable in light theme, and switching audio tracks correctly restarts the controls auto-hide timer instead of leaving the bar up indefinitely.
+- **VS Code extension bundle out of date**: the published extension was missing the audio-output, VR, and FLAC fixes shipped in 0.3.3 because packaging skipped the bundle-copy step — republished with the current player build.
+
 ## [0.3.3] - 2026-06-29
 
 ### Added
