@@ -123,6 +123,12 @@ export class MoviElement extends HTMLElement {
   private _seekChainTarget: number | null = null;
   private _contextMenuVisible: boolean = false;
   private _contextMenuJustClosed: boolean = false;
+  // Body-level portal for the desktop right-click menu so it can escape any
+  // overflow:hidden / clipping ancestor of the player and feel native. The menu
+  // element is moved here on open and back to the shadow root on close.
+  private _menuPortalHost: HTMLElement | null = null;
+  private _menuPortalRoot: ShadowRoot | null = null;
+  private _menuHome: Node | null = null;
   private lastTouchTime: number = 0;
   // Press-and-hold-to-2x (touch): a long-press on the video speeds playback to
   // 2x while held and reverts on release (YouTube-style). Since long-press now
@@ -4241,8 +4247,6 @@ export class MoviElement extends HTMLElement {
       // headset shows up; the async result re-renders the submenu in place.
       this.refreshAudioOutputs();
 
-      // Show custom context menu
-      const rect = this.getBoundingClientRect();
       // Touch-only: narrow desktop windows still get the hover-based menu,
       // because slide-panel submenus require tap-to-open semantics.
       const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
@@ -4303,22 +4307,20 @@ export class MoviElement extends HTMLElement {
           return;
         }
 
-        // Reset any leftover fixed-position state from a previous strip-
-        // mode invocation (track switch from audio to video).
-        contextMenu.style.position = "";
+        // Portal the menu to a body-level shadow root and switch to fixed
+        // positioning so it escapes EVERY clipping ancestor of the player (a
+        // page wrapper's overflow:hidden, body{overflow-x:hidden}, etc.) and
+        // spills freely into the page like a native context menu. Lifting the
+        // player's own clip isn't enough — the ancestors still chop it. Once
+        // portaled + fixed, positions are plain viewport coordinates.
+        this.portalContextMenu(contextMenu);
+        contextMenu.style.position = "fixed";
 
-        // Lift the host's paint/overflow clip so the menu can spill past the
-        // player's own bounds (into the surrounding page) like strip mode —
-        // small/embedded players no longer chop the menu at their edges. The
-        // menu stays positioned relative to the host (container-type keeps the
-        // host a containing block); we clamp it to the viewport, not the player.
-        this.classList.add("movi-menu-overflow");
+        let x = e.clientX;
+        let y = e.clientY;
 
-        let x = e.clientX - rect.left;
-        let y = e.clientY - rect.top;
-
-        // Cap height to the VIEWPORT (not the player) so a tall menu on a short
-        // player can extend downward instead of scrolling inside a tiny box.
+        // Cap height to the VIEWPORT so a tall menu extends downward instead of
+        // scrolling inside a tiny box.
         contextMenu.style.maxHeight = `${Math.max(180, window.innerHeight - 40)}px`;
 
         // Temporarily show menu to get its dimensions
@@ -4328,10 +4330,9 @@ export class MoviElement extends HTMLElement {
         const menuHeight = contextMenu.offsetHeight;
         contextMenu.style.visibility = "visible";
 
-        // Flip to the left of / above the cursor only when it would run off the
-        // VIEWPORT edge — the player edge no longer constrains it.
-        if (e.clientX + menuWidth > window.innerWidth - 10) x -= menuWidth;
-        if (e.clientY + menuHeight > window.innerHeight - 10) y -= menuHeight;
+        // Flip to the left of / above the cursor near the viewport edge.
+        if (x + menuWidth > window.innerWidth - 10) x -= menuWidth;
+        if (y + menuHeight > window.innerHeight - 10) y -= menuHeight;
 
         contextMenu.style.left = `${x}px`;
         contextMenu.style.top = `${y}px`;
@@ -4390,6 +4391,11 @@ export class MoviElement extends HTMLElement {
         }, 400);
       } else {
         contextMenu.style.display = "none";
+        // Return the menu from the body portal to the shadow root and clear its
+        // fixed positioning so the next open (incl. strip/touch modes) starts
+        // clean and the submenu query below finds it back home.
+        contextMenu.style.position = "";
+        this.unportalContextMenu(contextMenu);
       }
 
       // Hide all submenus
@@ -5208,12 +5214,26 @@ export class MoviElement extends HTMLElement {
         clearTimeout(hideTimeout);
         hideTimeout = null;
       }
-      // Submenu lives as a sibling of the context menu inside shadowRoot.
-      // It's position:absolute, so coordinates are relative to :host (player).
-      const contextMenu = this.shadowRoot?.querySelector(
+      // The menu (and its submenu panels) may be in the body portal (desktop)
+      // rather than the shadow root — find it wherever it lives.
+      const contextMenu = (this._menuPortalRoot?.querySelector(
         ".movi-context-menu",
-      ) as HTMLElement | null;
+      ) ||
+        this.shadowRoot?.querySelector(
+          ".movi-context-menu",
+        )) as HTMLElement | null;
       if (contextMenu) {
+        // Use VIEWPORT coordinates when the menu itself is viewport-positioned:
+        // the desktop menu is portaled (absolute inside the fixed portal host at
+        // 0,0), and the audio-strip menu is fixed (strip mode drops the host's
+        // container-type, so a fixed submenu is viewport-relative too and lines
+        // up with it — the tiny 56px strip's bounds must NOT confine it).
+        // Otherwise the submenu is :host-relative and confined to the player.
+        const portaled = contextMenu.getRootNode() === this._menuPortalRoot;
+        const strip = this.classList.contains("movi-audio-strip");
+        const useViewport = portaled || strip;
+        // Strip: pin the submenu to the viewport like the strip menu.
+        submenu.style.position = strip ? "fixed" : "";
         const itemRect = item.getBoundingClientRect();
         const menuRect = contextMenu.getBoundingClientRect();
         const playerRect = this.getBoundingClientRect();
@@ -5221,29 +5241,36 @@ export class MoviElement extends HTMLElement {
         const gap = 4;
         const padding = 10;
 
-        const spaceOnRight = playerRect.right - menuRect.right;
-        const spaceOnLeft = menuRect.left - playerRect.left;
+        const originLeft = useViewport ? 0 : playerRect.left;
+        const originTop = useViewport ? 0 : playerRect.top;
+        const boundsLeft = useViewport ? 0 : playerRect.left;
+        const boundsRight = useViewport ? window.innerWidth : playerRect.right;
+        const boundsBottom = useViewport ? window.innerHeight : playerRect.bottom;
+
+        const spaceOnRight = boundsRight - menuRect.right;
+        const spaceOnLeft = menuRect.left - boundsLeft;
 
         submenu.style.right = "auto";
         submenu.style.marginLeft = "0";
         submenu.style.marginRight = "0";
 
-        // Convert viewport coords → :host-relative
+        // Positions are relative to the submenu's containing block (viewport
+        // origin when portaled, else :host), so subtract the origin.
         if (spaceOnRight >= submenuWidth + padding) {
           // 1. RIGHT (Preferred)
-          submenu.style.left = `${menuRect.right + gap - playerRect.left}px`;
+          submenu.style.left = `${menuRect.right + gap - originLeft}px`;
           submenu.style.transform = "translateX(-8px)";
         } else if (spaceOnLeft >= submenuWidth + padding) {
           // 2. LEFT
-          submenu.style.left = `${menuRect.left - submenuWidth - gap - playerRect.left}px`;
+          submenu.style.left = `${menuRect.left - submenuWidth - gap - originLeft}px`;
           submenu.style.transform = "translateX(8px)";
         } else {
           // 3. OVERLAP (tight space)
-          submenu.style.left = `${menuRect.left + 20 - playerRect.left}px`;
+          submenu.style.left = `${menuRect.left + 20 - originLeft}px`;
           submenu.style.transform = "translateY(10px)";
         }
 
-        let topPx = itemRect.top - playerRect.top;
+        let topPx = itemRect.top - originTop;
         submenu.style.top = `${topPx}px`;
 
         // Measure submenu height (force layout if hidden)
@@ -5260,11 +5287,10 @@ export class MoviElement extends HTMLElement {
           submenu.style.visibility = "";
         }
 
-        // Clamp to player bounds (player-relative)
-        const playerHeight = playerRect.height;
-        if (topPx + submenuHeight > playerHeight - padding) {
-          topPx = playerHeight - padding - submenuHeight;
-          if (topPx < padding) topPx = padding;
+        // Clamp to the bounds (viewport when portaled, else player).
+        const maxTop = boundsBottom - originTop - padding - submenuHeight;
+        if (topPx > maxTop) {
+          topPx = Math.max(padding, maxTop);
           submenu.style.top = `${topPx}px`;
         }
       }
@@ -20545,6 +20571,88 @@ export class MoviElement extends HTMLElement {
     } else if (right.lastElementChild !== fsBtn) {
       right.appendChild(fsBtn);
     }
+  }
+
+  /**
+   * A body-level shadow-DOM portal for the desktop context menu. Moving the
+   * menu here lets it escape any overflow:hidden / clipping ancestor of the
+   * player (page wrappers, cards, `body{overflow-x:hidden}`) — the player's own
+   * shadow keeps `container-type` for its @container queries, which makes it a
+   * containing block for fixed descendants, so a menu that stays inside can't
+   * break out. The portal clones the player's shadow styles so the menu looks
+   * identical, and carries over any inline theme custom-properties.
+   */
+  private ensureMenuPortal(): ShadowRoot | null {
+    if (this._menuPortalRoot) return this._menuPortalRoot;
+    if (typeof document === "undefined" || !document.body) return null;
+    const host = document.createElement("div");
+    host.setAttribute("data-movi-menu-portal", "");
+    // Plain fixed box at the origin. The cloned player styles below carry the
+    // player's own `:host { overflow:hidden; contain:paint; container-type:...;
+    // width:100% }` rules, which would apply to THIS host and clip the menu to
+    // a 0×0 box / re-anchor its fixed positioning — so hard-override them inline
+    // (inline beats the non-important :host rules). NO contain/container-type,
+    // so a fixed-positioned menu inside is viewport-relative and clipped by
+    // nothing.
+    host.style.cssText =
+      "position:fixed !important;top:0 !important;left:0 !important;" +
+      "width:0 !important;height:0 !important;overflow:visible !important;" +
+      "contain:none !important;container-type:normal !important;" +
+      "background:none !important;border-radius:0 !important;" +
+      "z-index:2147483647;";
+    const root = host.attachShadow({ mode: "open" });
+    for (const s of Array.from(
+      this.shadowRoot?.querySelectorAll("style") || [],
+    )) {
+      root.appendChild(s.cloneNode(true));
+    }
+    document.body.appendChild(host);
+    this._menuPortalHost = host;
+    this._menuPortalRoot = root;
+    return root;
+  }
+
+  // Submenu panels (Speed / Fit / Audio / Subtitle / Audio-output) are
+  // shadow-root SIBLINGS of the menu, not children — they must travel to the
+  // portal with it, or they'd stay behind and open detached from the menu.
+  private _portaledSubs: Element[] = [];
+
+  /** Move the context menu (+ its submenu panels) into the body portal and mirror theme vars. */
+  private portalContextMenu(menu: HTMLElement): void {
+    const root = this.ensureMenuPortal();
+    if (!root) return;
+    if (menu.parentNode !== root) {
+      this._menuHome = menu.parentNode;
+      this._portaledSubs = this.shadowRoot
+        ? Array.from(
+            this.shadowRoot.querySelectorAll(
+              ".movi-context-menu-submenu, .movi-context-menu-submenu-audio, .movi-context-menu-submenu-subtitle, .movi-context-menu-submenu-audiodevice",
+            ),
+          )
+        : [];
+      root.appendChild(menu);
+      for (const sub of this._portaledSubs) root.appendChild(sub);
+    }
+    // Carry over inline theme overrides (e.g. themecolor -> --movi-primary) so
+    // the portaled menu matches; the cloned styles supply the defaults.
+    const hostStyle = this._menuPortalHost?.style;
+    if (hostStyle) {
+      for (const prop of Array.from(this.style)) {
+        if (prop.startsWith("--movi")) {
+          hostStyle.setProperty(prop, this.style.getPropertyValue(prop));
+        }
+      }
+    }
+  }
+
+  /** Return the context menu (+ submenus) from the portal to the shadow root. */
+  private unportalContextMenu(menu: HTMLElement): void {
+    if (!this._menuHome) return;
+    if (menu.parentNode !== this._menuHome) this._menuHome.appendChild(menu);
+    for (const sub of this._portaledSubs) {
+      if (sub.parentNode !== this._menuHome) this._menuHome.appendChild(sub);
+    }
+    this._portaledSubs = [];
   }
 
   private clampMenuToViewport(menu: HTMLElement): void {
