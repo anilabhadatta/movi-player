@@ -6,8 +6,11 @@
 ##### No transcoding. No server processing. <br /> Just `<movi-player src="video.mkv" controls>`.
 
 [![npm version](https://img.shields.io/npm/v/movi-player.svg?style=flat-square&color=cb3837&logo=npm)](https://www.npmjs.com/package/movi-player)
-[![npm downloads](https://img.shields.io/npm/dm/movi-player.svg?style=flat-square&color=blue)](https://www.npmjs.com/package/movi-player)
-[![bundle size](https://img.shields.io/badge/bundle-50--410KB-success?style=flat-square)](https://www.npmjs.com/package/movi-player)
+[![npm downloads](https://img.shields.io/npm/dm/movi-player.svg?style=flat-square&color=blue&logo=npm&label=npm%20downloads)](https://www.npmjs.com/package/movi-player)
+[![jsDelivr hits](https://img.shields.io/jsdelivr/npm/hy/movi-player?style=flat-square&color=ff5627&logo=jsdelivr&label=jsDelivr%2Fyear)](https://www.jsdelivr.com/package/npm/movi-player)
+[![TypeScript](https://img.shields.io/npm/types/movi-player?style=flat-square&logo=typescript&color=3178c6)](https://www.npmjs.com/package/movi-player)
+[![js bundle](https://img.shields.io/badge/js%20bundle-50--410KB-success?style=flat-square)](https://www.npmjs.com/package/movi-player)
+[![with wasm](https://img.shields.io/badge/with%20wasm-~1.8--3.2MB-orange?style=flat-square)](#modules)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/MrUjjwalG/movi-player?style=flat-square&color=yellow&logo=github)](https://github.com/MrUjjwalG/movi-player/stargazers)
 
@@ -202,9 +205,9 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 | Module | Size | Gzip | Brotli | What you get |
 |---|---|---|---|---|
-| `movi-player` / `movi-player/element` | ~410KB | 2.57 MB | 1.95 MB | Full player with UI, controls, gestures |
-| `movi-player/player` | ~180KB | 2.52 MB | 1.91 MB | Programmatic playback, no UI |
-| `movi-player/demuxer` | ~50KB | 2.31 MB | 1.74 MB | Metadata extraction, decoding only |
+| `movi-player` / `movi-player/element` | ~410KB | 3.13 MB | 2.37 MB | Full player with UI, controls, gestures |
+| `movi-player/player` | ~180KB | 3.15 MB | 2.38 MB | Programmatic playback, no UI |
+| `movi-player/demuxer` | ~50KB | 2.37 MB | 1.79 MB | Metadata extraction, decoding only |
 
 > **Note:** Module sizes (first column) exclude the embedded WASM binary. Gzip/Brotli columns show the total transfer size including WASM. Enable Brotli compression on your server for optimal delivery.
 
