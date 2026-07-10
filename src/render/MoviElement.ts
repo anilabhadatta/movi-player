@@ -1395,6 +1395,13 @@ export class MoviElement extends HTMLElement {
       this._timelineCancelled = true;
       timelinePanel.style.display = "none";
       this.focus();
+      // Only re-arm the auto-hide countdown if the bar is currently showing —
+      // that restarts the timer the open panel had suspended so a stuck bar
+      // fades during playback. Never surface a hidden bar here: showControls()
+      // on a hidden bar would fade it in and straight back out (a "flash").
+      if (!this.controlsContainer?.classList.contains("movi-controls-hidden")) {
+        this.showControls();
+      }
     });
 
     // Create Resume Dialog
@@ -11448,7 +11455,7 @@ export class MoviElement extends HTMLElement {
 
       .movi-timeline-strip {
         display: flex;
-        gap: 4px;
+        gap: 8px;
         padding: 10px 14px;
         overflow-x: auto;
         overflow-y: hidden;
@@ -11482,7 +11489,10 @@ export class MoviElement extends HTMLElement {
       .movi-timeline-item:hover,
       .movi-timeline-item.movi-timeline-selected {
         border-color: var(--movi-primary);
-        transform: scale(1.05);
+        /* Keep the pop small enough that an active + adjacent-hovered item
+           don't grow into each other across the 8px gap (scale doesn't
+           reflow neighbours, so an over-large scale visually overlaps). */
+        transform: scale(1.03);
       }
 
       .movi-timeline-item img {
@@ -19398,6 +19408,11 @@ export class MoviElement extends HTMLElement {
       this._timelineCancelled = true;
       panel.style.display = "none";
       this.focus();
+      // Re-arm auto-hide only if the bar is currently visible; never surface a
+      // hidden bar on close (see the close-button handler for the reasoning).
+      if (!this.controlsContainer?.classList.contains("movi-controls-hidden")) {
+        this.showControls();
+      }
     }
   }
 
