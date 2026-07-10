@@ -103,6 +103,19 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private fileSize: number = -1; // Cached file size for buffer calculations
   private lastBufferedTime: number = 0;
 
+  /**
+   * Enable/disable seek-bar scrub previews on an already-constructed player.
+   * Lets the `thumb` attribute be toggled at runtime (or applied after `src`,
+   * whose callback creates the player first) without recreating the player.
+   * The thumbnail pipeline stays lazy — it only spins up on the first hover.
+   */
+  setPreviewsEnabled(enabled: boolean): void {
+    this.config.enablePreviews = enabled;
+    // Turning previews back on clears the "gave up" latch so a prior failed
+    // init (or a never-attempted one) can retry on the next hover.
+    if (enabled) this.previewInitGaveUp = false;
+  }
+
   private previewsAllowed(): boolean {
     if (!this.config.enablePreviews) return false;
     // Non-range sources keep previews ON: the thumbnail source borrows frames

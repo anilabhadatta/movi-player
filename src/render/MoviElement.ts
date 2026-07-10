@@ -14925,6 +14925,10 @@ export class MoviElement extends HTMLElement {
     switch (name) {
       case "thumb":
         this._thumb = newValue !== null;
+        // Sync an already-created player so toggling `thumb` at runtime — or
+        // declaring it after `src` (whose callback builds the player first) —
+        // enables/disables scrub previews live instead of silently no-opping.
+        this.player?.setPreviewsEnabled(this._thumb && !this._audioOnly);
         break;
       case "hdr":
         this.hdr = newValue !== null;
@@ -15907,6 +15911,15 @@ export class MoviElement extends HTMLElement {
       if (this._headers && source && source.type === "url") {
         source.headers = this._headers;
       }
+
+      // Read `thumb` straight from the DOM here rather than trusting the
+      // cached `_thumb` field. The `src` attribute's own attributeChangedCallback
+      // fires load() during element upgrade *before* the `thumb` callback (and
+      // before connectedCallback) has populated `_thumb` — so with the usual
+      // `<movi-player src=… thumb>` ordering, `_thumb` is still false at this
+      // point and previews would silently never enable. hasAttribute reads the
+      // live parsed attribute, which is already present, so order stops mattering.
+      this._thumb = this.hasAttribute("thumb");
 
       // Create MoviPlayer instance
       // Configure MoviPlayer options
@@ -19404,6 +19417,14 @@ export class MoviElement extends HTMLElement {
   private async generateTimelineStrip(shadowRoot: ShadowRoot): Promise<void> {
     if (!this.player) return;
     if (this._timelineGenerating) return; // re-entrancy guard
+
+    // The Timeline panel is an explicit user action (press "T") and must render
+    // regardless of the `thumb` attribute — that attribute only gates the
+    // passive seek-bar hover preview (which stays independently gated on
+    // `_thumb` in updateSeekVisuals). Enable the shared thumbnail pipeline so
+    // the getPreviewFrame() calls below can decode frames even when `thumb`
+    // is off; turning it on here never triggers seek-bar previews on its own.
+    this.player.setPreviewsEnabled(true);
 
     const strip = shadowRoot.querySelector(".movi-timeline-strip") as HTMLElement;
     const status = shadowRoot.querySelector(".movi-timeline-status") as HTMLElement;
