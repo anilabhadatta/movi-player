@@ -1570,23 +1570,29 @@ export class CanvasRenderer {
 
       // Update overlay dimensions
       if (this.subtitleOverlay) {
-        // Overlay matches container (unrotated visual area), not canvas buffer
-        // So we use the original input width/height (Container WxH)
-        const canvasWidth = width;
-        const canvasHeight = height;
+        // The overlay lives in the video's own (pre-rotation) coordinate space
+        // and is then rotated to match the video, so captions ride the video's
+        // bottom edge and turn with it. For 90°/270° the box is swapped (H×W)
+        // and centred in the container so that, once rotated around its centre,
+        // it maps back onto the video area.
+        const rot = (((this.rotation ?? 0) % 360) + 360) % 360;
+        const swapped = rot === 90 || rot === 270;
+        const overlayWidth = swapped ? height : width;
+        const overlayHeight = swapped ? width : height;
 
-        // Calculate responsive bottom padding
+        // Responsive bottom padding is relative to the video's visual height
+        // in its own frame (overlayHeight), not the container.
         const bottomPadding =
-          CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
+          CanvasRenderer.computeSubtitleBottomPadding(overlayHeight);
 
         // Reset overlay positioning to ensure it stays aligned with canvas
         this.subtitleOverlay.style.position = "absolute";
-        this.subtitleOverlay.style.top = "0";
-        this.subtitleOverlay.style.left = "0";
         this.subtitleOverlay.style.right = "auto";
         this.subtitleOverlay.style.bottom = "auto";
-        this.subtitleOverlay.style.width = `${canvasWidth}px`;
-        this.subtitleOverlay.style.height = `${canvasHeight}px`;
+        this.subtitleOverlay.style.width = `${overlayWidth}px`;
+        this.subtitleOverlay.style.height = `${overlayHeight}px`;
+        this.subtitleOverlay.style.left = `${(width - overlayWidth) / 2}px`;
+        this.subtitleOverlay.style.top = `${(height - overlayHeight) / 2}px`;
         this.subtitleOverlay.style.margin = "0";
         this.subtitleOverlay.style.padding = "0";
         const effectivePadding = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPadding;
@@ -1595,7 +1601,8 @@ export class CanvasRenderer {
         this.subtitleOverlay.style.flexDirection = "column";
         this.subtitleOverlay.style.justifyContent = "flex-end";
         this.subtitleOverlay.style.alignItems = "center";
-        this.subtitleOverlay.style.transform = "none";
+        this.subtitleOverlay.style.transformOrigin = "center center";
+        this.subtitleOverlay.style.transform = rot ? `rotate(${rot}deg)` : "none";
         this.subtitleOverlay.style.boxSizing = "border-box";
 
         // Schedule a re-render so the on-screen subtitle picks up the
@@ -2797,16 +2804,24 @@ export class CanvasRenderer {
       // Override CSS defaults that might interfere
       // The overlay should cover the entire canvas area and not overflow
       // Position overlay at bottom center (above controls), same as text subtitles
+      // Rotate the overlay to match the video (same approach as text captions),
+      // swapping to the video's own frame dimensions for 90°/270° and centring
+      // so it maps back onto the video once rotated.
+      const rotImg = (((this.rotation ?? 0) % 360) + 360) % 360;
+      const swappedImg = rotImg === 90 || rotImg === 270;
+      const ovW = swappedImg ? canvasHeight : canvasWidth;
+      const ovH = swappedImg ? canvasWidth : canvasHeight;
       this.subtitleOverlay.style.position = "absolute";
-      this.subtitleOverlay.style.top = "0";
-      this.subtitleOverlay.style.left = "0";
       this.subtitleOverlay.style.right = "auto";
       this.subtitleOverlay.style.bottom = "auto";
-      this.subtitleOverlay.style.width = `${canvasWidth}px`;
-      this.subtitleOverlay.style.height = `${canvasHeight}px`;
+      this.subtitleOverlay.style.width = `${ovW}px`;
+      this.subtitleOverlay.style.height = `${ovH}px`;
+      this.subtitleOverlay.style.left = `${(canvasWidth - ovW) / 2}px`;
+      this.subtitleOverlay.style.top = `${(canvasHeight - ovH) / 2}px`;
       this.subtitleOverlay.style.pointerEvents = "none";
       // zIndex controlled by CSS (.movi-subtitle-overlay)
-      this.subtitleOverlay.style.transform = "none";
+      this.subtitleOverlay.style.transformOrigin = "center center";
+      this.subtitleOverlay.style.transform = rotImg ? `rotate(${rotImg}deg)` : "none";
       this.subtitleOverlay.style.display = "flex";
       this.subtitleOverlay.style.flexDirection = "column";
       this.subtitleOverlay.style.justifyContent = "flex-end";
@@ -2814,7 +2829,7 @@ export class CanvasRenderer {
       this.subtitleOverlay.style.overflow = "hidden"; // Prevent overflow outside canvas
       this.subtitleOverlay.style.padding = "0";
       const bottomPaddingImg =
-        CanvasRenderer.computeSubtitleBottomPadding(canvasHeight);
+        CanvasRenderer.computeSubtitleBottomPadding(ovH);
       const effectivePaddingImg = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPaddingImg;
       this.subtitleOverlay.style.paddingBottom = `${effectivePaddingImg}px`;
       this.subtitleOverlay.style.textAlign = "center";
@@ -2863,8 +2878,8 @@ export class CanvasRenderer {
       imgElement.src = dataUrl;
       imgElement.style.width = `${scaledWidth}px`;
       imgElement.style.height = `${scaledHeight}px`;
-      imgElement.style.maxWidth = `${canvasWidth}px`; // Ensure image doesn't exceed canvas width
-      imgElement.style.maxHeight = `${canvasHeight}px`; // Ensure image doesn't exceed canvas height
+      imgElement.style.maxWidth = `${ovW}px`; // Ensure image doesn't exceed the (rotated) video frame width
+      imgElement.style.maxHeight = `${ovH}px`; // Ensure image doesn't exceed the (rotated) video frame height
       imgElement.style.objectFit = "contain"; // Preserve aspect ratio
       imgElement.style.display = "block";
       imgElement.style.visibility = "visible";
@@ -3078,21 +3093,31 @@ export class CanvasRenderer {
       const rect = canvasEl?.getBoundingClientRect();
       const overlayW = rect?.width || displayWidth;
       const overlayH = rect?.height || displayHeight;
+      // Rotate the caption overlay to ride the video: swap to the video's own
+      // frame box for 90°/270° and centre it so, once rotated around its centre,
+      // it lands back over the video (see resize() for the same approach). This
+      // render path runs ~60×/s and previously forced transform:none, undoing
+      // the rotation set on rotate — so the rotation has to be re-applied here.
+      const rotTxt = (((this.rotation ?? 0) % 360) + 360) % 360;
+      const swappedTxt = rotTxt === 90 || rotTxt === 270;
+      const ovTxtW = swappedTxt ? overlayH : overlayW;
+      const ovTxtH = swappedTxt ? overlayW : overlayH;
       const bottomPadding =
-        CanvasRenderer.computeSubtitleBottomPadding(overlayH);
+        CanvasRenderer.computeSubtitleBottomPadding(ovTxtH);
 
       this.subtitleOverlay.style.position = "absolute";
-      this.subtitleOverlay.style.top = "0";
-      this.subtitleOverlay.style.left = "0";
       this.subtitleOverlay.style.right = "auto";
       this.subtitleOverlay.style.bottom = "auto";
-      this.subtitleOverlay.style.width = `${overlayW}px`;
-      this.subtitleOverlay.style.height = `${overlayH}px`;
+      this.subtitleOverlay.style.width = `${ovTxtW}px`;
+      this.subtitleOverlay.style.height = `${ovTxtH}px`;
+      this.subtitleOverlay.style.left = `${(overlayW - ovTxtW) / 2}px`;
+      this.subtitleOverlay.style.top = `${(overlayH - ovTxtH) / 2}px`;
       this.subtitleOverlay.style.margin = "0";
       this.subtitleOverlay.style.padding = "0";
       const effectivePad = this.subtitleControlsPadding > 0 ? this.subtitleControlsPadding : bottomPadding;
       this.subtitleOverlay.style.paddingBottom = `${effectivePad}px`;
-      this.subtitleOverlay.style.transform = "none";
+      this.subtitleOverlay.style.transformOrigin = "center center";
+      this.subtitleOverlay.style.transform = rotTxt ? `rotate(${rotTxt}deg)` : "none";
       this.subtitleOverlay.style.boxSizing = "border-box";
       this.subtitleOverlay.style.display = "flex";
       this.subtitleOverlay.style.flexDirection = "column";
