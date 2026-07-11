@@ -3867,7 +3867,7 @@ export class MoviElement extends HTMLElement {
               `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`,
               `${deg}°`,
             );
-            const statusEl = this.shadowRoot?.querySelector(".movi-rotate-status");
+            const statusEl = this.contextMenuRoot().querySelector(".movi-rotate-status");
             if (statusEl) statusEl.textContent = `${deg}°`;
             this.syncThumbnailRotation(deg);
           }
@@ -4343,7 +4343,15 @@ export class MoviElement extends HTMLElement {
         // useless. Switch to position:fixed in viewport coordinates so
         // the menu can spill into the empty page area below the strip.
         const isStripMode = this.classList.contains("movi-audio-strip");
-        if (isStripMode) {
+        // In fullscreen the player host IS the fullscreen element (the browser's
+        // top layer), so the body-level portal renders OUTSIDE it and the menu
+        // never appears. There are also no page clipping ancestors to escape here
+        // (the host fills the screen). So keep the menu in the shadow root, lift
+        // the host's paint clip so it isn't chopped at the host edge, and position
+        // it with fixed viewport coordinates — the fullscreen host box == viewport.
+        const inFullscreen = this.isFullscreenActive();
+        if (isStripMode || inFullscreen) {
+          if (inFullscreen) this.classList.add("movi-menu-overflow");
           contextMenu.style.position = "fixed";
           contextMenu.style.maxHeight = `${Math.max(180, window.innerHeight - 40)}px`;
           contextMenu.style.display = "block";
@@ -4923,7 +4931,7 @@ export class MoviElement extends HTMLElement {
       } else if (action === "rotate-video") {
         if (this.player && !this._pipWindow) {
           const deg = this.player.rotateVideo();
-          const statusEl = shadowRoot.querySelector(".movi-rotate-status");
+          const statusEl = this.contextMenuRoot().querySelector(".movi-rotate-status");
           if (statusEl) statusEl.textContent = `${deg}°`;
           this.syncThumbnailRotation(deg);
           this.showOSD(
@@ -18897,19 +18905,35 @@ export class MoviElement extends HTMLElement {
     this.updateLoopUI();
   }
 
+  /**
+   * The root the context menu currently lives in. On desktop the menu portals
+   * to a body-level shadow root while open, so its items are NOT in this.shadowRoot
+   * at that moment — a toggle-state updater querying the shadow root would find
+   * nothing and silently no-op (the reason menu toggles didn't reflect their new
+   * state after a click). Query menu items through this so they're found whether
+   * the menu is portaled or still home in the shadow root.
+   */
+  private contextMenuRoot(): ShadowRoot {
+    if (this._menuPortalRoot?.querySelector(".movi-context-menu")) {
+      return this._menuPortalRoot;
+    }
+    return this.shadowRoot!;
+  }
+
   private updateLoopUI(): void {
     const shadowRoot = this.shadowRoot;
     if (!shadowRoot) return;
+    const menuRoot = this.contextMenuRoot();
 
     const loopBtn = shadowRoot.querySelector(".movi-loop-btn");
-    const loopMenuItem = shadowRoot.querySelector(
+    const loopMenuItem = menuRoot.querySelector(
       '.movi-context-menu-item[data-action="loop-toggle"]',
     );
-    const loopStatus = shadowRoot.querySelector(".movi-loop-status");
+    const loopStatus = menuRoot.querySelector(".movi-loop-status");
 
     // Context menu icons
-    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-loop-outline") as HTMLElement;
-    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-loop-filled") as HTMLElement;
+    const ctxOutline = menuRoot.querySelector(".movi-context-menu-loop-outline") as HTMLElement;
+    const ctxFilled = menuRoot.querySelector(".movi-context-menu-loop-filled") as HTMLElement;
 
     if (this._loop) {
       loopBtn?.classList.add("active");
@@ -18929,11 +18953,12 @@ export class MoviElement extends HTMLElement {
   private updateAmbientUI(): void {
     const shadowRoot = this.shadowRoot;
     if (!shadowRoot) return;
+    const menuRoot = this.contextMenuRoot();
 
-    const menuItem = shadowRoot.querySelector('.movi-context-menu-item[data-action="ambient-toggle"]');
-    const status = shadowRoot.querySelector(".movi-ambient-status");
-    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-ambient-outline") as HTMLElement;
-    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-ambient-filled") as HTMLElement;
+    const menuItem = menuRoot.querySelector('.movi-context-menu-item[data-action="ambient-toggle"]');
+    const status = menuRoot.querySelector(".movi-ambient-status");
+    const ctxOutline = menuRoot.querySelector(".movi-context-menu-ambient-outline") as HTMLElement;
+    const ctxFilled = menuRoot.querySelector(".movi-context-menu-ambient-filled") as HTMLElement;
 
     if (this._ambientMode) {
       menuItem?.classList.add("movi-context-menu-active");
@@ -18951,16 +18976,17 @@ export class MoviElement extends HTMLElement {
   private updateStableAudioUI(shadowRoot: ShadowRoot | null = this.shadowRoot): void {
     if (!shadowRoot) return;
     const isEnabled = this.player?.getStableAudio() ?? true;
+    const menuRoot = this.contextMenuRoot();
 
     const stableBtn = shadowRoot.querySelector(".movi-stable-audio-btn");
-    const stableMenuItem = shadowRoot.querySelector(
+    const stableMenuItem = menuRoot.querySelector(
       '.movi-context-menu-item[data-action="stable-audio-toggle"]',
     );
-    const stableStatus = shadowRoot.querySelector(".movi-stable-audio-status");
+    const stableStatus = menuRoot.querySelector(".movi-stable-audio-status");
 
     // Context menu icons
-    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-stable-outline") as HTMLElement;
-    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-stable-filled") as HTMLElement;
+    const ctxOutline = menuRoot.querySelector(".movi-context-menu-stable-outline") as HTMLElement;
+    const ctxFilled = menuRoot.querySelector(".movi-context-menu-stable-filled") as HTMLElement;
 
     if (isEnabled) {
       stableBtn?.classList.add("active");
@@ -20511,9 +20537,10 @@ export class MoviElement extends HTMLElement {
   }
 
   private updateHDRUI(): void {
+    const menuRoot = this.contextMenuRoot();
     const hdrBtn = this.shadowRoot?.querySelector(".movi-hdr-btn");
-    const hdrStatus = this.shadowRoot?.querySelector(".movi-hdr-status");
-    const hdrMenuItem = this.shadowRoot?.querySelector(
+    const hdrStatus = menuRoot.querySelector(".movi-hdr-status");
+    const hdrMenuItem = menuRoot.querySelector(
       '.movi-context-menu-item[data-action="hdr-toggle"]',
     );
 
