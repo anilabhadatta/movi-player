@@ -90,6 +90,10 @@ export class MoviElement extends HTMLElement {
   // Blurred-backdrop element behind the sharp-art canvas — CSS filter:blur()
   // (cross-browser Gaussian, unlike canvas ctx.filter).
   private _coverArtBgEl: HTMLDivElement | null = null;
+  // A small data URL of the embedded album art, generated once per source, so
+  // the CSS-blurred backdrop can point at it too (background-image needs a URL;
+  // the embedded art arrives as an ImageBitmap with none).
+  private _coverArtBgUrl: string = "";
   // True once cover-art extraction has settled for the current source (bitmap
   // arrived OR extraction failed). Until then, if the source has an art track,
   // we hold the audio-strip layout off so the player doesn't flash strip→cover.
@@ -15512,6 +15516,27 @@ export class MoviElement extends HTMLElement {
     img.src = url;
   }
 
+  /** Downscale an album-art bitmap to a tiny JPEG data URL for the blurred
+   *  backdrop. The backdrop is blurred to 40px, so ~96px is indistinguishable
+   *  from full-res while keeping the URL small and the draw cheap. */
+  private makeCoverArtBgUrl(bitmap: ImageBitmap): string {
+    try {
+      const max = 96;
+      const ar = bitmap.width / bitmap.height;
+      const w = Math.max(1, ar >= 1 ? max : Math.round(max * ar));
+      const h = Math.max(1, ar >= 1 ? Math.round(max / ar) : max);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const cx = c.getContext("2d");
+      if (!cx) return "";
+      cx.drawImage(bitmap, 0, 0, w, h);
+      return c.toDataURL("image/jpeg", 0.7);
+    } catch {
+      return "";
+    }
+  }
+
   private updateCoverArtOverlay(): void {
     const overlay = this.coverArtOverlay;
     const canvas = this.coverArtCanvas;
@@ -15655,11 +15680,12 @@ export class MoviElement extends HTMLElement {
 
     // Blurred backdrop is now a CSS-blurred DOM element BEHIND this canvas — a
     // real Gaussian in every browser (canvas ctx.filter "blur()" is unsupported
-    // in Safari < 17 and looked bad faked). Point it at the poster URL; embedded
-    // art (an ImageBitmap, currently disabled) has no URL, so it falls back to
-    // the overlay's plain dark background. The canvas paints only the sharp art.
+    // in Safari < 17 and looked bad faked). Point it at the poster URL, or at a
+    // baked-down data URL of the embedded album art (an ImageBitmap has no URL
+    // of its own), so both cover-art sources get the same blurred surround. The
+    // canvas paints only the sharp art.
     if (this._coverArtBgEl) {
-      const bgUrl = this.coverArtBitmap ? "" : this._posterCoverUrl;
+      const bgUrl = this.coverArtBitmap ? this._coverArtBgUrl : this._posterCoverUrl;
       this._coverArtBgEl.style.backgroundImage = bgUrl
         ? `url("${bgUrl.replace(/"/g, '\\"')}")`
         : "none";
@@ -16747,6 +16773,10 @@ export class MoviElement extends HTMLElement {
       // and reuses one on subsequent loads. Our reference can be dropped
       // safely; the player will close() when it stomps its own slot.
       this.coverArtBitmap = bitmap;
+      // Bake a tiny data URL from the art so the CSS-blurred backdrop can use
+      // it (the poster path already had a URL; embedded art didn't). Generated
+      // once here, not on every resize.
+      this._coverArtBgUrl = bitmap ? this.makeCoverArtBgUrl(bitmap) : "";
       // Extraction has settled (success or failure) — release the strip-layout
       // hold so a failed extraction falls back to the strip cleanly.
       this._coverArtResolved = true;
@@ -16786,6 +16816,7 @@ export class MoviElement extends HTMLElement {
     // owned by MoviPlayer; we just clear our own pointer and hide the
     // overlay so the new load doesn't briefly show last track's art.
     this.coverArtBitmap = null;
+    this._coverArtBgUrl = "";
     this._coverArtResolved = false;
     // Drop the poster-as-album-art bitmap too — we own it, so close to free it.
     if (this._posterCoverBitmap) { try { this._posterCoverBitmap.close(); } catch {} }
