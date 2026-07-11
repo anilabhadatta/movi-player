@@ -24,6 +24,7 @@ import { Logger, LogLevel } from "../utils/Logger";
 import type { SourceAdapter } from "../source/SourceAdapter";
 
 import { SettingsStorage } from "../utils/SettingsStorage";
+import { QoECollector, beaconSink, type QoESink, type QoESession } from "../utils/QoE";
 
 const TAG = "MoviElement";
 
@@ -49,6 +50,16 @@ export class MoviElement extends HTMLElement {
   private canvas: HTMLCanvasElement;
   private video: HTMLVideoElement;
   private subtitleOverlay: HTMLElement;
+  // Off-screen aria-live region that mirrors the current caption text so screen
+  // readers announce each cue (the visual overlay is canvas-aligned + holds
+  // image-based PGS/DVB cues, so it isn't a reliable SR source on its own).
+  private _captionLive: HTMLElement | null = null;
+  private _captionObserver: MutationObserver | null = null;
+  private _lastCaptionText: string = "";
+  // QoE analytics: collects startup/rebuffer/error/decode metrics and fans them
+  // to sinks (and a `movi-qoe` DOM event). Heartbeats while playing.
+  private _qoe = new QoECollector();
+  private _qoeHeartbeat: number | null = null;
   private player: MoviPlayer | null = null;
   private isLoading: boolean = false;
   private _isUnsupported: boolean = false;
@@ -83,6 +94,10 @@ export class MoviElement extends HTMLElement {
   // arrived OR extraction failed). Until then, if the source has an art track,
   // we hold the audio-strip layout off so the player doesn't flash strip→cover.
   private _coverArtResolved: boolean = false;
+  // The last audio-strip value we dispatched to the embedding page. Survives
+  // load() (unlike the movi-audio-strip class) so a strip↔non-strip switch is
+  // detected even across a source change. null = never told the page yet.
+  private _lastStripDispatched: boolean | null = null;
   private controlsTimeout: number | null = null;
   private isOverControls: boolean = false;
   private isSeeking: boolean = false;
@@ -108,7 +123,38 @@ export class MoviElement extends HTMLElement {
   private _seekChainTarget: number | null = null;
   private _contextMenuVisible: boolean = false;
   private _contextMenuJustClosed: boolean = false;
+  // Body-level portal for the desktop right-click menu so it can escape any
+  // overflow:hidden / clipping ancestor of the player and feel native. The menu
+  // element is moved here on open and back to the shadow root on close.
+  private _menuPortalHost: HTMLElement | null = null;
+  private _menuPortalRoot: ShadowRoot | null = null;
+  private _menuHome: Node | null = null;
   private lastTouchTime: number = 0;
+  // Press-and-hold-to-2x (touch): a long-press on the video speeds playback to
+  // 2x while held and reverts on release (YouTube-style). Since long-press now
+  // drives this gesture, the context menu opens from the gear button instead —
+  // _openMenuViaGear lets the gear's synthetic contextmenu through the
+  // touch-long-press gate in preventDefaultContextMenu.
+  private _holdSpeedTimer: number | null = null;
+  private _holdSpeedActive: boolean = false;
+  private _rateBeforeHold: number = 1;
+  private _openMenuViaGear: boolean = false;
+
+  // Media Session (OS lock-screen / notification / hardware-key controls).
+  // Action handlers are registered once per element (idempotent overwrite is
+  // cheap but the flag avoids re-binding on every source load); metadata,
+  // playbackState and positionState are refreshed as the player changes.
+  private _mediaSessionReady: boolean = false;
+  // Last position pushed to the OS scrubber, to throttle setPositionState to
+  // ~1s granularity (timeUpdate can fire far more often). A jump > 1s (seek)
+  // also trips the update so the lock-screen scrubber snaps immediately.
+  private _mediaSessionLastPos: number = -1;
+  // Data-URL snapshot of the decoded poster/first frame, captured off the
+  // canvas for a source with NO explicit `poster` attribute — the still frame
+  // such a source paints on canvas (via the postertime / frame-0 seek) never
+  // becomes a URL otherwise, so the OS lock screen would have no thumbnail.
+  // Reset on dispose.
+  private _mediaSessionArtworkUrl: string | null = null;
 
   // Nerd Stats
   private _nerdStatsVisible: boolean = false;
@@ -119,6 +165,16 @@ export class MoviElement extends HTMLElement {
   private _timelineNextIndex: number = 0;
   private nerdStatsInterval: number | null = null;
   private networkSpeedHistory: number[] = []; // speed samples for graph
+
+  // Stutter hint: on a heavy source the decoder can't keep up above 1x, so the
+  // video drops frames (audio stays smooth). Detect a sustained low presented-
+  // fps while playing >1x and nudge the user toward 1x once, with a long
+  // cooldown so it never nags.
+  private _stutterInterval: number | null = null;
+  private _stutterLastPresented: number = 0;
+  private _stutterSeconds: number = 0;
+  private _stutterCooldown: boolean = false;
+  private _stutterCooldownTimer: number | null = null;
   private static readonly GRAPH_MAX_SAMPLES = 60; // 30 seconds of data (500ms interval)
 
   // Internal state
@@ -234,7 +290,9 @@ export class MoviElement extends HTMLElement {
   private _suppressSwReload: boolean = false;
 
   private _fps: number = 0; // Custom frame rate (0 = auto from video)
-  private _gesturefs: boolean = false; // Gestures only in fullscreen if true
+  // @deprecated alias for `playsinline` — gestures-only-in-fullscreen is now
+  // driven by playsinline; kept so existing `gesturefs` markup keeps working.
+  private _gesturefs: boolean = false;
   private _noHotkeys: boolean = false; // Disable keyboard shortcuts if true
   private _startAt: number = 0; // Start time in seconds
   private _fastSeek: boolean = false; // Enable skip controls (buttons, keys, gestures) if true
@@ -260,6 +318,7 @@ export class MoviElement extends HTMLElement {
   private _vrLastX: number = 0; // Last pointer/touch X for incremental pan
   private _vrLastY: number = 0;
   private _vrPinchDist: number = 0; // Two-finger pinch baseline (touch zoom)
+  private _aspectPinchDist: number = 0; // Two-finger pinch baseline (fullscreen aspect-fit)
   private _vrSuppressClick: boolean = false; // Swallow the click that ends a drag
   private _vrPadDragging: boolean = false; // On-screen joystick is being dragged
   private _encrypted: boolean = false;   // Encrypted source mode
@@ -526,10 +585,35 @@ export class MoviElement extends HTMLElement {
     this.coverArtOverlay.appendChild(this.coverArtCanvas);
     shadowRoot.appendChild(this.coverArtOverlay);
 
-    // Create subtitle overlay element
+    // Create subtitle overlay element. Decorative for screen readers — the
+    // live region below is their source, so the overlay is aria-hidden.
     this.subtitleOverlay = document.createElement("div");
     this.subtitleOverlay.className = "movi-subtitle-overlay";
+    this.subtitleOverlay.setAttribute("aria-hidden", "true");
     shadowRoot.appendChild(this.subtitleOverlay);
+
+    // Off-screen aria-live region: announce each caption to screen readers.
+    this._captionLive = document.createElement("div");
+    this._captionLive.className = "movi-caption-live";
+    this._captionLive.setAttribute("aria-live", "polite");
+    this._captionLive.setAttribute("aria-atomic", "true");
+    this._captionLive.setAttribute("role", "status");
+    shadowRoot.appendChild(this._captionLive);
+    // Mirror the visible cue's text into the live region whenever it changes.
+    this._captionObserver = new MutationObserver(() => this.mirrorCaption());
+    this._captionObserver.observe(this.subtitleOverlay, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+
+    // QoE: mirror every analytics event out as a `movi-qoe` DOM event so
+    // embedders can forward it without registering a JS sink.
+    this._qoe.addSink((e) =>
+      this.dispatchEvent(
+        new CustomEvent("movi-qoe", { detail: e, bubbles: true, composed: true }),
+      ),
+    );
 
     // Click on the live caption text → open the transcript browser
     // (scrolled to the current cue). The overlay itself stays
@@ -643,6 +727,13 @@ export class MoviElement extends HTMLElement {
       <div class="movi-osd-text"></div>
     `;
     shadowRoot.appendChild(osdContainer);
+
+    // Persistent "2×" pill shown while a press-and-hold speeds playback up.
+    const holdSpeed = document.createElement("div");
+    holdSpeed.className = "movi-hold-speed";
+    holdSpeed.style.display = "none";
+    holdSpeed.innerHTML = `<span>2×</span><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M4 5l8 7-8 7V5zm9 0l8 7-8 7V5z"/></svg>`;
+    shadowRoot.appendChild(holdSpeed);
 
     // Create context menu FIRST (before setupContextMenu is called)
     this.createContextMenu(shadowRoot);
@@ -928,7 +1019,7 @@ export class MoviElement extends HTMLElement {
     container.innerHTML = `
       <div class="movi-controls-bar" style="position: relative;">
         <div class="movi-progress-container">
-          <div class="movi-progress-bar">
+          <div class="movi-progress-bar" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuenow="0" aria-valuetext="0:00">
             <div class="movi-progress-buffer"></div>
             <div class="movi-progress-filled"></div>
             <div class="movi-chapter-markers"></div>
@@ -986,7 +1077,7 @@ export class MoviElement extends HTMLElement {
                 </svg>
               </button>
               <div class="movi-volume-slider-container">
-                <input type="range" class="movi-volume-slider" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+                <input type="range" class="movi-volume-slider" min="0" max="2" step="0.01" value="1" aria-label="Volume" aria-valuemin="0" aria-valuemax="200" aria-valuenow="100" aria-valuetext="Volume 100%">
               </div>
             </div>
 
@@ -1145,8 +1236,14 @@ export class MoviElement extends HTMLElement {
                   <path d="M17 2l4 4-4 4"></path><path d="M3 11v-1a4 4 0 0 1 4-4h14"></path><path d="M7 22l-4-4 4-4"></path><path d="M21 13v1a4 4 0 0 1-4 4H3"></path>
                 </svg>
               </button>
+
+              <button class="movi-btn movi-pip-btn" aria-label="Picture in Picture" style="display:none">
+                <svg class="movi-icon-pip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="2" y="3" width="20" height="14" rx="2"/><rect x="12" y="9" width="8" height="6" rx="1" fill="currentColor" opacity="0.3"/>
+                </svg>
+              </button>
             </div>
-            
+
             <button class="movi-btn movi-more-btn" aria-label="More Settings">
               <svg class="movi-icon-more" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="15 18 9 12 15 6"></polyline>
@@ -1155,12 +1252,7 @@ export class MoviElement extends HTMLElement {
                 <polyline points="9 18 15 12 9 6"></polyline>
               </svg>
             </button>
-            
-            <button class="movi-btn movi-pip-btn" aria-label="Picture in Picture" style="display:none">
-              <svg class="movi-icon-pip" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <rect x="2" y="3" width="20" height="14" rx="2"/><rect x="12" y="9" width="8" height="6" rx="1" fill="currentColor" opacity="0.3"/>
-              </svg>
-            </button>
+
             <button class="movi-btn movi-fullscreen-btn" aria-label="Fullscreen">
               <svg class="movi-icon-fullscreen" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path>
@@ -1239,6 +1331,32 @@ export class MoviElement extends HTMLElement {
     titleBar.innerHTML = `<span class="movi-title-text"></span>`;
     shadowRoot.appendChild(titleBar);
 
+    // Gear button (top-right) → opens the context menu. This is how touch users
+    // reach it now that long-press drives hold-to-2x; on desktop it's a
+    // discoverable alternative to right-click. Shown with the chrome (its
+    // movi-gear-visible class is toggled in show/hideControls).
+    const gearBtn = document.createElement("button");
+    gearBtn.className = "movi-btn movi-gear-btn";
+    gearBtn.setAttribute("aria-label", "Settings");
+    gearBtn.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>`;
+    gearBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      // Open the context menu via a synthetic contextmenu event; the flag lets
+      // it through the touch-long-press gate in preventDefaultContextMenu.
+      this._openMenuViaGear = true;
+      const rect = this.getBoundingClientRect();
+      this.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          composed: true,
+          cancelable: true,
+          clientX: rect.right - 44,
+          clientY: rect.top + 44,
+        }),
+      );
+    });
+    shadowRoot.appendChild(gearBtn);
+
     // Create Nerd Stats overlay
     const nerdStats = document.createElement("div");
     nerdStats.className = "movi-nerd-stats";
@@ -1278,6 +1396,13 @@ export class MoviElement extends HTMLElement {
       this._timelineCancelled = true;
       timelinePanel.style.display = "none";
       this.focus();
+      // Only re-arm the auto-hide countdown if the bar is currently showing —
+      // that restarts the timer the open panel had suspended so a stuck bar
+      // fades during playback. Never surface a hidden bar here: showControls()
+      // on a hidden bar would fade it in and straight back out (a "flash").
+      if (!this.controlsContainer?.classList.contains("movi-controls-hidden")) {
+        this.showControls();
+      }
     });
 
     // Create Resume Dialog
@@ -1322,6 +1447,22 @@ export class MoviElement extends HTMLElement {
       this.clearResumePosition();
       this.focus();
     });
+
+    // Move the selection ring to whichever button the pointer is over, so it
+    // tracks the mouse the same way arrow keys move it — hovering Cancel puts
+    // the ring on Cancel instead of leaving it stuck on Resume.
+    const resumeYes = resumeDialog.querySelector(
+      ".movi-resume-yes",
+    ) as HTMLElement | null;
+    const resumeNo = resumeDialog.querySelector(
+      ".movi-resume-no",
+    ) as HTMLElement | null;
+    const focusResumeBtn = (btn: HTMLElement | null) => {
+      resumeYes?.classList.toggle("movi-resume-focused", btn === resumeYes);
+      resumeNo?.classList.toggle("movi-resume-focused", btn === resumeNo);
+    };
+    resumeYes?.addEventListener("pointerenter", () => focusResumeBtn(resumeYes));
+    resumeNo?.addEventListener("pointerenter", () => focusResumeBtn(resumeNo));
 
     // Create Keyboard Shortcuts Panel
     const shortcutsPanel = document.createElement("div");
@@ -1561,7 +1702,15 @@ export class MoviElement extends HTMLElement {
 
       try {
         if (!this.player) return;
-        const blob = await (this.player as any).getPreviewFrame?.(timeToFetch);
+        // 360°: pass the live viewing angle so the preview reprojects the
+        // equirect frame to what the user currently sees (2D → undefined).
+        const vrView = this._vr360
+          ? (this.player as any).getVR360View?.()
+          : undefined;
+        const blob = await (this.player as any).getPreviewFrame?.(
+          timeToFetch,
+          vrView,
+        );
 
         // Update UI if we got a blob
         if (blob && thumbnailImg) {
@@ -1576,8 +1725,11 @@ export class MoviElement extends HTMLElement {
           if (thumbnailPlaceholder) thumbnailPlaceholder.style.display = "none";
           thumbnailImg.style.display = "block";
 
-          // Re-apply rotation transform + margin on each preview load
-          this.applyThumbnailRotation(thumbnailImg);
+          // Re-apply rotation transform + margin on each preview load. Skip for
+          // 360° previews — those are already reprojected to the upright view,
+          // so a CSS rotate would double-transform them.
+          if (!this._vr360) this.applyThumbnailRotation(thumbnailImg);
+          else thumbnailImg.style.transform = "";
         }
       } catch (e) {
         // Ignore aborts
@@ -2201,18 +2353,45 @@ export class MoviElement extends HTMLElement {
       this.toggleFullscreen();
     });
 
-    // Picture-in-Picture
+    // In an iframe, fullscreen / Document PiP need to be delegated via the
+    // iframe's `allow` attribute. Without it the Permissions Policy blocks them
+    // and the buttons would be dead controls — so hide them. Scoped to the
+    // iframe case only: at top level `fullscreenEnabled` can legitimately be
+    // false (e.g. iOS Safari, which has no element-fullscreen) yet still has a
+    // working fallback, so we must not hide there.
+    const inIframe = this.isEmbeddedIframe();
+
+    // Picture-in-Picture — needs the Document PiP API and, in an iframe,
+    // allow="picture-in-picture" (which `pictureInPictureEnabled` reflects, since
+    // Document PiP shares that policy).
     const pipBtn = shadowRoot.querySelector(".movi-pip-btn") as HTMLElement;
-    // Show PiP button + context menu item only if Document PiP API is available
-    if ("documentPictureInPicture" in window) {
-      if (pipBtn) pipBtn.style.display = "";
-      const pipCtxItem = shadowRoot.querySelector(".movi-context-menu-pip") as HTMLElement;
-      if (pipCtxItem) pipCtxItem.style.display = "";
-    }
+    const pipCtxItem = shadowRoot.querySelector(
+      ".movi-context-menu-pip",
+    ) as HTMLElement;
+    const pipAvailable =
+      "documentPictureInPicture" in window &&
+      (!inIframe || (document as Document).pictureInPictureEnabled !== false);
+    if (pipBtn) pipBtn.style.display = pipAvailable ? "" : "none";
+    if (pipCtxItem) pipCtxItem.style.display = pipAvailable ? "" : "none";
     pipBtn?.addEventListener("click", (e) => {
       e.stopPropagation();
       this.togglePiP();
     });
+
+    // Fullscreen — hide the button + menu item inside an iframe that wasn't
+    // granted allow="fullscreen" (document.fullscreenEnabled is false there). A
+    // host that drives its own fullscreen via the `movi-fullscreen-request`
+    // event can still trigger it through the F shortcut / its own chrome.
+    if (inIframe && !document.fullscreenEnabled) {
+      const fsBtn = shadowRoot.querySelector(
+        ".movi-fullscreen-btn",
+      ) as HTMLElement;
+      if (fsBtn) fsBtn.style.display = "none";
+      const fsCtxItem = shadowRoot.querySelector(
+        '.movi-context-menu-item[data-action="fullscreen"]',
+      ) as HTMLElement;
+      if (fsCtxItem) fsCtxItem.style.display = "none";
+    }
 
     // More Settings (Mobile Horizontal Expansion)
     const moreBtn = shadowRoot.querySelector(".movi-more-btn") as HTMLElement;
@@ -2262,6 +2441,9 @@ export class MoviElement extends HTMLElement {
     // Click on video to play/pause (only on canvas/video area, not controls)
     // Handle clicks on both overlay and canvas
     const handleVideoClick = (e: MouseEvent) => {
+      // A bare player (no controls attr) is a non-interactive display surface —
+      // a click on it must not toggle play/pause.
+      if (!this._controls) return;
       // A 360° look-around drag ends with a synthetic click — swallow it so the
       // drag doesn't also toggle play/pause. A pure click (no drag) still does.
       if (this._vrSuppressClick) {
@@ -2381,7 +2563,7 @@ export class MoviElement extends HTMLElement {
     // Setup gestures
     this.setupGestures(shadowRoot);
 
-    // Setup 360° look-around (mouse drag + wheel zoom)
+    // Setup 360° look-around (mouse/touch drag; two-finger pinch to zoom)
     this.setupVRControls(shadowRoot);
 
     // Setup context menu
@@ -2391,6 +2573,7 @@ export class MoviElement extends HTMLElement {
     document.addEventListener("fullscreenchange", () => {
       const isFullscreen = !!document.fullscreenElement;
       this.applyFullscreenUiState(isFullscreen);
+      this.applyFullscreenOrientation(isFullscreen);
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           this.updateCanvasSize();
@@ -2620,6 +2803,42 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  /** Begin press-and-hold fast playback (2x). No-op unless actively playing, so
+   * a long-press while paused doesn't silently change the saved rate. */
+  private startHoldSpeed(): void {
+    this._holdSpeedTimer = null;
+    if (this._holdSpeedActive || !this.player) return;
+    if (this.player.getState() !== "playing") return;
+    this._holdSpeedActive = true;
+    this.gesturePerformed = true; // suppress the touchend tap (show/hide chrome)
+    this._rateBeforeHold = this._playbackRate || 1;
+    this.player.setPlaybackRate(2);
+    this._playbackRate = 2;
+    this.updateMediaSessionPosition();
+    this.resetStutterHint();
+    const pill = this.shadowRoot?.querySelector(
+      ".movi-hold-speed",
+    ) as HTMLElement | null;
+    if (pill) pill.style.display = "flex";
+  }
+
+  /** End press-and-hold fast playback, restoring the pre-hold rate. */
+  private stopHoldSpeed(): void {
+    if (this._holdSpeedTimer !== null) {
+      clearTimeout(this._holdSpeedTimer);
+      this._holdSpeedTimer = null;
+    }
+    if (!this._holdSpeedActive) return;
+    this._holdSpeedActive = false;
+    this.player?.setPlaybackRate(this._rateBeforeHold);
+    this._playbackRate = this._rateBeforeHold;
+    this.updateMediaSessionPosition();
+    const pill = this.shadowRoot?.querySelector(
+      ".movi-hold-speed",
+    ) as HTMLElement | null;
+    if (pill) pill.style.display = "none";
+  }
+
   private setupGestures(shadowRoot: ShadowRoot): void {
     const overlay = shadowRoot.querySelector(
       ".movi-controls-overlay",
@@ -2784,6 +3003,32 @@ export class MoviElement extends HTMLElement {
             initialSeekTime = this.currentTime;
             isVerticalGesture = false;
             isHorizontalGesture = false;
+
+            // Arm press-and-hold-to-2x. A move (scrub/swipe/pan) or a release
+            // before the threshold cancels it (touchmove/touchend below). VR
+            // owns its own touch, so skip there.
+            if (this._holdSpeedTimer !== null) {
+              clearTimeout(this._holdSpeedTimer);
+              this._holdSpeedTimer = null;
+            }
+            if (!this._vr360 && !isEdgeStart) {
+              // 600ms, not 400 — a shorter threshold fired 2x on ordinary
+              // taps/brief holds. This matches the ~500-600ms long-press feel
+              // users expect on iOS/Android.
+              this._holdSpeedTimer = window.setTimeout(
+                () => this.startHoldSpeed(),
+                600,
+              );
+            }
+          } else if (e.touches.length >= 2) {
+            // A second finger down means a pinch (aspect-fit / 360° zoom), never
+            // a press-and-hold-to-2x — cancel the arm the first finger set, and
+            // drop out of 2x if it already engaged, so the two don't conflict.
+            if (this._holdSpeedTimer !== null) {
+              clearTimeout(this._holdSpeedTimer);
+              this._holdSpeedTimer = null;
+            }
+            if (this._holdSpeedActive) this.stopHoldSpeed();
           }
         },
         { passive: true },
@@ -2792,6 +3037,55 @@ export class MoviElement extends HTMLElement {
       target.addEventListener(
         "touchmove",
         (e: TouchEvent) => {
+          // Two-finger pinch in fullscreen → switch aspect fit, YouTube-style:
+          // spread out zooms to fill (cover / crop to edges), pinch in returns
+          // to fit (contain). Handled before the edge-swipe guard so a pinch
+          // that happens to begin near a screen edge still registers, and gated
+          // to fullscreen so it never fights the page's own pinch-zoom inline.
+          // (360° mode has its own two-finger pinch below, so exclude it here.)
+          if (
+            !this._vr360 &&
+            e.touches.length === 2 &&
+            this.isFullscreenActive()
+          ) {
+            const dist = Math.hypot(
+              e.touches[0].clientX - e.touches[1].clientX,
+              e.touches[0].clientY - e.touches[1].clientY,
+            );
+            if (this._aspectPinchDist === 0) {
+              this._aspectPinchDist = dist;
+            } else {
+              const ratio = dist / this._aspectPinchDist;
+              const current =
+                this._objectFit === "control"
+                  ? this._currentFit
+                  : this._objectFit;
+              let next: "contain" | "cover" | null = null;
+              if (ratio > 1.2 && current !== "cover") next = "cover";
+              else if (ratio < 0.83 && current !== "contain") next = "contain";
+              if (next) {
+                if (this._objectFit === "control") this._currentFit = next;
+                else this._objectFit = next;
+                this.updateFitMode();
+                const labels: Record<string, string> = {
+                  contain: "Fit",
+                  cover: "Fill",
+                };
+                const osdSvg =
+                  MoviElement.ASPECT_ICONS[next] ||
+                  MoviElement.ASPECT_ICONS.contain;
+                this.showOSD(
+                  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${osdSvg}</svg>`,
+                  labels[next],
+                );
+                // Re-baseline so the opposite pinch can toggle straight back.
+                this._aspectPinchDist = dist;
+              }
+            }
+            this.gesturePerformed = true;
+            if (e.cancelable) e.preventDefault();
+            return;
+          }
           if (isEdgeStart) return;
           // 360° mode owns touch: one finger looks around, two fingers pinch
           // to zoom. Bypasses the volume/seek gestures entirely.
@@ -2824,9 +3118,28 @@ export class MoviElement extends HTMLElement {
             const deltaX = touch.clientX - this.touchStartX;
             const deltaY = touch.clientY - this.touchStartY;
 
-            // Determine gesture type early
-            // If gesturefs is enabled, ONLY allow gestures if in fullscreen
-            if (this._gesturefs && !document.fullscreenElement) {
+            // Any real finger travel means the press wasn't a stationary hold —
+            // cancel the pending hold-to-2x so a page scroll / swipe / pan
+            // doesn't trip it. Done here (before the gesturefs gate and the
+            // gesture-type classification) so it fires regardless of side,
+            // fullscreen, or gesture config — a scroll must always win.
+            if (
+              this._holdSpeedTimer !== null &&
+              Math.hypot(deltaX, deltaY) > 10
+            ) {
+              clearTimeout(this._holdSpeedTimer);
+              this._holdSpeedTimer = null;
+            }
+
+            // Determine gesture type early.
+            // An inline player (`playsinline`) shares the page's scroll, so its
+            // touch gestures (swipe-seek / volume) must not fight it — restrict
+            // them to fullscreen. `gesturefs` is the deprecated alias for the
+            // same behaviour, still honoured.
+            if (
+              (this._playsinline || this._gesturefs) &&
+              !document.fullscreenElement
+            ) {
               return;
             }
 
@@ -2842,6 +3155,12 @@ export class MoviElement extends HTMLElement {
                 isHorizontalGesture = true;
                 this.gesturePerformed = true;
               }
+              // A real move means this isn't a stationary press — cancel the
+              // pending hold-to-2x so scrub/swipe/volume gestures win.
+              if (this.gesturePerformed && this._holdSpeedTimer !== null) {
+                clearTimeout(this._holdSpeedTimer);
+                this._holdSpeedTimer = null;
+              }
             }
 
             if (isVerticalGesture) {
@@ -2855,7 +3174,7 @@ export class MoviElement extends HTMLElement {
                 const volumeChange = -deltaY / 200;
                 const newVolume = Math.max(
                   0,
-                  Math.min(1, initialVolume + volumeChange),
+                  Math.min(this.getMaxVolume(), initialVolume + volumeChange),
                 );
                 this.volume = newVolume;
               }
@@ -2896,6 +3215,15 @@ export class MoviElement extends HTMLElement {
       target.addEventListener(
         "touchend",
         (e: TouchEvent) => {
+          // A lifted finger ends any pinch — clear the aspect-fit baseline so
+          // the next two-finger gesture re-measures from scratch.
+          this._aspectPinchDist = 0;
+          // Release ends press-and-hold-to-2x (and cancels a pending arm). When
+          // it was active this restores the pre-hold rate; gesturePerformed was
+          // set on activation so the tap show/hide-chrome branch below is skipped.
+          const wasHolding = this._holdSpeedActive;
+          this.stopHoldSpeed();
+          if (wasHolding) return;
           if (e.changedTouches.length === 1) {
             const touch = e.changedTouches[0];
             const endTime = Date.now();
@@ -2913,20 +3241,19 @@ export class MoviElement extends HTMLElement {
               startXPercent <= 0.5
             ) {
               if (deltaY < -60) {
-                // Swipe UP -> Enter Fullscreen (skip for any audio source)
-                if (!document.fullscreenElement && !this.classList.contains("movi-audio-mode")) {
-                  this.requestFullscreen().catch((err) =>
-                    Logger.error(TAG, "Error entering fullscreen", err),
-                  );
+                // Swipe UP -> Enter Fullscreen (skip for any audio source).
+                // Route through toggleFullscreen so the iOS pseudo-fullscreen
+                // fallback and the host-fullscreen event apply here too.
+                if (
+                  !this.isFullscreenActive() &&
+                  !this.classList.contains("movi-audio-mode")
+                ) {
+                  this.toggleFullscreen();
                 }
               } else if (deltaY > 60) {
                 // Swipe DOWN -> Exit Fullscreen
-                if (document.fullscreenElement) {
-                  document
-                    .exitFullscreen()
-                    .catch((err) =>
-                      Logger.error(TAG, "Error exiting fullscreen", err),
-                    );
+                if (this.isFullscreenActive()) {
+                  this.toggleFullscreen();
                 }
               }
             }
@@ -2960,6 +3287,10 @@ export class MoviElement extends HTMLElement {
 
     // Mouse double click for fullscreen / fast seek
     const handleDoubleClick = (e: MouseEvent) => {
+      // Bare player (no controls attr): no double-click-to-fullscreen. The
+      // host's pointer-events:none is defeated by the many explicit
+      // pointer-events:auto layers, so guard the handler directly.
+      if (!this._controls) return;
       // Cancel any pending single click
       if (this.clickTimer) {
         clearTimeout(this.clickTimer);
@@ -3043,16 +3374,6 @@ export class MoviElement extends HTMLElement {
       };
       target.addEventListener("pointerup", endDrag);
       target.addEventListener("pointercancel", endDrag);
-
-      target.addEventListener(
-        "wheel",
-        (e: WheelEvent) => {
-          if (!this._vr360) return;
-          e.preventDefault();
-          this.player?.zoomVR360(e.deltaY);
-        },
-        { passive: false },
-      );
     });
 
     // ── On-screen pan joystick (the YouTube-style compass, desktop only) ──
@@ -3284,6 +3605,21 @@ export class MoviElement extends HTMLElement {
   }
 
   private setupKeyboardShortcuts(): void {
+    // Keyboard shortcuts require the host to hold focus. handleVideoClick grabs
+    // it on a canvas/video click, but in audio-strip mode the whole surface is
+    // the control bar, so that click never fires and the hotkeys look dead.
+    // Take focus on any pointerdown on the player (except real form fields) so
+    // shortcuts work regardless of what part of the chrome was clicked.
+    this.addEventListener(
+      "pointerdown",
+      (e) => {
+        const t = e.composedPath()[0] as HTMLElement | undefined;
+        if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+        if (document.activeElement !== this) this.focus({ preventScroll: true });
+      },
+      true,
+    );
+
     this.addEventListener("keydown", (e) => {
       // Check if keyboard controls are disabled
       if (this._noHotkeys) return;
@@ -3465,7 +3801,7 @@ export class MoviElement extends HTMLElement {
           // Up Arrow: Increase volume
           e.preventDefault();
           if (this.player && this.player.hasAudibleSource()) {
-            this.volume = Math.min(1, this.volume + 0.1);
+            this.volume = Math.min(this.getMaxVolume(), this.volume + 0.1);
           }
           break;
         case "ArrowDown":
@@ -3769,6 +4105,24 @@ export class MoviElement extends HTMLElement {
           this.currentTime = 0;
           this.showControls();
           break;
+        case "1":
+        case "2":
+        case "3":
+        case "4":
+        case "5":
+        case "6":
+        case "7":
+        case "8":
+        case "9": {
+          // 1-9: Seek to 10%–90% of the video (YouTube-style).
+          e.preventDefault();
+          const d = this.duration;
+          if (Number.isFinite(d) && d > 0) {
+            this.currentTime = d * (parseInt(e.key, 10) / 10);
+            this.showControls();
+          }
+          break;
+        }
         case "Home":
           // Home: Seek to start
           e.preventDefault();
@@ -3895,6 +4249,16 @@ export class MoviElement extends HTMLElement {
       e.stopPropagation();
       e.stopImmediatePropagation();
 
+      // On touch, a long-press now drives hold-to-2x, so it must NOT open the
+      // context menu — that opens from the gear button, which sets
+      // _openMenuViaGear before dispatching this event. (Desktop right-click is
+      // unaffected: pointer is fine, so this gate is skipped.)
+      const isCoarse = window.matchMedia("(pointer: coarse)").matches;
+      if (isCoarse && !this._openMenuViaGear) {
+        return false;
+      }
+      this._openMenuViaGear = false;
+
       // Don't show on controls
       const target = e.target as Element;
       const shadowTarget = e.composedPath
@@ -3942,8 +4306,6 @@ export class MoviElement extends HTMLElement {
       // headset shows up; the async result re-renders the submenu in place.
       this.refreshAudioOutputs();
 
-      // Show custom context menu
-      const rect = this.getBoundingClientRect();
       // Touch-only: narrow desktop windows still get the hover-based menu,
       // because slide-panel submenus require tap-to-open semantics.
       const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
@@ -3997,67 +4359,43 @@ export class MoviElement extends HTMLElement {
           if (fy < 10) fy = 10;
           contextMenu.style.left = `${fx}px`;
           contextMenu.style.top = `${fy}px`;
+          this.clampMenuToViewport(contextMenu);
           // skip the host-relative absolute-position path below
           requestAnimationFrame(() => contextMenu.classList.add("visible"));
           this._contextMenuVisible = true;
           return;
         }
 
-        // Reset any leftover fixed-position state from a previous strip-
-        // mode invocation (track switch from audio to video).
-        contextMenu.style.position = "";
+        // Portal the menu to a body-level shadow root and switch to fixed
+        // positioning so it escapes EVERY clipping ancestor of the player (a
+        // page wrapper's overflow:hidden, body{overflow-x:hidden}, etc.) and
+        // spills freely into the page like a native context menu. Lifting the
+        // player's own clip isn't enough — the ancestors still chop it. Once
+        // portaled + fixed, positions are plain viewport coordinates.
+        this.portalContextMenu(contextMenu);
+        contextMenu.style.position = "fixed";
 
-        let x = e.clientX - rect.left;
-        let y = e.clientY - rect.top;
+        let x = e.clientX;
+        let y = e.clientY;
 
-        Logger.debug(TAG, "[ContextMenu] Initial position", {
-          x,
-          y,
-          rectWidth: rect.width,
-          rectHeight: rect.height,
-        });
-
-        // Clamp menu height to the player so it scrolls when too tall
-        const maxMenuHeight = Math.max(120, rect.height - 20);
-        contextMenu.style.maxHeight = `${maxMenuHeight}px`;
+        // Cap height to the VIEWPORT so a tall menu extends downward instead of
+        // scrolling inside a tiny box.
+        contextMenu.style.maxHeight = `${Math.max(180, window.innerHeight - 40)}px`;
 
         // Temporarily show menu to get its dimensions
         contextMenu.style.display = "block";
         contextMenu.style.visibility = "hidden";
         const menuWidth = contextMenu.offsetWidth;
         const menuHeight = contextMenu.offsetHeight;
-        Logger.debug(TAG, "[ContextMenu] Menu dimensions", {
-          menuWidth,
-          menuHeight,
-        });
         contextMenu.style.visibility = "visible";
 
-        // Adjust horizontal position if menu would overflow
-        if (x + menuWidth > rect.width) {
-          x = rect.width - menuWidth - 10;
-          Logger.debug(TAG, "[ContextMenu] Adjusted x to prevent overflow", {
-            x,
-          });
-        }
-        if (x < 10) {
-          x = 10;
-          Logger.debug(TAG, "[ContextMenu] Adjusted x to minimum", { x });
-        }
-
-        // Adjust vertical position if menu would overflow
-        if (y + menuHeight > rect.height) {
-          y = rect.height - menuHeight - 10;
-          Logger.debug(TAG, "[ContextMenu] Adjusted y to prevent overflow", {
-            y,
-          });
-        }
-        if (y < 10) {
-          y = 10;
-          Logger.debug(TAG, "[ContextMenu] Adjusted y to minimum", { y });
-        }
+        // Flip to the left of / above the cursor near the viewport edge.
+        if (x + menuWidth > window.innerWidth - 10) x -= menuWidth;
+        if (y + menuHeight > window.innerHeight - 10) y -= menuHeight;
 
         contextMenu.style.left = `${x}px`;
         contextMenu.style.top = `${y}px`;
+        this.clampMenuToViewport(contextMenu);
       }
 
       // Delay adding visible class slightly to ensure transition works
@@ -4082,6 +4420,9 @@ export class MoviElement extends HTMLElement {
     // Helper to hide context menu
     const hideContextMenu = () => {
       contextMenu.classList.remove("visible");
+      // Restore the host's paint/overflow clip (lifted while the desktop menu
+      // was open so it could spill outside the player).
+      this.classList.remove("movi-menu-overflow");
       this._contextMenuVisible = false;
 
       // Set just-closed flag to prevent play/pause toggle
@@ -4109,6 +4450,11 @@ export class MoviElement extends HTMLElement {
         }, 400);
       } else {
         contextMenu.style.display = "none";
+        // Return the menu from the body portal to the shadow root and clear its
+        // fixed positioning so the next open (incl. strip/touch modes) starts
+        // clean and the submenu query below finds it back home.
+        contextMenu.style.position = "";
+        this.unportalContextMenu(contextMenu);
       }
 
       // Hide all submenus
@@ -4127,6 +4473,86 @@ export class MoviElement extends HTMLElement {
       // deferred block once the slide-out finishes.)
       if (!isTouchDevice) this.showControls();
     };
+
+    // Touch: drag the mobile menu drawer to the right to dismiss it. The drawer
+    // slides in from the right edge (translateX(100%) -> 0), so dragging it back
+    // toward the right is the natural close gesture. Only the full-height drawer
+    // participates (the audio-strip variant is an opacity-fade, not a slide),
+    // and vertical/leftward moves are handed back to native scrolling / taps so
+    // menu buttons and scrolling still work. The drawer's CSS transform/
+    // transition carry `!important`, so inline overrides must use setProperty
+    // with the "important" priority to win.
+    const SWIPE_SLOP = 8; // px of travel before we lock an axis
+    const SWIPE_CLOSE_RATIO = 0.35; // fraction of drawer width that dismisses
+    let swStartX = 0;
+    let swStartY = 0;
+    let swDecided = false; // axis for this gesture chosen
+    let swDragging = false; // horizontal drag-to-close has taken over
+    const drawerActive = () =>
+      contextMenu.classList.contains("movi-context-menu-mobile") &&
+      contextMenu.classList.contains("visible") &&
+      !this.classList.contains("movi-audio-strip");
+
+    contextMenu.addEventListener(
+      "touchstart",
+      (e: TouchEvent) => {
+        if (!drawerActive() || e.touches.length !== 1) return;
+        swStartX = e.touches[0].clientX;
+        swStartY = e.touches[0].clientY;
+        swDecided = false;
+        swDragging = false;
+      },
+      { passive: true },
+    );
+
+    contextMenu.addEventListener(
+      "touchmove",
+      (e: TouchEvent) => {
+        if (!drawerActive() || e.touches.length !== 1) return;
+        const dx = e.touches[0].clientX - swStartX;
+        const dy = e.touches[0].clientY - swStartY;
+        if (!swDecided) {
+          if (Math.abs(dx) < SWIPE_SLOP && Math.abs(dy) < SWIPE_SLOP) return;
+          swDecided = true;
+          // Own the gesture only when it's a clear rightward horizontal swipe;
+          // otherwise leave it to the menu's own vertical scroll.
+          swDragging = Math.abs(dx) > Math.abs(dy) && dx > 0;
+          if (swDragging)
+            contextMenu.style.setProperty("transition", "none", "important");
+        }
+        if (!swDragging) return;
+        e.preventDefault(); // we own this gesture now — no scroll/tap
+        const offset = Math.max(0, dx); // rightward only
+        contextMenu.style.setProperty(
+          "transform",
+          `translateX(${offset}px)`,
+          "important",
+        );
+      },
+      { passive: false },
+    );
+
+    const endSwipe = (e: TouchEvent) => {
+      if (!swDragging) {
+        swDecided = false;
+        return;
+      }
+      swDragging = false;
+      swDecided = false;
+      const dx = (e.changedTouches[0]?.clientX ?? swStartX) - swStartX;
+      const width = contextMenu.offsetWidth || 1;
+      // Restore the CSS 0.4s slide and commit the dragged position as its
+      // start, then hand the transform back to CSS so it animates to the
+      // resting/closed state instead of jumping.
+      contextMenu.style.removeProperty("transition");
+      void contextMenu.offsetWidth; // reflow: lock in the current translateX
+      if (dx > width * SWIPE_CLOSE_RATIO) {
+        hideContextMenu(); // drops .visible -> CSS target translateX(100%)
+      }
+      contextMenu.style.removeProperty("transform");
+    };
+    contextMenu.addEventListener("touchend", endSwipe, { passive: true });
+    contextMenu.addEventListener("touchcancel", endSwipe, { passive: true });
 
     // Add event listeners with capture phase and passive: false to allow preventDefault
     // Use capture phase to intercept before it reaches other handlers
@@ -4326,6 +4752,7 @@ export class MoviElement extends HTMLElement {
       } else if (action === "fit") {
         const submenu = shadowRoot.querySelector('.movi-context-menu-submenu[data-submenu="fit"]') as HTMLElement;
         if (submenu) {
+          this.syncFitSubmenuActive(submenu); // touch: reflect current fit
           contextMenu.scrollTop = 0;
           submenu.classList.add("movi-context-menu-submenu-visible");
         }
@@ -4442,12 +4869,12 @@ export class MoviElement extends HTMLElement {
           this.setAttribute("playbackrate", playbackSpeed.toString());
         }
 
-        // Update active state
-        contextMenu
-          .querySelectorAll(".movi-context-menu-item[data-speed]")
-          .forEach((el) => {
-            el.classList.remove("movi-context-menu-active");
-          });
+        // Update active state (query the item's own submenu — the speed submenu
+        // is a moved-out sibling of contextMenu, so contextMenu wouldn't find
+        // these items and the active class would accumulate; see the fit case).
+        item.parentElement
+          ?.querySelectorAll(".movi-context-menu-item[data-speed]")
+          .forEach((el) => el.classList.remove("movi-context-menu-active"));
         item.classList.add("movi-context-menu-active");
 
         this.showOSD(
@@ -4464,16 +4891,27 @@ export class MoviElement extends HTMLElement {
         }
         this.updateFitMode();
         this.updateAspectRatioIcon();
-        contextMenu.querySelectorAll(".movi-context-menu-item[data-fit]").forEach((el) => {
-          el.classList.remove("movi-context-menu-active");
-        });
+        // Query within the item's own submenu, NOT contextMenu: the fit submenu
+        // is moved out to be a sibling of contextMenu (so it escapes the menu's
+        // overflow), so contextMenu.querySelectorAll finds none of these items —
+        // the active class was never cleared and every tapped option stayed
+        // highlighted (most visible on touch, where the submenu lingers open).
+        item.parentElement
+          ?.querySelectorAll(".movi-context-menu-item[data-fit]")
+          .forEach((el) => el.classList.remove("movi-context-menu-active"));
         item.classList.add("movi-context-menu-active");
         // Update the new context menu status too
         const aspectStatus = shadowRoot.querySelector(".movi-aspect-status");
+        const fitLabels: Record<string, string> = { contain: "Fit", cover: "Fill", fill: "Stretch", zoom: "Zoom" };
         if (aspectStatus) {
-          const labels: Record<string, string> = { contain: "Fit", cover: "Fill", fill: "Stretch", zoom: "Zoom" };
-          aspectStatus.textContent = labels[fitMode] || fitMode;
+          aspectStatus.textContent = fitLabels[fitMode] || fitMode;
         }
+        // Surface the same Fit/Fill/… OSD the aspect button and keyboard show —
+        // changing the fit from the menu was silently skipping it.
+        this.showOSD(
+          `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">${MoviElement.ASPECT_ICONS[fitMode] || MoviElement.ASPECT_ICONS.contain}</svg>`,
+          fitLabels[fitMode] || fitMode,
+        );
         hideContextMenu();
       } else if (action === "hdr-toggle") {
         this.hdr = !this.hdr;
@@ -4781,7 +5219,7 @@ export class MoviElement extends HTMLElement {
     // Update HDR visibility/state in context menu
     this.updateHDRVisibility();
 
-    // Update active state for Fit mode
+    // Update active state for Fit mode.
     const currentActiveFit =
       this._objectFit === "control" ? this._currentFit : this._objectFit;
     const fitItems = contextMenu.querySelectorAll(
@@ -4803,6 +5241,27 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  /**
+   * Highlight the current fit as the active row in the aspect-ratio submenu, so
+   * it reflects the live fit however it was last changed — context menu, the
+   * bottom-controls aspect button, or the keyboard shortcut. Called each time
+   * the fit submenu is shown: on hover (desktop, via showSubmenu) and on tap
+   * (touch, via the action==="fit" branch). Kept OUT of updateContextMenuContent
+   * (which runs on the main menu's open) to avoid touch-open side effects.
+   */
+  private syncFitSubmenuActive(submenu: HTMLElement): void {
+    const currentFit =
+      this._objectFit === "control" ? this._currentFit : this._objectFit;
+    submenu
+      .querySelectorAll(".movi-context-menu-item[data-fit]")
+      .forEach((el) =>
+        el.classList.toggle(
+          "movi-context-menu-active",
+          (el as HTMLElement).dataset.fit === currentFit,
+        ),
+      );
+  }
+
   private setupSubmenuHover(item: HTMLElement, submenu: HTMLElement): void {
     // Check if listeners are already attached (using a data attribute)
     if (item.dataset.hoverSetup === "true") {
@@ -4820,12 +5279,26 @@ export class MoviElement extends HTMLElement {
         clearTimeout(hideTimeout);
         hideTimeout = null;
       }
-      // Submenu lives as a sibling of the context menu inside shadowRoot.
-      // It's position:absolute, so coordinates are relative to :host (player).
-      const contextMenu = this.shadowRoot?.querySelector(
+      // The menu (and its submenu panels) may be in the body portal (desktop)
+      // rather than the shadow root — find it wherever it lives.
+      const contextMenu = (this._menuPortalRoot?.querySelector(
         ".movi-context-menu",
-      ) as HTMLElement | null;
+      ) ||
+        this.shadowRoot?.querySelector(
+          ".movi-context-menu",
+        )) as HTMLElement | null;
       if (contextMenu) {
+        // Use VIEWPORT coordinates when the menu itself is viewport-positioned:
+        // the desktop menu is portaled (absolute inside the fixed portal host at
+        // 0,0), and the audio-strip menu is fixed (strip mode drops the host's
+        // container-type, so a fixed submenu is viewport-relative too and lines
+        // up with it — the tiny 56px strip's bounds must NOT confine it).
+        // Otherwise the submenu is :host-relative and confined to the player.
+        const portaled = contextMenu.getRootNode() === this._menuPortalRoot;
+        const strip = this.classList.contains("movi-audio-strip");
+        const useViewport = portaled || strip;
+        // Strip: pin the submenu to the viewport like the strip menu.
+        submenu.style.position = strip ? "fixed" : "";
         const itemRect = item.getBoundingClientRect();
         const menuRect = contextMenu.getBoundingClientRect();
         const playerRect = this.getBoundingClientRect();
@@ -4833,29 +5306,36 @@ export class MoviElement extends HTMLElement {
         const gap = 4;
         const padding = 10;
 
-        const spaceOnRight = playerRect.right - menuRect.right;
-        const spaceOnLeft = menuRect.left - playerRect.left;
+        const originLeft = useViewport ? 0 : playerRect.left;
+        const originTop = useViewport ? 0 : playerRect.top;
+        const boundsLeft = useViewport ? 0 : playerRect.left;
+        const boundsRight = useViewport ? window.innerWidth : playerRect.right;
+        const boundsBottom = useViewport ? window.innerHeight : playerRect.bottom;
+
+        const spaceOnRight = boundsRight - menuRect.right;
+        const spaceOnLeft = menuRect.left - boundsLeft;
 
         submenu.style.right = "auto";
         submenu.style.marginLeft = "0";
         submenu.style.marginRight = "0";
 
-        // Convert viewport coords → :host-relative
+        // Positions are relative to the submenu's containing block (viewport
+        // origin when portaled, else :host), so subtract the origin.
         if (spaceOnRight >= submenuWidth + padding) {
           // 1. RIGHT (Preferred)
-          submenu.style.left = `${menuRect.right + gap - playerRect.left}px`;
+          submenu.style.left = `${menuRect.right + gap - originLeft}px`;
           submenu.style.transform = "translateX(-8px)";
         } else if (spaceOnLeft >= submenuWidth + padding) {
           // 2. LEFT
-          submenu.style.left = `${menuRect.left - submenuWidth - gap - playerRect.left}px`;
+          submenu.style.left = `${menuRect.left - submenuWidth - gap - originLeft}px`;
           submenu.style.transform = "translateX(8px)";
         } else {
           // 3. OVERLAP (tight space)
-          submenu.style.left = `${menuRect.left + 20 - playerRect.left}px`;
+          submenu.style.left = `${menuRect.left + 20 - originLeft}px`;
           submenu.style.transform = "translateY(10px)";
         }
 
-        let topPx = itemRect.top - playerRect.top;
+        let topPx = itemRect.top - originTop;
         submenu.style.top = `${topPx}px`;
 
         // Measure submenu height (force layout if hidden)
@@ -4872,14 +5352,16 @@ export class MoviElement extends HTMLElement {
           submenu.style.visibility = "";
         }
 
-        // Clamp to player bounds (player-relative)
-        const playerHeight = playerRect.height;
-        if (topPx + submenuHeight > playerHeight - padding) {
-          topPx = playerHeight - padding - submenuHeight;
-          if (topPx < padding) topPx = padding;
+        // Clamp to the bounds (viewport when portaled, else player).
+        const maxTop = boundsBottom - originTop - padding - submenuHeight;
+        if (topPx > maxTop) {
+          topPx = Math.max(padding, maxTop);
           submenu.style.top = `${topPx}px`;
         }
       }
+
+      // Desktop hover-open of the aspect submenu: reflect the current fit.
+      if (submenu.dataset.submenu === "fit") this.syncFitSubmenuActive(submenu);
 
       submenu.classList.add("movi-context-menu-submenu-visible");
     };
@@ -4948,7 +5430,7 @@ export class MoviElement extends HTMLElement {
     // requestFullscreen is blocked, or embedded apps that drive their own
     // fullscreen layout). Hosts call event.preventDefault() and then drive
     // setHostFullscreen() themselves to keep the UI in sync.
-    const currentlyActive = !!document.fullscreenElement || this._hostFullscreen;
+    const currentlyActive = this.isFullscreenActive();
     const requestEvent = new CustomEvent("movi-fullscreen-request", {
       cancelable: true,
       bubbles: true,
@@ -4957,6 +5439,14 @@ export class MoviElement extends HTMLElement {
     });
     this.dispatchEvent(requestEvent);
     if (requestEvent.defaultPrevented) {
+      return;
+    }
+
+    // iOS Safari (and any engine without element-fullscreen): the Fullscreen
+    // API only works on <video>, and we render to a canvas — so fall back to a
+    // CSS viewport-fill "pseudo fullscreen" instead of throwing on requestFullscreen.
+    if (!this.nativeFullscreenSupported()) {
+      this.setPseudoFullscreen(!this._pseudoFullscreen);
       return;
     }
 
@@ -5092,7 +5582,7 @@ export class MoviElement extends HTMLElement {
         }
         .pip-progress-bar:hover { height: 5px; }
         .pip-progress-fill {
-          height: 100%; background: #8B5CF6; border-radius: 2px;
+          height: 100%; background: var(--movi-primary, #8B5CF6); border-radius: 2px;
           width: 0%; pointer-events: none;
         }
         .pip-time { font: 500 10px/1 -apple-system, sans-serif; color: rgba(255,255,255,0.7); white-space: nowrap; }
@@ -5100,7 +5590,7 @@ export class MoviElement extends HTMLElement {
         .pip-btn-row { display: flex; align-items: center; justify-content: center; gap: 16px; position: relative; }
         .pip-btn {
           background: none; border: none; cursor: pointer; padding: 4px;
-          color: #fff; opacity: 0.85; display: flex; align-items: center; justify-content: center;
+          color: var(--movi-chrome-fg, #fff); opacity: 0.85; display: flex; align-items: center; justify-content: center;
         }
         .pip-btn:hover { opacity: 1; }
         .pip-btn svg { width: 20px; height: 20px; }
@@ -5114,6 +5604,9 @@ export class MoviElement extends HTMLElement {
 
       // Move canvas to PiP window
       pipWindow.document.body.appendChild(this.canvas);
+      // Clear any leftover cursor:none (from a hidden-controls state before
+      // entering PiP) so the pointer is visible in the PiP window immediately.
+      this.canvas.style.cursor = "default";
       Logger.info(TAG, `PiP: canvas moved to PiP window, isConnected=${this.canvas.isConnected}`);
 
       // Build PiP controls
@@ -5289,6 +5782,19 @@ export class MoviElement extends HTMLElement {
     } catch (error) {
       Logger.error(TAG, "Failed to open PiP", error);
       this._pipWindow = null;
+      // The Document PiP API exists but requestWindow was blocked — e.g. a
+      // sandboxed iframe without allow-popups, or a Permissions-Policy the
+      // upfront check couldn't see. That's a static property of the embedding
+      // context, not a one-off, so retire the (dead) control rather than let it
+      // fail again on every click.
+      const pipBtn = this.shadowRoot?.querySelector(
+        ".movi-pip-btn",
+      ) as HTMLElement | null;
+      if (pipBtn) pipBtn.style.display = "none";
+      const pipCtxItem = this.shadowRoot?.querySelector(
+        ".movi-context-menu-pip",
+      ) as HTMLElement | null;
+      if (pipCtxItem) pipCtxItem.style.display = "none";
     }
   }
 
@@ -5296,6 +5802,88 @@ export class MoviElement extends HTMLElement {
    *  movi-fullscreen-request event can reflect it correctly even when
    *  document.fullscreenElement is null. */
   private _hostFullscreen = false;
+
+  /** CSS "fill the viewport" fallback used where the element Fullscreen API
+   *  isn't available (iOS Safari only exposes it for <video>, and we render to
+   *  a canvas). Not real fullscreen — no chrome hiding — but the player takes
+   *  over the visible viewport. */
+  private _pseudoFullscreen = false;
+  private _prevBodyOverflow = "";
+
+  /** True when the player is fullscreen by any route: native element FS, a
+   *  host-driven FS, or the iOS pseudo-fullscreen fallback. */
+  private isFullscreenActive(): boolean {
+    return (
+      document.fullscreenElement === this ||
+      this._hostFullscreen ||
+      this._pseudoFullscreen
+    );
+  }
+
+  /** Whether the browser exposes the element Fullscreen API for this element
+   *  (false on iOS Safari, which only fullscreens <video>). */
+  private nativeFullscreenSupported(): boolean {
+    return (
+      typeof this.requestFullscreen === "function" && !!document.fullscreenEnabled
+    );
+  }
+
+  /** Re-evaluate on device rotation / viewport change while pseudo-fullscreen. */
+  private _onPseudoFsResize = () => {
+    this.updatePseudoFsRotation();
+    this.updateCanvasSize();
+  };
+
+  /**
+   * Forced-landscape for the pseudo-fullscreen fallback: iOS won't rotate the
+   * screen for us, so a landscape video on a portrait screen is turned 90° via
+   * CSS (the .movi-pseudo-fs-rotate class) to fill it — matching what Chrome /
+   * Android do with an orientation lock. Once the device itself is landscape
+   * (window wider than tall) the rotation is dropped.
+   */
+  private updatePseudoFsRotation(): void {
+    if (!this._pseudoFullscreen) {
+      this.classList.remove("movi-pseudo-fs-rotate");
+      return;
+    }
+    const track = this.player?.trackManager?.getActiveVideoTrack?.();
+    const rawW = track?.width ?? 0;
+    const rawH = track?.height ?? 0;
+    const rot = this.player?.getVideoRotation?.() ?? track?.rotation ?? 0;
+    const swap = Math.abs(rot) % 180 !== 0;
+    const vidW = swap ? rawH : rawW;
+    const vidH = swap ? rawW : rawH;
+    const videoLandscape = vidW > vidH && vidW > 0;
+    const windowPortrait = window.innerHeight > window.innerWidth;
+    this.classList.toggle(
+      "movi-pseudo-fs-rotate",
+      videoLandscape && windowPortrait,
+    );
+  }
+
+  /** Enter/leave the CSS viewport-fill fallback. */
+  private setPseudoFullscreen(on: boolean): void {
+    if (this._pseudoFullscreen === on) return;
+    this._pseudoFullscreen = on;
+    this.classList.toggle("movi-pseudo-fullscreen", on);
+    if (on) {
+      // Lock the page scroll behind the overlay while active.
+      this._prevBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = "hidden";
+      this.updatePseudoFsRotation();
+      window.addEventListener("resize", this._onPseudoFsResize);
+      window.addEventListener("orientationchange", this._onPseudoFsResize);
+    } else {
+      this.classList.remove("movi-pseudo-fs-rotate");
+      window.removeEventListener("resize", this._onPseudoFsResize);
+      window.removeEventListener("orientationchange", this._onPseudoFsResize);
+      document.body.style.overflow = this._prevBodyOverflow;
+    }
+    this.applyFullscreenUiState(on);
+    this.applyFullscreenOrientation(on);
+    // Repaint the canvas at the new (viewport) size.
+    this.updateCanvasSize();
+  }
 
   private updateFullscreenIcon(isFullscreen: boolean): void {
     const fullscreenIcon = this.shadowRoot?.querySelector(
@@ -5319,6 +5907,51 @@ export class MoviElement extends HTMLElement {
       '.movi-context-menu-item[data-action="fullscreen"] .movi-context-menu-label',
     ) as HTMLElement | null;
     if (label) label.textContent = isFullscreen ? "Exit Fullscreen" : "Fullscreen";
+  }
+
+  /**
+   * On phones/tablets, rotate to match the video when entering fullscreen and
+   * release the lock on exit. Wide clips lock landscape, tall clips portrait;
+   * defaults to landscape (the common case) if dimensions aren't known. No-op on
+   * desktop, audio-only, or where the Screen Orientation lock API is missing
+   * (e.g. iOS Safari, which rejects programmatic lock — caught and ignored).
+   */
+  private applyFullscreenOrientation(isFullscreen: boolean): void {
+    const so = (
+      screen as unknown as {
+        orientation?: {
+          lock?: (o: string) => Promise<void>;
+          unlock?: () => void;
+        };
+      }
+    ).orientation;
+    if (!so || typeof so.lock !== "function") return;
+    if (!window.matchMedia("(pointer: coarse)").matches) return;
+    if (this.classList.contains("movi-audio-mode")) return;
+
+    if (isFullscreen) {
+      const track = this.player?.trackManager?.getActiveVideoTrack?.();
+      const rawW = track?.width ?? 0;
+      const rawH = track?.height ?? 0;
+      // Portrait clips shot on phones are usually stored as landscape frames
+      // plus a 90°/270° rotation flag, so the raw width/height read landscape.
+      // Use the effective display rotation (metadata + manual) to swap them,
+      // otherwise a tall video would wrongly lock landscape on entry.
+      const rot = this.player?.getVideoRotation?.() ?? track?.rotation ?? 0;
+      const rotated = Math.abs(rot) % 180 !== 0;
+      const w = rotated ? rawH : rawW;
+      const h = rotated ? rawW : rawH;
+      const target = h > w && h > 0 ? "portrait" : "landscape";
+      Promise.resolve(so.lock(target)).catch(() => {
+        /* unsupported / user-denied — leave orientation as-is */
+      });
+    } else {
+      try {
+        so.unlock?.();
+      } catch {
+        /* ignore */
+      }
+    }
   }
 
   private applyFullscreenUiState(isFullscreen: boolean): void {
@@ -5530,7 +6163,14 @@ export class MoviElement extends HTMLElement {
             const menu = this.shadowRoot?.querySelector(
               ".movi-audio-track-menu",
             ) as HTMLElement;
-            if (menu) menu.style.display = "none";
+            // Close via setBottomMenuOpen, NOT display:none directly. Setting
+            // display:none leaves the `is-open` class on the menu, so
+            // isBottomMenuOpen()/isAnyMenuOpen() stay true FOREVER — every later
+            // showControls() then no-ops and the controls auto-hide never
+            // re-arms again (not just for audio, but for any subsequent menu or
+            // playback). setBottomMenuOpen(false) removes is-open and re-arms
+            // the auto-hide once the exit transition finishes.
+            this.setBottomMenuOpen(menu, false);
           }
         });
       });
@@ -5981,6 +6621,110 @@ export class MoviElement extends HTMLElement {
    */
   private getMaxAllowedRate(): number {
     return 2;
+  }
+
+  /** Volume ceiling: 200% normally (boost via AudioContext gain), but 100% when
+   *  audio plays through a native element (adaptive stream / native split-source)
+   *  which can't boost — so the UI doesn't promise a boost that won't happen. */
+  private getMaxVolume(): number {
+    return this.player?.usesNativeAudio?.() ? 1 : 2;
+  }
+
+  /** Re-apply the volume ceiling to the slider + current volume when the audio
+   *  path changes (source load, audio-track switch between muxed and native). */
+  private updateVolumeCap(): void {
+    const max = this.getMaxVolume();
+    const slider = this.shadowRoot?.querySelector(
+      ".movi-volume-slider",
+    ) as HTMLInputElement | null;
+    if (slider) {
+      slider.max = String(max);
+      slider.setAttribute("aria-valuemax", String(max * 100));
+    }
+    // Clamp a boosted volume back down when switching to a native (no-boost) path.
+    if (this._volume > max) this.volume = max;
+    else this.updateVolume();
+  }
+
+  /**
+   * Start sampling render health once per second to detect sustained stutter
+   * (decoder can't keep up above 1x on a heavy source → dropped video frames,
+   * smooth audio). Runs only during active playback; cheap (reads a couple of
+   * numbers). Idempotent.
+   */
+  private startStutterMonitor(): void {
+    if (this._stutterInterval !== null) return;
+    const h = this.player?.getRenderHealth?.();
+    this._stutterLastPresented = h ? h.framesPresented : 0;
+    this._stutterSeconds = 0;
+    this._stutterInterval = window.setInterval(() => this.sampleStutter(), 1000);
+  }
+
+  private stopStutterMonitor(): void {
+    if (this._stutterInterval !== null) {
+      clearInterval(this._stutterInterval);
+      this._stutterInterval = null;
+    }
+    this._stutterSeconds = 0;
+  }
+
+  /**
+   * Clear the stutter-hint cooldown so the "play at 1x" warning can fire again.
+   * Called on every playback-rate change — each new speed the user picks gets a
+   * fresh chance to warn if it stutters (instead of showing only once per
+   * source). The 3-second sustained requirement still prevents instant spam.
+   */
+  private resetStutterHint(): void {
+    this._stutterSeconds = 0;
+    this._stutterCooldown = false;
+    if (this._stutterCooldownTimer !== null) {
+      clearTimeout(this._stutterCooldownTimer);
+      this._stutterCooldownTimer = null;
+    }
+  }
+
+  /** One stutter sample: compare presented FPS to the smooth-playback baseline. */
+  private sampleStutter(): void {
+    // Only judge during genuine playback — buffering/seeking legitimately
+    // present few/no frames and would false-positive.
+    if (this.player?.getState?.() !== "playing") {
+      this._stutterSeconds = 0;
+      return;
+    }
+    const h = this.player?.getRenderHealth?.();
+    if (!h) return;
+    const presented = h.framesPresented - this._stutterLastPresented;
+    this._stutterLastPresented = h.framesPresented;
+    // framesPresented resets to 0 on seek → negative delta; skip that sample.
+    if (presented < 0) {
+      this._stutterSeconds = 0;
+      return;
+    }
+    // Only meaningful above 1x — at ≤1x there's nothing slower to suggest.
+    // Smooth playback presents ~min(60, sourceFps × rate) distinct frames/s
+    // (display-capped); sustained < 60% of that means the decoder is dropping a
+    // lot of frames. Profile-agnostic: works for any heavy source (4K/8K,
+    // high-bitrate, software decode) that can't keep up above 1x.
+    const expected = Math.min(60, h.sourceFps * this._playbackRate);
+    if (this._playbackRate > 1 && presented < expected * 0.6) {
+      this._stutterSeconds++;
+    } else {
+      this._stutterSeconds = 0;
+    }
+    if (this._stutterSeconds >= 3 && !this._stutterCooldown) {
+      this._stutterSeconds = 0;
+      this._stutterCooldown = true;
+      // Cooldown so it doesn't nag while stuttering at the SAME rate; a rate
+      // change (resetStutterHint) lifts it early so each new speed can warn.
+      if (this._stutterCooldownTimer !== null) {
+        clearTimeout(this._stutterCooldownTimer);
+      }
+      this._stutterCooldownTimer = window.setTimeout(() => {
+        this._stutterCooldown = false;
+        this._stutterCooldownTimer = null;
+      }, 45000);
+      this.showOSD(OSD.speed, "Play at 1x for smoother playback");
+    }
   }
 
   /**
@@ -7412,6 +8156,13 @@ export class MoviElement extends HTMLElement {
       }
     }
 
+    // Reveal the settings gear with the rest of the chrome — but only once a
+    // source is set (nothing to configure in the empty "No Video" state).
+    const gearEl = this.shadowRoot?.querySelector(".movi-gear-btn");
+    if (gearEl) {
+      gearEl.classList.toggle("movi-gear-visible", this.hasMediaSource());
+    }
+
     // Clear existing timeout
     if (this.controlsTimeout) {
       clearTimeout(this.controlsTimeout);
@@ -7522,6 +8273,48 @@ export class MoviElement extends HTMLElement {
       // fixed with the button's bounding rect — viewport coordinates
       // can't be clipped by ancestor overflow.
       this.applyStripFixedMenuPosition(el);
+      // Non-strip: keep the upward-opening dropdown INSIDE the player and scroll
+      // it internally, rather than letting it spill into the page above — on a
+      // short embedded player that overlapped unrelated page content and hid the
+      // first rows. The menu's bottom edge is anchored just above its button;
+      // cap its height to the room between the player's OWN top and that bottom.
+      // This is player-relative (subtract the host's top), NOT viewport-relative,
+      // so it stays contained wherever the player sits on a scrolled page.
+      // scrollTop 0 keeps the first row (0.25x / Audio 1 / first subtitle)
+      // visible; the rest is reachable by scrolling. The mobile menu CSS sets
+      // max-height with !important, so the inline override must also carry it.
+      if (!this.classList.contains("movi-audio-strip")) {
+        // Cap the upward-opening menu to the room between the player's top and
+        // the controls bar, measured from STABLE elements — the bar and the
+        // host — NOT the menu's own rect, which on a very short player is
+        // unreliable before .is-open (it sits at natural height, so the cap
+        // wouldn't bite and the first rows would clip above the player instead
+        // of scrolling). The menu's containing block is the bar and it anchors
+        // ~15px above the bar's top; leave ~8px breathing room -> subtract ~23.
+        // scrollTop 0 keeps the first row (0.25x / Audio 1 / first subtitle)
+        // reachable at the top. The mobile menu CSS sets max-height !important,
+        // so the inline override must carry it too.
+        const hostTop = this.getBoundingClientRect().top;
+        const bar = this.shadowRoot?.querySelector(
+          ".movi-controls-bar",
+        ) as HTMLElement | null;
+        const barTop = bar
+          ? bar.getBoundingClientRect().top
+          : el.getBoundingClientRect().bottom;
+        // Floor kept low (not ~96) on purpose: on a very short player the room
+        // above the bar can be < 96px, and a floor larger than the room would
+        // push the menu's top back out above the player and clip the first row.
+        el.style.setProperty(
+          "max-height",
+          `${Math.max(32, barTop - hostTop - 23)}px`,
+          "important",
+        );
+        el.scrollTop = 0;
+      }
+      // The dropdowns live inside the controls container's stacking context
+      // (z-index 10), so the top-right gear (z-index 30) would paint on top of a
+      // menu that opens up over it. Hide the gear while any dropdown is open.
+      this.classList.add("movi-bottom-menu-open");
       void el.getBoundingClientRect(); // flush layout so transition starts
       el.classList.add("is-open");
       return;
@@ -7537,18 +8330,23 @@ export class MoviElement extends HTMLElement {
       // If the menu was reopened during the exit transition, leave it.
       if (el.classList.contains("is-open")) return;
       el.style.display = "none";
-      // Reset the strip-mode fixed positioning so a subsequent open in
-      // non-strip mode doesn't inherit stale inline coords.
+      // Reset the strip-mode fixed positioning + the viewport max-height cap so
+      // a subsequent open (in a different mode / at a different scroll spot)
+      // doesn't inherit stale inline values.
       el.style.position = "";
       el.style.top = "";
       el.style.left = "";
       el.style.right = "";
       el.style.bottom = "";
+      el.style.removeProperty("max-height");
       // Menu fully closed — if nothing else is open, re-arm the auto-hide
       // timer. Covers toggling a popup shut from its own button (no
       // closeAllBottomMenus / mouseleave fires on touch), which otherwise
       // left the bar pinned open on touch devices.
       if (!this.isAnyMenuOpen()) {
+        // Restore the host clip + gear once every dropdown is closed.
+        this.classList.remove("movi-menu-overflow");
+        this.classList.remove("movi-bottom-menu-open");
         this.showControls();
       }
     };
@@ -7739,6 +8537,40 @@ export class MoviElement extends HTMLElement {
     );
   }
 
+  /** Running inside a (possibly cross-origin) iframe. */
+  private isEmbeddedIframe(): boolean {
+    try {
+      return window.self !== window.top;
+    } catch {
+      // Cross-origin access to window.top can throw in some sandboxes — if we
+      // can't even read it, we're definitely framed.
+      return true;
+    }
+  }
+
+  /**
+   * Whether a Permissions-Policy feature (e.g. "fullscreen",
+   * "picture-in-picture", "speaker-selection") is allowed in this document.
+   * At the top level features are allowed by default; inside an iframe they
+   * must be delegated via the `allow` attribute. Uses the (Chromium) feature
+   * policy API when present and defaults to allowed when it isn't — the
+   * features we gate this way are all Chromium-only, so a missing API means a
+   * browser that wouldn't expose the capability regardless.
+   */
+  private featureAllowed(feature: string): boolean {
+    const fp = (document as unknown as {
+      featurePolicy?: { allowsFeature?: (f: string) => boolean };
+    }).featurePolicy;
+    if (fp && typeof fp.allowsFeature === "function") {
+      try {
+        return fp.allowsFeature(feature);
+      } catch {
+        return true;
+      }
+    }
+    return true;
+  }
+
   /**
    * List the available audio output devices. Labels may be empty until the
    * page has been granted audio-device access (the desktop app has it; a bare
@@ -7885,8 +8717,18 @@ export class MoviElement extends HTMLElement {
     // opening the submenu triggers the Meet-style prompt and the list fills
     // in. The desktop app already has permission, so `real` is populated and
     // no prompt is needed.
-    const canUnlock = !!navigator.mediaDevices?.getUserMedia;
-    if (!MoviElement.audioSinkSupported() || (real.length < 1 && !canUnlock)) {
+    // In an iframe, routing to a device needs allow="speaker-selection", and
+    // the getUserMedia unlock needs allow="microphone". Without those the menu
+    // would be a dead control (setSinkId / getUserMedia throw NotAllowedError),
+    // so gate on the Permissions Policy.
+    const speakerAllowed = this.featureAllowed("speaker-selection");
+    const canUnlock =
+      !!navigator.mediaDevices?.getUserMedia && this.featureAllowed("microphone");
+    if (
+      !MoviElement.audioSinkSupported() ||
+      !speakerAllowed ||
+      (real.length < 1 && !canUnlock)
+    ) {
       divider.style.display = "none";
       item.style.display = "none";
       submenu.style.display = "none";
@@ -7987,7 +8829,12 @@ export class MoviElement extends HTMLElement {
       // (and canvas/video, which sit underneath the overlay) via
       // inline style makes the change take effect immediately.
       this.style.cursor = "none";
-      if (this.canvas) this.canvas.style.cursor = "none";
+      // In document-PiP the canvas is MOVED into the PiP window (out of the
+      // shadow tree, so the cursor-hiding CSS can't reach it) — this inline
+      // style still travels with the element and would hide the pointer over
+      // the whole PiP video area above its own controls. Keep it visible there.
+      if (this.canvas)
+        this.canvas.style.cursor = this._pipWindow ? "default" : "none";
       if (this.video) this.video.style.cursor = "none";
 
       // The center play/pause button stays visible with pointer-events:auto
@@ -8047,6 +8894,15 @@ export class MoviElement extends HTMLElement {
       if (titleBar) {
         titleBar.classList.remove("movi-title-visible");
       }
+    }
+
+    // Hide the settings gear with the rest of the chrome — EXCEPT in audio
+    // strip mode, where the bar is the whole (always-visible) player, so its
+    // gear must stay put rather than auto-hiding with the transient controls.
+    if (!this.classList.contains("movi-audio-strip")) {
+      this.shadowRoot
+        ?.querySelector(".movi-gear-btn")
+        ?.classList.remove("movi-gear-visible");
     }
   }
 
@@ -8123,15 +8979,31 @@ export class MoviElement extends HTMLElement {
   }
 
   private addStyles(shadowRoot: ShadowRoot): void {
+    // Load the webfont in its OWN sheet, appended a frame AFTER the main styles.
+    // WebKit/Safari treats a shadow-DOM <style> whose first rule is a remote
+    // @import as "pending" until that font finishes downloading — so on the
+    // first (uncached) load the ENTIRE stylesheet is withheld and the shadow
+    // content paints UNSTYLED for ~1s: the VR pad, gear, etc. flash in at their
+    // default (static, opacity 1) positions before snapping to their real
+    // hidden state. Isolating the @import — and adding it only after the first
+    // paint — guarantees the layout/visibility rules below apply immediately;
+    // Inter just swaps in late (font-display: swap). Chromium never had this
+    // bug (it applies the other rules right away regardless of the @import).
+    requestAnimationFrame(() => {
+      if (shadowRoot.querySelector("style[data-movi-font]")) return;
+      const fontStyle = document.createElement("style");
+      fontStyle.setAttribute("data-movi-font", "");
+      fontStyle.textContent =
+        "@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');";
+      shadowRoot.appendChild(fontStyle);
+    });
+
     const style = document.createElement("style");
     style.textContent = `
       /* ========================================
          MOVI PLAYER - PREMIUM UI STYLES
          Rich, Elegant & Responsive Design
       ======================================== */
-      
-      /* Import premium fonts */
-      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
       
       /* Global rules to remove all outlines and focus rings */
       * {
@@ -8215,6 +9087,10 @@ export class MoviElement extends HTMLElement {
         
         /* Text Colors */
         --movi-controls-color: #FFFFFF;
+        /* Foreground for chrome that is ALWAYS dark (bottom bar, OSD capsule,
+           dark pills) — stays white in both themes, unlike --movi-controls-color
+           which flips to dark for menus on light surfaces. Public theming hook. */
+        --movi-chrome-fg: #ffffff;
         --movi-text-secondary: rgba(255, 255, 255, 0.7);
         --movi-text-tertiary: rgba(255, 255, 255, 0.5);
         
@@ -8271,6 +9147,56 @@ export class MoviElement extends HTMLElement {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
+      }
+
+      /* While a desktop context menu is open, let it spill past the player's
+         own box the way strip mode does: lift the host's paint containment and
+         overflow clip. container-type stays, so the responsive @container
+         queries keep firing and the menu is still positioned relative to the
+         host — it just isn't clipped to the player edges anymore. Transient:
+         the class is removed the moment the menu closes. */
+      :host(.movi-menu-overflow) {
+        overflow: visible !important;
+        contain: layout style !important;
+      }
+
+      /* iOS pseudo-fullscreen: iOS Safari only fullscreens <video>, and we
+         render to a canvas, so the element Fullscreen API is unavailable. Fill
+         the whole screen via CSS instead. Sized in LARGE viewport units
+         (100lvw/100lvh, 100vw/100vh fallback) so the box spans the entire
+         screen — behind Safari's toolbars — instead of just the shrunken
+         visible area (dvh/inset left page content peeking at the edges). */
+      :host(.movi-pseudo-fullscreen) {
+        position: fixed !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: auto !important;
+        bottom: auto !important;
+        width: 100vw !important;
+        width: 100lvw !important;
+        height: 100vh !important;
+        height: 100lvh !important;
+        max-width: none !important;
+        max-height: none !important;
+        margin: 0 !important;
+        border-radius: 0 !important;
+        z-index: 2147483647 !important;
+        background: #000 !important;
+      }
+      /* Forced-landscape: a landscape video on a portrait screen (where iOS
+         won't rotate for us) is turned 90° via CSS so it fills the screen the
+         way Chrome/Android's orientation lock does. Swapped large-viewport
+         dimensions so, after the rotate, the box maps onto the full screen;
+         centred so the rotate pivots about the middle. */
+      :host(.movi-pseudo-fs-rotate) {
+        width: 100vh !important;
+        width: 100lvh !important;
+        height: 100vw !important;
+        height: 100lvw !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, -50%) rotate(90deg) !important;
+        transform-origin: center center !important;
       }
 
       /* The :host{display:block} above is an author rule, so it beats the
@@ -8470,6 +9396,14 @@ export class MoviElement extends HTMLElement {
         background: color-mix(in srgb, var(--movi-primary) 0.15) !important;
       }
 
+      /* The active item's info badge hard-codes color:var(--movi-controls-color)
+         (white) for the dark theme; in light theme that leaves the selected
+         track's codec text white-on-light (unreadable). Match the item text. */
+      :host([theme="light"]) .movi-audio-track-item.movi-audio-track-active .movi-audio-track-info,
+      :host([theme="light"]) .movi-subtitle-track-item.movi-subtitle-track-active .movi-subtitle-track-info {
+        color: #11142d !important;
+      }
+
       :host([theme="light"]) .movi-quality-item:hover {
         background: rgba(0, 0, 0, 0.05) !important;
       }
@@ -8577,6 +9511,25 @@ export class MoviElement extends HTMLElement {
         display: none !important;
       }
 
+      /* Compact players: when the storyboard timeline (T) is open, hide the
+         controls bar so the thumbnail strip gets the whole area, and drop the
+         panel into the freed space. Keyed off the panel's inline display:flex
+         (same signal as the seek-thumbnail rule above), so every close path
+         restores the bar automatically. Desktop keeps the bar visible. */
+      @container movi-host (max-width: 720px) {
+        :host:has(.movi-timeline-panel[style*="flex"]) .movi-controls-container {
+          opacity: 0 !important;
+          pointer-events: none !important;
+          transform: translateY(10px) !important;
+        }
+        :host:has(.movi-timeline-panel[style*="flex"]) .movi-controls-bar {
+          pointer-events: none !important;
+        }
+        :host:has(.movi-timeline-panel[style*="flex"]) .movi-timeline-panel {
+          bottom: 12px !important;
+        }
+      }
+
       /* Force enable pointer events on all interactive controls */
       .movi-controls-container.movi-controls-visible .movi-controls-bar,
       .movi-controls-container.movi-controls-visible .movi-controls-bar *,
@@ -8629,7 +9582,7 @@ export class MoviElement extends HTMLElement {
         gap: 8px;
         padding: 8px 14px;
         background: rgba(0, 0, 0, 0.75);
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         font-size: 13px;
         font-weight: 600;
         border: 1px solid rgba(255, 255, 255, 0.15);
@@ -8662,7 +9615,9 @@ export class MoviElement extends HTMLElement {
         top: 0;
         left: 0;
         right: 0;
-        padding: 16px 20px;
+        /* Extra right padding keeps the title text from running under the
+           settings gear pinned in the top-right corner. */
+        padding: 16px 62px 16px 20px;
         background: linear-gradient(to bottom, rgba(0, 0, 0, 0.7) 0%, transparent 100%);
         z-index: 5;
         opacity: 0;
@@ -8674,6 +9629,89 @@ export class MoviElement extends HTMLElement {
       .movi-title-bar.movi-title-visible {
         opacity: 1;
         transform: translateY(0);
+      }
+
+      /* Settings gear (top-right) — opens the context menu. Vertically centred
+         on the title text (title padding-top 16px + ~half the ~20px line) and
+         inset to match; the title bar reserves right padding so the title
+         doesn't run under it. */
+      .movi-gear-btn {
+        position: absolute;
+        top: 9px;
+        right: 14px;
+        z-index: 30;
+        width: 38px;
+        height: 38px;
+        padding: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: none;
+        cursor: pointer;
+        color: var(--movi-chrome-fg, #fff);
+        background: rgba(0, 0, 0, 0.35);
+        border-radius: 50%;
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(-4px);
+        transition: opacity 0.2s ease, transform 0.2s ease, background 0.2s ease;
+        pointer-events: none;
+      }
+      .movi-gear-btn.movi-gear-visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+        pointer-events: auto;
+      }
+      /* Hide the gear while a bottom dropdown OR the storyboard timeline is
+         open — it lives in a higher stacking context than either and would
+         otherwise paint over them. */
+      :host(.movi-bottom-menu-open) .movi-gear-btn,
+      :host:has(.movi-timeline-panel[style*="flex"]) .movi-gear-btn {
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+      }
+      .movi-gear-btn:hover {
+        background: rgba(0, 0, 0, 0.55);
+      }
+      .movi-gear-btn svg {
+        width: 22px;
+        height: 22px;
+      }
+      /* The gear is a TOUCH affordance — it only exists because touch has no
+         right-click and the long-press context menu is gated. On non-touch
+         (mouse/hover) devices, right-clicking the video opens the same menu,
+         so the gear is redundant chrome; hide it there. (Mirrors the VR pad,
+         which does the inverse — hidden on touch, shown on desktop.) */
+      @media (hover: hover) and (pointer: fine) {
+        .movi-gear-btn {
+          display: none !important;
+        }
+      }
+
+      /* Press-and-hold-to-2x pill (top-centre, shown only while held). */
+      .movi-hold-speed {
+        position: absolute;
+        top: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 40;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 14px;
+        background: rgba(0, 0, 0, 0.6);
+        color: var(--movi-chrome-fg, #fff);
+        border-radius: 999px;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        pointer-events: none;
+      }
+      .movi-hold-speed svg {
+        width: 14px;
+        height: 14px;
       }
 
       .movi-title-text {
@@ -8821,7 +9859,7 @@ export class MoviElement extends HTMLElement {
         touch-action: none;
       }
       /* Opt-in via the vrpad attribute. Without it the pad never shows —
-         drag-to-look + wheel-zoom already cover desktop navigation; the pad is
+         drag-to-look already covers desktop navigation; the pad is
          for those who want a YouTube-style continuous-pan compass. */
       :host(.movi-vr360-active[vrpad]) .movi-vr360-pad {
         opacity: 1;
@@ -9152,6 +10190,19 @@ export class MoviElement extends HTMLElement {
           rgba(255, 255, 255, 0.2) 100%
         );
         border-radius: 100px;
+      }
+      /* Boosting above 100% (VLC-style): amber fill flags the boost zone, and
+         a tick at the 50%-of-track unity point marks where "normal" sits. */
+      .movi-volume-slider.movi-volume-boosted {
+        background: linear-gradient(
+          to right,
+          var(--movi-primary) 0%,
+          var(--movi-primary) 50%,
+          var(--movi-volume-boost, #f5a623) 50%,
+          var(--movi-volume-boost, #f5a623) var(--movi-volume-pct, 100%),
+          rgba(255, 255, 255, 0.2) var(--movi-volume-pct, 100%),
+          rgba(255, 255, 255, 0.2) 100%
+        );
         outline: none !important;
         pointer-events: auto !important;
         cursor: pointer;
@@ -9196,7 +10247,7 @@ export class MoviElement extends HTMLElement {
         appearance: none;
         width: 14px;
         height: 14px;
-        background: #fff;
+        background: var(--movi-chrome-fg, #fff);
         border-radius: 50%;
         cursor: pointer;
         margin-top: -5px;
@@ -9221,7 +10272,7 @@ export class MoviElement extends HTMLElement {
       .movi-volume-slider::-moz-range-thumb {
         width: 14px;
         height: 14px;
-        background: #fff;
+        background: var(--movi-chrome-fg, #fff);
         border-radius: 50%;
         cursor: pointer;
         border: none !important;
@@ -9609,7 +10660,7 @@ export class MoviElement extends HTMLElement {
             rgba(255,255,255,0.04) 0% 25%,
             rgba(255,255,255,0.02) 0% 50%
           ),
-          #1a1a1a;
+          var(--movi-surface, #1a1a1a);
         background-size: auto, 16px 16px, auto;
         border: 1px solid rgba(255, 255, 255, 0.08);
       }
@@ -9694,7 +10745,7 @@ export class MoviElement extends HTMLElement {
         height: 18px;
         border-radius: 50%;
         background: var(--movi-primary);
-        border: 3px solid #FFFFFF;
+        border: 3px solid var(--movi-chrome-fg, #FFFFFF);
         margin-top: -6px;
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
         cursor: pointer;
@@ -9718,7 +10769,7 @@ export class MoviElement extends HTMLElement {
         height: 18px;
         border-radius: 50%;
         background: var(--movi-primary);
-        border: 3px solid #FFFFFF;
+        border: 3px solid var(--movi-chrome-fg, #FFFFFF);
         box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
         cursor: pointer;
       }
@@ -10076,7 +11127,7 @@ export class MoviElement extends HTMLElement {
         font-size: 11px;
         font-weight: 800;
         letter-spacing: 0.08em;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         line-height: 1;
         text-transform: uppercase;
       }
@@ -10113,7 +11164,10 @@ export class MoviElement extends HTMLElement {
         border: 1px solid var(--movi-glass-border);
         border-radius: 12px;
         min-width: 140px;
-        max-height: 280px;
+        /* Tall enough for all 8 speeds (0.25x…2x) without scrolling on a normal
+           player; capped to 70vh so a short player still fits — its top rows no
+           longer clip because opening lifts the host clip (movi-menu-overflow). */
+        max-height: min(70vh, 380px);
         overflow-y: auto;
         box-shadow: var(--movi-shadow-lg);
         z-index: 1000;
@@ -10246,7 +11300,7 @@ export class MoviElement extends HTMLElement {
       }
 
       .movi-nerd-stats-close:hover {
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
       }
 
       .movi-nerd-stats-body {
@@ -10433,7 +11487,7 @@ export class MoviElement extends HTMLElement {
       .movi-timeline-generate-btn {
         background: var(--movi-primary);
         border: none;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         font-size: 11px;
         font-weight: 600;
         padding: 5px 12px;
@@ -10464,12 +11518,12 @@ export class MoviElement extends HTMLElement {
       }
 
       .movi-timeline-close:hover {
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
       }
 
       .movi-timeline-strip {
         display: flex;
-        gap: 4px;
+        gap: 8px;
         padding: 10px 14px;
         overflow-x: auto;
         overflow-y: hidden;
@@ -10503,7 +11557,10 @@ export class MoviElement extends HTMLElement {
       .movi-timeline-item:hover,
       .movi-timeline-item.movi-timeline-selected {
         border-color: var(--movi-primary);
-        transform: scale(1.05);
+        /* Keep the pop small enough that an active + adjacent-hovered item
+           don't grow into each other across the 8px gap (scale doesn't
+           reflow neighbours, so an over-large scale visually overlaps). */
+        transform: scale(1.03);
       }
 
       .movi-timeline-item img {
@@ -10530,7 +11587,7 @@ export class MoviElement extends HTMLElement {
         text-align: center;
         font-size: 10px;
         font-weight: 600;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
         padding: 12px 4px 4px;
         font-variant-numeric: tabular-nums;
@@ -10555,7 +11612,7 @@ export class MoviElement extends HTMLElement {
       .movi-timeline-chapter-title {
         font-size: 10px;
         font-weight: 600;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -10637,7 +11694,7 @@ export class MoviElement extends HTMLElement {
       }
 
       .movi-shortcuts-close:hover {
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
       }
 
       .movi-shortcuts-body {
@@ -10727,7 +11784,7 @@ export class MoviElement extends HTMLElement {
         all: unset;
         flex: 1;
         font-size: 13px;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         font-family: inherit;
       }
       .movi-cues-search::placeholder { color: rgba(255, 255, 255, 0.4); }
@@ -10742,7 +11799,7 @@ export class MoviElement extends HTMLElement {
         padding: 0 6px;
         transition: color 0.15s;
       }
-      .movi-cues-close:hover { color: #fff; }
+      .movi-cues-close:hover { color: var(--movi-chrome-fg, #fff); }
       .movi-cues-meta {
         padding: 6px 18px;
         font-size: 11px;
@@ -10910,15 +11967,28 @@ export class MoviElement extends HTMLElement {
         transform: scale(0.97);
       }
 
-      .movi-resume-btn.movi-resume-focused {
-        outline: 2px solid var(--movi-primary);
-        outline-offset: 2px;
-        transform: scale(1.05);
+      /* The selection ring is a KEYBOARD affordance — the arrow keys move it
+         between Resume/Cancel. Touch has no arrow-key nav (you just tap), so
+         the auto-focused ring is meaningless noise there; only draw it on
+         mouse/hover devices. */
+      @media (hover: hover) and (pointer: fine) {
+        .movi-resume-btn.movi-resume-focused {
+          /* This stylesheet globally nukes outline (the universal reset at
+             line ~8515 sets outline none with !important) and box-shadow on
+             :focus, so the selection ring MUST be a box-shadow WITH !important
+             to survive — a plain outline never renders. White ring (NOT
+             --movi-primary — that's the Resume button's own fill) + dark halo
+             reads on both the primary and grey buttons. The two-class selector
+             out-specifies the reset among !important rules. */
+          box-shadow: 0 0 0 3px #fff, 0 0 0 6px rgba(0, 0, 0, 0.5) !important;
+          transform: scale(1.06);
+          transition: transform 0.1s, box-shadow 0.1s;
+        }
       }
 
       .movi-resume-yes {
         background: var(--movi-primary);
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
       }
 
       .movi-resume-no {
@@ -10940,6 +12010,31 @@ export class MoviElement extends HTMLElement {
         .movi-resume-btn {
           padding: 6px 12px;
           font-size: 11px;
+        }
+      }
+
+      /* Very small players (≤400px): the horizontal pill (text + two buttons)
+         is wider than the player and, being right-anchored + nowrap, clipped
+         its left edge ("...ume from"). Span the player instead and stack the
+         buttons under the text. left/right (not transform) so the slide-up
+         animation's translateY isn't overridden. */
+      @container movi-host (max-width: 400px) {
+        .movi-resume-dialog {
+          left: 16px;
+          right: 16px;
+          flex-direction: column;
+          align-items: stretch;
+          gap: 10px;
+          text-align: center;
+        }
+        .movi-resume-text {
+          white-space: normal;
+        }
+        .movi-resume-buttons {
+          justify-content: center;
+        }
+        .movi-resume-btn {
+          flex: 1;
         }
       }
 
@@ -11086,9 +12181,11 @@ export class MoviElement extends HTMLElement {
         }
 
         .movi-progress-container {
-          padding: 6px 0 2px;
+          /* Nudge the seek bar down a little on compact players so it isn't
+             hugging the video edge. */
+          padding: 14px 0 2px;
         }
-        
+
         .movi-progress-bar {
           height: 6px;
         }
@@ -11133,21 +12230,45 @@ export class MoviElement extends HTMLElement {
         }
 
         .movi-controls-right.expanded .movi-mobile-expandable {
-          width: auto;
           opacity: 1;
           pointer-events: auto;
           gap: 4px;
           margin-right: 4px;
-          overflow: visible; /* Prevent clipping of hover backgrounds */
-          flex: 1;
-          justify-content: flex-end;
+          /* When expanded on a narrow player the row can hold more buttons than
+             fit — let them scroll horizontally instead of clipping or wrapping.
+             overflow-y stays hidden (only the in-flow buttons are clipped
+             vertically; the pop-up menus are positioned against the controls
+             bar, an ancestor, so they're not clipped by this scroll box).
+             flex:0 1 auto + justify-content:flex-start is deliberate: when the
+             buttons fit, the box is content-sized and the PARENT's flex-end
+             packs it right against the more (>) button (no gap); when they
+             overflow, min-width:0 lets it shrink and scroll, and flex-start
+             keeps the LEADING icons reachable — flex-end would strand the
+             overflowed left-side icons off-screen with no way to scroll to them.
+             width:auto is REQUIRED: flex-basis:auto reads the width, and the
+             collapsed base rule sets width:0 — without this the expandable stays
+             0-wide and no icons show when expanded. */
+          width: auto;
+          flex: 0 1 auto;
+          min-width: 0;
+          flex-wrap: nowrap;
+          justify-content: flex-start;
+          overflow-x: auto;
+          overflow-y: hidden;
+          scrollbar-width: none; /* Firefox */
+          -webkit-overflow-scrolling: touch;
+        }
+        .movi-controls-right.expanded .movi-mobile-expandable::-webkit-scrollbar {
+          display: none; /* WebKit */
         }
 
-        /* Reset margins and restore dimensions */
+        /* Reset margins and restore dimensions; keep buttons from shrinking so
+           the icons don't squash — they scroll instead. */
         .movi-controls-right.expanded .movi-mobile-expandable > * {
           margin: 0 !important;
           width: auto;
           height: auto;
+          flex: 0 0 auto;
         }
 
         /* Hide individual buttons by default on mobile */
@@ -11187,6 +12308,11 @@ export class MoviElement extends HTMLElement {
         /* Alternative for older browsers: shrink left instead of hiding if :has not supported */
         .movi-controls-right.expanded {
            flex: 1;
+           /* min-width:0 lets this shrink below its content so the constraint
+              reaches the expandable, which then scrolls. Without it the default
+              min-width:auto keeps the whole cluster at content width and it
+              overflows the player's left edge instead of scrolling. */
+           min-width: 0;
            justify-content: flex-end;
         }
         
@@ -11217,17 +12343,13 @@ export class MoviElement extends HTMLElement {
           transform-origin: bottom center !important;
           width: 90% !important;
           max-width: 300px !important;
-          /* Cap against the PLAYER's own height (set by JS on connect/
-             resize), not the viewport — an embedded small player on a
-             1400px desktop window had 30vw=420px max-height but only
-             ~380px of player height, so the menu opened above the
-             controls bar and got chopped off the top by :host's
-             contain:paint. The reserve (controls bar ~60px + top
-             breathing room ~60px) keeps the menu visually inside the
-             player instead of butting against its top edge. The 70vh
-             fallback matches the variable's default elsewhere;
-             max(120px,…) keeps one visible row on tiny players. */
-          max-height: max(120px, calc(var(--movi-player-height, 70vh) - 120px)) !important;
+          /* Cap to the viewport, not the player. Opening a dropdown now lifts
+             the host's paint/overflow clip (movi-menu-overflow), so a tall menu
+             on a SHORT player extends past the player's top edge into the page
+             instead of being chopped there — which used to hide the first rows
+             (e.g. the 0.25x speed option). 70vh keeps it within the screen and
+             lets it scroll only when the list itself is genuinely huge. */
+          max-height: min(70vh, calc(100vh - 80px)) !important;
           overflow-y: auto !important;
           z-index: 2000 !important;
           -webkit-overflow-scrolling: touch !important;
@@ -11342,6 +12464,79 @@ export class MoviElement extends HTMLElement {
         }
         .movi-controls-left {
           gap: 4px;
+        }
+      }
+
+      /* Very small / compact players (≤400px). Tighten every gap, shrink the
+         buttons and pull in the bar padding so the always-visible collapsed
+         row (play · volume · time · more · fullscreen) fits without clipping —
+         the rest of the icons live in the horizontally-scrollable expandable. */
+      @container movi-host (max-width: 400px) {
+        :host {
+          --movi-btn-size: 36px;
+        }
+        .movi-controls-bar {
+          padding: 2px 8px 8px;
+        }
+        .movi-buttons-row {
+          gap: 4px;
+        }
+        .movi-controls-left,
+        .movi-controls-right {
+          gap: 2px;
+        }
+        .movi-btn {
+          padding: 7px;
+        }
+        .movi-btn svg {
+          width: 20px;
+          height: 20px;
+        }
+        .movi-time {
+          font-size: 11px;
+        }
+        .movi-progress-container {
+          padding: 14px 0 6px;
+        }
+      }
+
+      /* Below ~290px the dropdown / context menus need a smaller type scale so
+         rows aren't cramped or clipped on a tiny player. */
+      @container movi-host (max-width: 289px) {
+        .movi-speed-item {
+          font-size: 10px;
+          padding: 6px 10px;
+        }
+        .movi-audio-track-item,
+        .movi-subtitle-track-item {
+          font-size: 10px;
+          padding: 5px 8px;
+          gap: 6px;
+        }
+        .movi-track-item-icon {
+          width: 13px;
+          height: 13px;
+        }
+        .movi-audio-track-info,
+        .movi-subtitle-track-info {
+          font-size: 8px;
+          padding: 1px 5px;
+        }
+        .movi-track-menu-header {
+          font-size: 9px;
+          padding: 7px 10px 6px;
+        }
+        .movi-track-menu-footer {
+          font-size: 8px;
+        }
+        .movi-context-menu-item {
+          font-size: 10px;
+          padding: 7px 10px;
+        }
+        .movi-context-menu-icon svg,
+        .movi-context-menu-item svg {
+          width: 15px;
+          height: 15px;
         }
       }
 
@@ -11603,6 +12798,19 @@ export class MoviElement extends HTMLElement {
          block so it survives the !important cascade. */
 
       /* Subtitle overlay - HTML element for better performance */
+      /* Off-screen live region for screen-reader caption announcements. */
+      .movi-caption-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        clip-path: inset(50%);
+        white-space: nowrap;
+      }
       .movi-subtitle-overlay {
         position: absolute;
         bottom: 12%;
@@ -12038,7 +13246,7 @@ export class MoviElement extends HTMLElement {
         letter-spacing: 0.4px;
         text-transform: uppercase;
         background: var(--movi-primary);
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         pointer-events: none;
       }
 
@@ -12124,7 +13332,7 @@ export class MoviElement extends HTMLElement {
         max-height: 200px;
         object-fit: contain;
         margin-bottom: 4px;
-        border: 1px solid #333;
+        border: 1px solid var(--movi-border-color, #333);
         border-radius: 2px;
         pointer-events: none;
       }
@@ -12136,7 +13344,7 @@ export class MoviElement extends HTMLElement {
         display: none;
         font-size: 11px;
         font-weight: 600;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         text-align: center;
         max-width: 180px;
         overflow: hidden;
@@ -12225,7 +13433,7 @@ export class MoviElement extends HTMLElement {
         display: flex;
         align-items: center;
         justify-content: center;
-        color: #FFFFFF;
+        color: var(--movi-chrome-fg, #FFFFFF);
         /* Subtle primary halo around the icon — keeps the OSD
            visually anchored to the brand without painting the bg. */
         filter: drop-shadow(0 0 6px color-mix(in srgb, var(--movi-primary) 45%, transparent));
@@ -12239,7 +13447,7 @@ export class MoviElement extends HTMLElement {
       .movi-osd-text {
         font-size: 14px;
         font-weight: 600;
-        color: #FFFFFF;
+        color: var(--movi-chrome-fg, #FFFFFF);
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
         letter-spacing: 0.01em;
         line-height: 1.2;
@@ -12312,7 +13520,7 @@ export class MoviElement extends HTMLElement {
         font-weight: 700;
         margin: 0 0 10px 0;
         letter-spacing: -0.02em;
-        background: linear-gradient(to bottom, #fff, #bbb);
+        background: linear-gradient(to bottom, var(--movi-chrome-fg, #fff), #bbb);
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         text-align: center;
@@ -12343,7 +13551,7 @@ export class MoviElement extends HTMLElement {
         background: rgba(255, 255, 255, 0.15);
         border: 1px solid rgba(255, 255, 255, 0.2);
         border-radius: 8px;
-        color: #fff;
+        color: var(--movi-chrome-fg, #fff);
         font-size: 14px;
         font-weight: 500;
         cursor: pointer;
@@ -12391,6 +13599,37 @@ export class MoviElement extends HTMLElement {
          :has()/:host(:not(...)), which are flaky in Safari/Firefox. */
       :host(.movi-bar-collapsed) .movi-empty-state {
         padding-bottom: 40px;
+      }
+
+      /* A bare player (no controls attribute) is a headless, chrome-less
+         surface — don't show the "No Video / Add a source" placeholder or the
+         loading spinner there. !important beats the inline display:flex the JS
+         sets on these indicators. */
+      :host(.movi-no-controls) .movi-empty-state,
+      :host(.movi-no-controls) .movi-loading-indicator {
+        display: none !important;
+      }
+
+      /* Bare player (no controls attribute): a display-only surface — disable
+         ALL mouse interaction (click-to-play, double-click fullscreen, the
+         right-click menu, look-around drag). */
+      :host(.movi-no-controls) {
+        pointer-events: none !important;
+      }
+
+      /* An audio strip with no controls is a chrome-less bar with nothing to
+         show or operate — hide it entirely. Audio keeps playing (Web Audio is
+         independent of the host's display). */
+      :host(.movi-audio-strip.movi-no-controls) {
+        display: none !important;
+      }
+
+      /* Opt-out: the noerrorscreen attribute suppresses the built-in error
+         overlays ("Format Unsupported", "Browser not supported", codec/network
+         errors) so an embedding app can render its own error UI. The error
+         event + state still fire — only the default screen is hidden. */
+      :host([noerrorscreen]) .movi-broken-indicator {
+        display: none !important;
       }
 
       /* Short / narrow players: shrink the placeholder so it fits above
@@ -12495,6 +13734,30 @@ export class MoviElement extends HTMLElement {
 
         .movi-context-menu.movi-context-menu-mobile.visible {
           transform: translateX(0) !important;
+        }
+
+        /* STRIP MODE ONLY: the host is a ~78px bar with overflow:visible, so the
+           default translateX drawer slides OUT past the player's right edge and
+           the closed drawer visibly escapes the boundary. Here we pin it inside
+           the player and FADE in place (no horizontal slide) + truly hide when
+           closed. Non-strip (full-size) players keep the normal slide drawer. */
+        :host(.movi-audio-strip) .movi-context-menu.movi-context-menu-mobile {
+          bottom: 0 !important;
+          height: auto !important;
+          max-width: min(350px, 100%) !important;
+          margin: 0 !important;
+          transform: none !important;
+          opacity: 0 !important;
+          visibility: hidden !important;
+          pointer-events: none !important;
+          transition: opacity 0.2s ease, visibility 0s linear 0.2s !important;
+        }
+        :host(.movi-audio-strip) .movi-context-menu.movi-context-menu-mobile.visible {
+          transform: none !important;
+          opacity: 1 !important;
+          visibility: visible !important;
+          pointer-events: auto !important;
+          transition: opacity 0.2s ease, visibility 0s linear 0s !important;
         }
 
         .movi-context-menu-item {
@@ -12633,6 +13896,13 @@ export class MoviElement extends HTMLElement {
         }
         .movi-seek-thumbnail {
             transform: translateX(-50%) scale(0.85);
+            /* Scale from the bottom edge, not the centre: the box is bottom-
+               anchored (bottom:40px) and grows upward when the thumbnail image
+               appears above the time. With the default centre origin a taller
+               box shrinks toward its middle, lifting its bottom edge — so the
+               time text jumps up the moment the thumb arrives. Anchoring the
+               scale origin at the bottom keeps the time fixed either way. */
+            transform-origin: bottom center;
             bottom: 40px;
         }
         
@@ -12724,6 +13994,20 @@ export class MoviElement extends HTMLElement {
         color: #11142d;
         text-shadow: none;
       }
+      /* Strip mode zeroes the title bar's padding, but on touch the settings
+         gear is shown pinned top-right (38px @ right:14px). Reserve room so the
+         title truncates before it instead of running underneath. Only on
+         coarse pointers — the gear is hidden on mouse/hover devices. */
+      @media (pointer: coarse) {
+        :host(.movi-audio-strip) .movi-title-bar {
+          padding-right: 48px !important;
+        }
+      }
+      /* The gear button otherwise centres a few px BELOW the small strip title
+         text — nudge it up so their icon/text vertical centres line up. */
+      :host(.movi-audio-strip) .movi-gear-btn {
+        top: 1px !important;
+      }
       /* Push the control row below the title band — only when titled. */
       :host(.movi-audio-strip.movi-has-title) .movi-controls-container,
       :host(.movi-audio-strip.movi-has-title) .movi-controls-container.movi-controls-hidden {
@@ -12764,7 +14048,7 @@ export class MoviElement extends HTMLElement {
         min-height: 56px !important;
         height: 56px !important;
         max-height: 56px !important;
-        background: #0f0f0f;
+        background: var(--movi-surface, #0f0f0f);
         border-radius: 6px;
         /* "overflow: visible" is intentional — popups (speed menu,
            audio-track menu, right-click context menu) anchor inside the
@@ -13278,6 +14562,10 @@ export class MoviElement extends HTMLElement {
     this._src = srcAttr || null;
     this._autoplay = this.hasAttribute("autoplay");
     this._controls = this.hasAttribute("controls");
+    // Mirror the controls attr as a host class so CSS can suppress chrome (e.g.
+    // the "No Video" placeholder) on a bare, controls-less player — done with a
+    // class rather than :host(:not([controls])), which is flaky in Safari/FF.
+    this.classList.toggle("movi-no-controls", !this._controls);
     this._loop = this.hasAttribute("loop");
     this._muted = this.hasAttribute("muted");
     this._playsinline = this.hasAttribute("playsinline");
@@ -13418,6 +14706,7 @@ export class MoviElement extends HTMLElement {
     if (typeof ResizeObserver !== "undefined") {
       const resizeObserver = new ResizeObserver(() => {
         publishPlayerWidth();
+        this.syncTinyLayout();
         this.updateCanvasSize();
       });
       resizeObserver.observe(this);
@@ -13425,9 +14714,12 @@ export class MoviElement extends HTMLElement {
       // Fallback for browsers without ResizeObserver
       window.addEventListener("resize", () => {
         publishPlayerWidth();
+        this.syncTinyLayout();
         this.updateCanvasSize();
       });
     }
+    // Run once now so an already-tiny player folds fullscreen away on load.
+    this.syncTinyLayout();
 
     // Initial visibility check
     this.updateControlsVisibility();
@@ -13643,6 +14935,15 @@ export class MoviElement extends HTMLElement {
   }
 
   disconnectedCallback() {
+    // If removed while in the iOS pseudo-fullscreen fallback, restore the page
+    // scroll we locked and drop the resize listeners (setPseudoFullscreen(false)
+    // won't run otherwise).
+    if (this._pseudoFullscreen) {
+      document.body.style.overflow = this._prevBodyOverflow;
+      window.removeEventListener("resize", this._onPseudoFsResize);
+      window.removeEventListener("orientationchange", this._onPseudoFsResize);
+      this._pseudoFullscreen = false;
+    }
     // Remove WebGL context listeners
     this.canvas.removeEventListener("webglcontextlost", this.handleContextLost);
     this.canvas.removeEventListener(
@@ -13692,6 +14993,10 @@ export class MoviElement extends HTMLElement {
     switch (name) {
       case "thumb":
         this._thumb = newValue !== null;
+        // Sync an already-created player so toggling `thumb` at runtime — or
+        // declaring it after `src` (whose callback builds the player first) —
+        // enables/disables scrub previews live instead of silently no-opping.
+        this.player?.setPreviewsEnabled(this._thumb && !this._audioOnly);
         break;
       case "hdr":
         this.hdr = newValue !== null;
@@ -13871,6 +15176,7 @@ export class MoviElement extends HTMLElement {
         break;
       case "controls":
         this._controls = newValue !== null;
+        this.classList.toggle("movi-no-controls", !this._controls);
         this.updateControlsVisibility();
         this.updateUnmuteOverlay();
         break;
@@ -14066,6 +15372,13 @@ export class MoviElement extends HTMLElement {
     if (document.fullscreenElement === this) {
       width = window.innerWidth;
       height = window.innerHeight;
+    } else if (this._pseudoFullscreen) {
+      // The host is CSS-sized (and, when forced-landscape, rotated) to fill the
+      // viewport. Use its LAYOUT box (clientWidth/Height) — unlike
+      // getBoundingClientRect it isn't affected by the rotate transform, so the
+      // canvas buffer matches the un-rotated element the transform then turns.
+      width = this.clientWidth;
+      height = this.clientHeight;
     } else {
       const rect = this.getBoundingClientRect();
       width = widthAttr ? parseInt(widthAttr, 10) : rect.width;
@@ -14258,14 +15571,28 @@ export class MoviElement extends HTMLElement {
     const stripMode =
       audioMode && !bitmap && !coverArtPending && !posterCoverPending;
     this.classList.toggle("movi-audio-mode", audioMode);
-    const wasStrip = this.classList.contains("movi-audio-strip");
     this.classList.toggle("movi-audio-strip", stripMode);
-    if (stripMode !== wasStrip) {
-      // Tell the embedding page so it can collapse its own wrapper. The
-      // host shrinks to 56px via :host CSS, but a parent .player-stage
-      // with aspect-ratio: 16/9 (or any fixed height) would still reserve
-      // its old box and leave a black gap underneath. Consumers listen on
-      // this event and adjust their layout — see index.html.
+    // In strip mode the gear is part of the always-visible bar, so reveal it the
+    // moment the layout is applied (on load) rather than waiting for the first
+    // touch/showControls. hideControls already keeps it visible in strip mode.
+    if (stripMode && this.hasMediaSource()) {
+      this.shadowRoot
+        ?.querySelector(".movi-gear-btn")
+        ?.classList.add("movi-gear-visible");
+    }
+    // Notify the embedding page when the strip state changes vs what we LAST
+    // TOLD it — not vs the current class. load() clears movi-audio-strip on
+    // every source change, so comparing to the class made a strip→non-strip
+    // switch (e.g. a no-cover track followed by an album-art track) look
+    // unchanged: the event never fired and the page's wrapper stayed collapsed
+    // at 56/78px, squashing the album art into a black bar. _lastStripDispatched
+    // survives load(), so the transition is detected and the wrapper reflows.
+    if (stripMode !== this._lastStripDispatched) {
+      this._lastStripDispatched = stripMode;
+      // Tell the embedding page so it can collapse/restore its own wrapper. The
+      // host shrinks to 56px via :host CSS, but a parent .player-stage with
+      // aspect-ratio: 16/9 (or any fixed height) would still reserve its old
+      // box and leave a black gap. Consumers listen on this — see index.html.
       this.dispatchEvent(
         new CustomEvent("audiostripchange", {
           detail: { strip: stripMode },
@@ -14577,6 +15904,8 @@ export class MoviElement extends HTMLElement {
    * Automatically create and initialize MoviPlayer
    */
   private async initializePlayer(): Promise<void> {
+    // QoE: begin a new analytics session and start the startup timer.
+    this._qoe.sessionStart(typeof this._src === "string" ? this._src : "");
     // Re-run the security-header check before any FFmpeg init. load() resets
     // _isUnsupported on every source change, which would otherwise let a
     // non-isolated context (e.g. embed iframe inside a third-party page that
@@ -14650,6 +15979,15 @@ export class MoviElement extends HTMLElement {
       if (this._headers && source && source.type === "url") {
         source.headers = this._headers;
       }
+
+      // Read `thumb` straight from the DOM here rather than trusting the
+      // cached `_thumb` field. The `src` attribute's own attributeChangedCallback
+      // fires load() during element upgrade *before* the `thumb` callback (and
+      // before connectedCallback) has populated `_thumb` — so with the usual
+      // `<movi-player src=… thumb>` ordering, `_thumb` is still false at this
+      // point and previews would silently never enable. hasAttribute reads the
+      // live parsed attribute, which is already present, so order stops mattering.
+      this._thumb = this.hasAttribute("thumb");
 
       // Create MoviPlayer instance
       // Configure MoviPlayer options
@@ -14916,6 +16254,8 @@ export class MoviElement extends HTMLElement {
           this.player.once("seeked", () => {
             this.player?.resetClockToStartForPoster();
             this._posterSeekActive = false;
+            // Poster frame is now on the canvas — snapshot it for lock-screen art.
+            this.captureMediaSessionArtwork();
           });
           this.player
             .seek(posterTime, { suppressSpinner: true })
@@ -14923,6 +16263,9 @@ export class MoviElement extends HTMLElement {
               this._posterSeekActive = false;
             });
         } else {
+          // Frame 0 lands on the canvas when "seeked" fires (the seek promise
+          // resolves earlier, before paint) — snapshot it there for artwork.
+          this.player.once("seeked", () => this.captureMediaSessionArtwork());
           this.player.seek(0, { suppressSpinner: true }).catch(() => {});
         }
       }
@@ -15023,6 +16366,9 @@ export class MoviElement extends HTMLElement {
     const audioTrackChangeHandler = () => {
       this.updateAudioTrackMenu();
       this.updateSubtitleTrackMenu();
+      // Switching between muxed (AudioContext, boostable) and native audio
+      // changes the volume ceiling — re-cap the slider.
+      this.updateVolumeCap();
       this.dispatchEvent(new Event("audiotrackchange"));
     };
     this.player.trackManager.on("audioTrackChange", audioTrackChangeHandler);
@@ -15072,6 +16418,10 @@ export class MoviElement extends HTMLElement {
     // Forward player events to element
     const stateChangeHandler = (state: PlayerState) => {
       Logger.info(TAG, `stateChange: ${state}`);
+      // QoE: track stalls. Entering "buffering" starts a rebuffer timer; any
+      // other state ends it (the first stall, before first frame, is startup).
+      if (state === "buffering") this._qoe.bufferingStartNow();
+      else this._qoe.bufferingEndNow();
       // A seek requested before the player was ready was held — apply it now
       // that we've reached a seekable state (fixes e.g. a PiP/handoff seek that
       // arrives while the source is still loading).
@@ -15143,11 +16493,13 @@ export class MoviElement extends HTMLElement {
           this.hideControls();
           this.updatePlayPauseIcon();
           if (this._ambientMode) this._ambientSampleInterval = 200;
-          if ("mediaSession" in navigator && this._title) {
-            navigator.mediaSession.metadata = new MediaMetadata({
-              title: this._title,
-            });
-          }
+          this.updateMediaSession();
+          this.updateMediaSessionPosition();
+          this.captureMediaSessionArtwork();
+          this.startStutterMonitor();
+          this._qoe.firstFrame();
+          this._qoe.playing();
+          this.startQoeHeartbeat();
           return;
         }
 
@@ -15187,14 +16539,22 @@ export class MoviElement extends HTMLElement {
         if (this._ambientMode) {
           this._ambientSampleInterval = 200;
         }
-        // Update Media Session metadata with clean title
-        if ("mediaSession" in navigator && this._title) {
-          navigator.mediaSession.metadata = new MediaMetadata({
-            title: this._title,
-          });
-        }
+        // Update Media Session metadata + playing state + scrubber
+        this.updateMediaSession();
+        this.updateMediaSessionPosition();
+        this.captureMediaSessionArtwork();
+        // Watch for decode-can't-keep-up stutter to hint "play at 1x".
+        this.startStutterMonitor();
+        // QoE: first "playing" marks the first frame (startup time).
+        this._qoe.firstFrame();
+        this._qoe.playing();
+        this.startQoeHeartbeat();
       } else if (state === "paused") {
         this.dispatchEvent(new Event("pause"));
+        this.updateMediaSession();
+        this.stopStutterMonitor();
+        this._qoe.paused();
+        this.stopQoeHeartbeat();
         // Don't auto-surface the bar on pause anymore — the centre
         // play button already comes back (via updatePlayPauseIcon's
         // paused branch) and tells the user playback is paused. The
@@ -15212,6 +16572,10 @@ export class MoviElement extends HTMLElement {
         if (!this._loop) this.showControls();
         // Clear resume position when video ends (start fresh next time)
         if (this._resume) this.clearResumePosition();
+        this.updateMediaSession();
+        this.stopStutterMonitor();
+        this._qoe.ended();
+        this.stopQoeHeartbeat();
       }
     };
     this.player.on("stateChange", stateChangeHandler);
@@ -15224,6 +16588,9 @@ export class MoviElement extends HTMLElement {
       this.updateLoadingIndicator(this.player?.getState() || "idle");
       this.updateControlsState();
       this.updatePlayPauseIcon();
+      // Cap the volume slider at 100% for native-audio sources (streams /
+      // native split-source), 200% otherwise, now that the audio path is known.
+      this.updateVolumeCap();
       // Tracks are now finalised; pick the right visual mode (video
       // surface / cover-art overlay / audio strip). Cover-art extraction
       // is async, so the strip may flip OFF later when the coverart
@@ -15235,6 +16602,10 @@ export class MoviElement extends HTMLElement {
       // Backstop for the "linearmode" event in case it fired before this
       // listener was wired (detection happens during the demux open).
       if (this.player?.isLinearPlayback?.()) this.enterLinearMode();
+      // Wire OS lock-screen / hardware-key controls and seed metadata now that
+      // tracks (and thus title/duration) are finalised.
+      this.updateMediaSession();
+      this.updateMediaSessionPosition();
       this.dispatchEvent(new Event("loadeddata"));
     };
     this.player.on("loadEnd", loadEndHandler);
@@ -15276,6 +16647,15 @@ export class MoviElement extends HTMLElement {
     const timeUpdateHandler = (time: number) => {
       this.dispatchEvent(new CustomEvent("timeupdate", { detail: time }));
       this.updateLiveState();
+      // Keep the seek slider's screen-reader ARIA current even while the visual
+      // chrome is auto-hidden (updateTimeDisplay is gated on visible controls).
+      this.updateSeekAria();
+      // Refresh the OS scrubber at ~1s granularity, or immediately on a jump
+      // (seek) so the lock-screen position doesn't lag.
+      if (Math.abs(time - this._mediaSessionLastPos) >= 1) {
+        this._mediaSessionLastPos = time;
+        this.updateMediaSessionPosition();
+      }
     };
     this.player.on("timeUpdate", timeUpdateHandler);
     this.eventHandlers.set("timeUpdate", () =>
@@ -15291,6 +16671,10 @@ export class MoviElement extends HTMLElement {
     );
 
     const errorHandler = (error: unknown) => {
+      this._qoe.error(
+        error instanceof Error ? error.message : String(error),
+        true,
+      );
       this.dispatchEvent(new CustomEvent("error", { detail: error }));
       // Always log the raw error before the message gets prettified for
       // the overlay — without this, "State: ... -> error" appears in
@@ -15364,6 +16748,9 @@ export class MoviElement extends HTMLElement {
       // not close() it. bubbles/composed so it escapes the shadow root.
       // Only forward real bitmaps; the null signal is internal.
       if (bitmap) {
+        // Refresh the OS lock-screen artwork with the real album art now that
+        // it's decoded (metadata was seeded earlier with no / a fallback image).
+        this.setMediaSessionArtworkFromBitmap(bitmap);
         this.dispatchEvent(
           new CustomEvent("coverart", {
             detail: { bitmap, width: bitmap.width, height: bitmap.height },
@@ -15473,6 +16860,221 @@ export class MoviElement extends HTMLElement {
   }
 
   /**
+   * Register OS Media Session action handlers once. These surface play/pause,
+   * skip-back/forward and scrub controls on the lock screen, notification
+   * shade, media-key hardware (headset / keyboard) and Bluetooth remotes, and
+   * route them back into the player. Registered once (guarded); the handlers
+   * close over `this` and read `this.player` lazily, so they keep working
+   * across source swaps that recreate the internal player.
+   */
+  private setupMediaSession(): void {
+    if (this._mediaSessionReady) return;
+    if (!("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    const set = (
+      action: MediaSessionAction,
+      handler: MediaSessionActionHandler | null,
+    ) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch {
+        // Chromium throws for actions it doesn't support (e.g. older builds);
+        // ignore so the supported handlers still register.
+      }
+    };
+    set("play", () => {
+      this.play().catch(() => {});
+    });
+    set("pause", () => {
+      this.pause();
+    });
+    set("stop", () => {
+      this.pause();
+    });
+    set("seekbackward", (details) => {
+      this.performRelativeSeek("left", details?.seekOffset || 10);
+    });
+    set("seekforward", (details) => {
+      this.performRelativeSeek("right", details?.seekOffset || 10);
+    });
+    set("seekto", (details) => {
+      if (!this.player || typeof details?.seekTime !== "number") return;
+      this.player.seek(details.seekTime).catch(() => {});
+    });
+    this._mediaSessionReady = true;
+  }
+
+  /**
+   * Refresh the lock-screen metadata (title + poster artwork) and the
+   * playing/paused indicator. Cheap to call on every state/load change.
+   */
+  private updateMediaSession(): void {
+    if (!("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    this.setupMediaSession();
+    if (this._title) {
+      const art =
+        this._poster ||
+        this._posterCoverUrl ||
+        this._generatedPosterUrl ||
+        this._mediaSessionArtworkUrl;
+      const artwork = art
+        ? [{ src: art, sizes: "512x512", type: this.artworkMime(art) }]
+        : undefined;
+      try {
+        ms.metadata = new MediaMetadata({ title: this._title, artwork });
+      } catch {
+        // Some engines reject artwork with an unfetchable src; fall back to
+        // a title-only metadata so the OS chrome still shows something.
+        ms.metadata = new MediaMetadata({ title: this._title });
+      }
+    }
+    const state = this.player?.getState();
+    ms.playbackState =
+      state === "playing" ? "playing" : state === "paused" ? "paused" : "none";
+  }
+
+  /**
+   * Capture the current decoded frame off the WebGL canvas as a data: URL for
+   * use as OS lock-screen artwork. A source with no explicit `poster` paints
+   * its poster/first frame straight onto the canvas (via the postertime /
+   * frame-0 seek) and never turns it into a URL — this is how that same still
+   * becomes the lock-screen thumbnail. Skipped when an explicit poster/cover
+   * URL already wins the artwork chain, or once a snapshot is already stored.
+   * The canvas uses preserveDrawingBuffer, so toDataURL returns the real frame.
+   * Cheap one-shot (mirrors the proven _lastFrameSnapshot capture) and only
+   * runs at moments a real frame is guaranteed on-canvas (poster seek / play).
+   */
+  private captureMediaSessionArtwork(attempt = 0): void {
+    if (!("mediaSession" in navigator)) return;
+    if (this._poster || this._posterCoverUrl) return; // explicit art wins
+    if (this._mediaSessionArtworkUrl) return; // already captured
+    // The poster/first frame is decoded by the time "seeked" fires, but the
+    // renderer paints it on a later rAF — capturing synchronously grabs the
+    // still-blank GL buffer (a black thumbnail). Wait, on rAF, until a real
+    // (non-uniform) frame has actually landed, then snapshot it. Bounded so a
+    // genuinely dark/audio-only canvas can't spin forever; "playing" re-arms it.
+    if (this.isCanvasBlank()) {
+      if (attempt < 30) {
+        requestAnimationFrame(() => this.captureMediaSessionArtwork(attempt + 1));
+      }
+      return;
+    }
+    try {
+      const dataUrl = this.canvas?.toDataURL("image/jpeg", 0.85);
+      if (dataUrl && dataUrl.length > 512) {
+        this._mediaSessionArtworkUrl = dataUrl;
+        this.updateMediaSession();
+      }
+    } catch {
+      // Tainted / lost GL context — leave artwork empty rather than throw.
+    }
+  }
+
+  /**
+   * Cheap synchronous test for whether the display canvas is still blank/black
+   * (renderer hasn't painted a real frame yet). Downscales the WebGL canvas to
+   * 16×16 on a throwaway 2D context and checks luminance spread — a near-flat
+   * result means no frame content. Used to defer artwork capture until a real
+   * frame lands. Returns true (treat as blank) on any failure, so capture just
+   * retries rather than storing garbage.
+   */
+  private isCanvasBlank(): boolean {
+    const c = this.canvas;
+    if (!c || !c.width || !c.height) return true;
+    try {
+      const small = document.createElement("canvas");
+      small.width = 16;
+      small.height = 16;
+      const ctx = small.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return false; // can't test — assume drawable, let capture proceed
+      ctx.drawImage(c, 0, 0, 16, 16);
+      const { data } = ctx.getImageData(0, 0, 16, 16);
+      let min = 255;
+      let max = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = (data[i] + data[i + 1] + data[i + 2]) / 3;
+        if (lum < min) min = lum;
+        if (lum > max) max = lum;
+      }
+      return max - min < 6; // near-uniform => blank / not yet painted
+    } catch {
+      return true; // treat failures as blank → capture retries, never throws
+    }
+  }
+
+  /**
+   * Use an extracted cover-art / thumbnail bitmap as the OS lock-screen artwork.
+   * The player surfaces embedded album art (and other thumbnails) asynchronously
+   * — after the initial metadata is seeded — so this refreshes the Media Session
+   * once it lands, instead of the lock screen being stuck with no image. The
+   * bitmap is rasterised to a bounded (≤512px) data: URL. Real art is
+   * authoritative, so it overwrites any earlier canvas-snapshot fallback; an
+   * explicit `poster`/cover URL still wins the chain in updateMediaSession().
+   */
+  private setMediaSessionArtworkFromBitmap(bitmap: ImageBitmap): void {
+    if (!("mediaSession" in navigator)) return;
+    if (!bitmap || !bitmap.width || !bitmap.height) return;
+    try {
+      const scale = Math.min(1, 512 / Math.max(bitmap.width, bitmap.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      if (dataUrl && dataUrl.length > 512) {
+        this._mediaSessionArtworkUrl = dataUrl;
+        this.updateMediaSession();
+      }
+    } catch {
+      // Tainted / decode failure — leave any existing artwork untouched.
+    }
+  }
+
+  /** Best-effort MIME guess for poster artwork from its URL/extension. */
+  private artworkMime(url: string): string {
+    if (url.startsWith("data:")) {
+      const m = url.slice(5, url.indexOf(";"));
+      return m || "image/png";
+    }
+    const ext = url.split("?")[0].split(".").pop()?.toLowerCase();
+    if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+    if (ext === "webp") return "image/webp";
+    if (ext === "gif") return "image/gif";
+    return "image/png";
+  }
+
+  /**
+   * Push the current playhead / duration / rate into the OS scrubber. Guarded
+   * against live streams (Infinity), un-loaded state (NaN/0) and out-of-range
+   * positions, which would otherwise make setPositionState throw.
+   */
+  private updateMediaSessionPosition(): void {
+    if (!("mediaSession" in navigator)) return;
+    const ms = navigator.mediaSession;
+    if (typeof ms.setPositionState !== "function") return;
+    const duration = this.duration;
+    const rate = this.player?.getPlaybackRate?.() || 1;
+    try {
+      if (Number.isFinite(duration) && duration > 0) {
+        const position = Math.min(Math.max(this.currentTime || 0, 0), duration);
+        ms.setPositionState({
+          duration,
+          playbackRate: rate > 0 ? rate : 1,
+          position,
+        });
+      } else {
+        // Live / not-yet-loaded: clear any stale scrubber state.
+        ms.setPositionState();
+      }
+    } catch {
+      // Ignore — a transient position > duration during a seek shouldn't spam.
+    }
+  }
+
+  /**
    * Tear down the internal player and reset transient UI (time, title,
    * subtitles, timeline) back to the initial, no-source state. Called
    * internally on every src change so the next source starts clean. Safe to
@@ -15488,6 +17090,26 @@ export class MoviElement extends HTMLElement {
     this._preloadGateActive = false;
     this._resumeDialogPending = false;
     this._autoplayPendingVisible = false;
+
+    // Reset OS lock-screen chrome to a no-source state. Keep the action
+    // handlers registered (setupMediaSession is guarded) — they read
+    // this.player lazily and will drive the next source once it loads.
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = "none";
+      navigator.mediaSession.metadata = null;
+      try {
+        navigator.mediaSession.setPositionState?.();
+      } catch {
+        /* noop */
+      }
+    }
+    this._mediaSessionLastPos = -1;
+    this._mediaSessionArtworkUrl = null;
+    this.stopStutterMonitor();
+    this.resetStutterHint();
+    if (this._captionLive) this._captionLive.textContent = "";
+    this._lastCaptionText = "";
+    this.stopQoeHeartbeat();
 
     // Tear down internal player
     if (this.player) {
@@ -15810,12 +17432,98 @@ export class MoviElement extends HTMLElement {
       durationEl.textContent = this.formatTime(this.duration);
     }
 
+    this.updateSeekAria();
+
     // Trigger title auto-load when duration first becomes available
     if (this._lastDuration === 0 && this.duration > 0) {
       this._lastDuration = this.duration;
       // Call updateTitle to check if we need to auto-load from metadata
       this.updateTitle();
     }
+  }
+
+  /**
+   * Update the seek slider's ARIA so screen readers announce the position as a
+   * real slider ("1:23 of 4:56"), not a bare number. Driven off timeUpdate so
+   * it stays current even while the visual chrome is auto-hidden.
+   */
+  private updateSeekAria(): void {
+    const bar = this.shadowRoot?.querySelector(
+      ".movi-progress-bar",
+    ) as HTMLElement | null;
+    if (!bar) return;
+    const ct = this._posterSeekActive ? 0 : this.currentTime;
+    const live = this.player?.isLiveStream?.();
+    const dur =
+      Number.isFinite(this.duration) && this.duration > 0 ? this.duration : 0;
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", live ? "0" : String(Math.round(dur)));
+    bar.setAttribute("aria-valuenow", String(Math.round(ct)));
+    bar.setAttribute(
+      "aria-valuetext",
+      live
+        ? "Live"
+        : dur > 0
+          ? `${this.formatTime(ct)} of ${this.formatTime(dur)}`
+          : this.formatTime(ct),
+    );
+  }
+
+  /** Push the visible caption's text into the off-screen aria-live region so
+   *  screen readers announce it. Deduped so identical re-renders stay quiet. */
+  private mirrorCaption(): void {
+    if (!this._captionLive || !this.subtitleOverlay) return;
+    const text = (this.subtitleOverlay.textContent || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text === this._lastCaptionText) return;
+    this._lastCaptionText = text;
+    this._captionLive.textContent = text;
+  }
+
+  // ── QoE analytics ─────────────────────────────────────────────────────────
+
+  private startQoeHeartbeat(): void {
+    if (this._qoeHeartbeat !== null) return;
+    this._qoeHeartbeat = window.setInterval(() => {
+      if (this.player?.getState?.() !== "playing") return;
+      const stats = this.player?.getStats?.() as
+        | Record<string, unknown>
+        | undefined;
+      const decoder = String(stats?.["Video Decoder"] ?? "unknown");
+      // No dropped-frame counter is exposed yet; rebufferRatio carries the
+      // stall cost. Report 0 so the schema stays stable for consumers.
+      this._qoe.heartbeat(this.currentTime, 0, decoder);
+    }, 10000);
+  }
+
+  private stopQoeHeartbeat(): void {
+    if (this._qoeHeartbeat !== null) {
+      clearInterval(this._qoeHeartbeat);
+      this._qoeHeartbeat = null;
+    }
+  }
+
+  /** Register a QoE analytics sink; returns an unsubscribe fn. Every event is
+   *  also dispatched as a `movi-qoe` CustomEvent. */
+  addQoeSink(sink: QoESink): () => void {
+    this._qoe.addSink(sink);
+    return () => this._qoe.removeSink(sink);
+  }
+
+  removeQoeSink(sink: QoESink): void {
+    this._qoe.removeSink(sink);
+  }
+
+  /** POST every QoE event to `url` via sendBeacon — shorthand for
+   *  addQoeSink(beaconSink(url)). Returns an unsubscribe fn. */
+  setAnalyticsBeacon(url: string): () => void {
+    return this.addQoeSink(beaconSink(url));
+  }
+
+  /** A rolled-up snapshot of the current QoE session. */
+  getQoeSession(): QoESession {
+    return this._qoe.getSession();
   }
 
   /**
@@ -15987,10 +17695,20 @@ export class MoviElement extends HTMLElement {
       // type=range> doesn't expose a separate filled portion across
       // browsers, so the CSS gradient below reads this custom prop
       // to draw a coloured segment from 0 to thumb and a muted one
-      // beyond.
+      // beyond. Track max is getMaxVolume() (2 normally, 1 on native audio), so
+      // the thumb sits at v/max of the width.
       volumeSlider.style.setProperty(
         "--movi-volume-pct",
-        `${Math.round(v * 100)}%`,
+        `${Math.round((v / this.getMaxVolume()) * 100)}%`,
+      );
+      // Above 100% we're boosting — tint the fill so the boost zone is obvious.
+      volumeSlider.classList.toggle("movi-volume-boosted", v > 1);
+      // Real ARIA for screen readers: announce the percentage, not 0–2.
+      const pct = Math.round(v * 100);
+      volumeSlider.setAttribute("aria-valuenow", String(pct));
+      volumeSlider.setAttribute(
+        "aria-valuetext",
+        this._muted ? "Muted" : `Volume ${pct}%${v > 1 ? " (boosted)" : ""}`,
       );
     }
 
@@ -16175,37 +17893,43 @@ export class MoviElement extends HTMLElement {
    * These headers are required for SharedArrayBuffer support (needed by FFmpeg)
    */
   private checkSecurityHeaders(): void {
-    // Check if Cross-Origin-Isolated context is available
+    // Cross-origin isolation (COOP+COEP → SharedArrayBuffer) is NOT required to
+    // play anything. The WASM engine is single-threaded (USE_PTHREADS=0) and
+    // does all its I/O through Asyncify (async js_read_async), so HttpSource's
+    // reads bridge async network fetches without SAB. SAB is purely a zero-copy
+    // optimisation; HttpSource's plain-buffer fallback works fine without it
+    // (once atomicSetStreaming got its missing non-SAB branch — see HttpSource).
+    // Blocking on the headers used to lock out perfectly capable browsers whose
+    // embedder couldn't set them, and lite/mobile browsers (Opera Mini "high"
+    // mode, UC, etc.) that never report crossOriginIsolated at all.
     if (!window.crossOriginIsolated) {
       Logger.warn(
         TAG,
-        "Security headers missing: Cross-Origin-Opener-Policy and Cross-Origin-Embedder-Policy are required",
+        "Not cross-origin isolated (no COOP/COEP) — running without SharedArrayBuffer; single-threaded WASM + Asyncify I/O are unaffected, HTTP streaming just uses the plain-buffer path.",
       );
+    }
 
-      // Show error message
+    // The one thing genuinely required is WebAssembly. Proxy/lite browsers that
+    // render server-side (Opera Mini's extreme/proxy mode and similar) don't
+    // provide it — surface a clear "unsupported browser" message rather than a
+    // cryptic decode failure, and skip player init.
+    if (typeof WebAssembly === "undefined") {
+      Logger.warn(TAG, "WebAssembly unavailable — this browser can't run the player");
       if (this.brokenIndicator) {
         this.brokenIndicator.style.display = "flex";
-
-        // Hide the empty-state placeholder so it doesn't render behind the
-        // error overlay — both default to visible with no src, which stacks
-        // the "No Video" text under "Security Headers Missing".
         if (this.emptyStateIndicator) {
           this.emptyStateIndicator.style.display = "none";
         }
-
         const titleEl =
           this.brokenIndicator.querySelector(".movi-broken-title");
-        if (titleEl) titleEl.textContent = "Security Headers Missing";
-
+        if (titleEl) titleEl.textContent = "Browser not supported";
         const messageEl = this.brokenIndicator.querySelector(
           ".movi-broken-message",
         );
         if (messageEl) {
           messageEl.textContent =
-            "This player requires Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp headers to be set on the server.";
+            "This player needs WebAssembly, which lite / proxy browsers (like Opera Mini) don't provide. Please open it in Chrome, Firefox, Safari, Edge, or full Opera.";
         }
-
-        // Hide the software fallback button (not applicable for header issues)
         const swFallbackBtn = this.brokenIndicator.querySelector(
           ".movi-sw-fallback-btn",
         ) as HTMLElement;
@@ -16213,8 +17937,6 @@ export class MoviElement extends HTMLElement {
           swFallbackBtn.style.display = "none";
         }
       }
-
-      // Prevent player initialization
       this._isUnsupported = true;
     }
   }
@@ -17573,7 +19295,16 @@ export class MoviElement extends HTMLElement {
   private maybeShowResumeDialog(): void {
     // Resume means seeking to the saved position — impossible in linear
     // (non-seekable) playback, so don't offer it.
-    if (!this._resume || !this.player || this._contextLostTime !== 0 || this._linearMode) return;
+    // The dialog is interactive chrome, so it has no business appearing on a
+    // bare player with no `controls` attribute — skip it there.
+    if (
+      !this._resume ||
+      !this.player ||
+      this._contextLostTime !== 0 ||
+      this._linearMode ||
+      !this._controls
+    )
+      return;
     const savedTime = this.getResumePosition();
     if (savedTime > 2 && savedTime < this.duration - 5) {
       this.showResumeDialog(savedTime);
@@ -17745,6 +19476,11 @@ export class MoviElement extends HTMLElement {
       this._timelineCancelled = true;
       panel.style.display = "none";
       this.focus();
+      // Re-arm auto-hide only if the bar is currently visible; never surface a
+      // hidden bar on close (see the close-button handler for the reasoning).
+      if (!this.controlsContainer?.classList.contains("movi-controls-hidden")) {
+        this.showControls();
+      }
     }
   }
 
@@ -17754,6 +19490,14 @@ export class MoviElement extends HTMLElement {
   private async generateTimelineStrip(shadowRoot: ShadowRoot): Promise<void> {
     if (!this.player) return;
     if (this._timelineGenerating) return; // re-entrancy guard
+
+    // The Timeline panel is an explicit user action (press "T") and must render
+    // regardless of the `thumb` attribute — that attribute only gates the
+    // passive seek-bar hover preview (which stays independently gated on
+    // `_thumb` in updateSeekVisuals). Enable the shared thumbnail pipeline so
+    // the getPreviewFrame() calls below can decode frames even when `thumb`
+    // is off; turning it on here never triggers seek-bar previews on its own.
+    this.player.setPreviewsEnabled(true);
 
     const strip = shadowRoot.querySelector(".movi-timeline-strip") as HTMLElement;
     const status = shadowRoot.querySelector(".movi-timeline-status") as HTMLElement;
@@ -17990,7 +19734,8 @@ export class MoviElement extends HTMLElement {
   }
 
   set volume(value: number) {
-    this._volume = Math.max(0, Math.min(1, value));
+    // 0–2: values above 1 boost audio up to 200% (VLC-style).
+    this._volume = Math.max(0, Math.min(this.getMaxVolume(), value));
     this.setAttribute("volume", this._volume.toString());
 
     // If user increases volume while muted, automatically unmute (like YouTube)
@@ -18034,6 +19779,10 @@ export class MoviElement extends HTMLElement {
     this.updatePlaybackRate();
     SettingsStorage.getInstance().save({ playbackRate: this._playbackRate });
     this.dispatchEvent(new CustomEvent("ratechange", { detail: { playbackRate: this._playbackRate } }));
+    // Keep the OS lock-screen scrubber's speed indicator in sync.
+    this.updateMediaSessionPosition();
+    // Each new speed gets a fresh stutter warning if it can't keep up.
+    this.resetStutterHint();
   }
 
   get subtitleDelay(): number {
@@ -18218,10 +19967,13 @@ export class MoviElement extends HTMLElement {
     }
   }
 
+  /** @deprecated Use `playsInline` instead — an inline player now restricts
+   *  touch gestures to fullscreen on its own. Kept for backward compatibility. */
   get gesturefs(): boolean {
     return this._gesturefs;
   }
 
+  /** @deprecated Use `playsInline` instead. */
   set gesturefs(value: boolean) {
     if (this._gesturefs !== value) {
       this._gesturefs = value;
@@ -18779,7 +20531,7 @@ export class MoviElement extends HTMLElement {
   /*
    * Take a snapshot of the current frame and download it
    */
-  private takeSnapshot(): void {
+  private async takeSnapshot(): Promise<void> {
     if (!this.player) return;
 
     try {
@@ -18788,6 +20540,31 @@ export class MoviElement extends HTMLElement {
       // If we are in canvas mode, it's easy
       if (this.canvas && this.canvas.style.display !== "none") {
         dataUrl = this.canvas.toDataURL("image/png");
+        // Some GPUs return an all-black buffer when a WebGL canvas that
+        // displayed a HARDWARE-decoded frame (4K AV1/HEVC etc.) is read back
+        // via toDataURL — even with preserveDrawingBuffer — so the snapshot
+        // saves empty. Detect that and fall back to the raw decoded VideoFrame
+        // drawn onto a plain 2D canvas (GPU-readback-independent). Trade-off:
+        // this frame has no burned-in subtitles, but a real frame beats a
+        // black one.
+        if (await this.isDataUrlBlank(dataUrl)) {
+          const frame = this.player.getCurrentVideoFrame?.();
+          if (frame) {
+            try {
+              const c = document.createElement("canvas");
+              c.width = frame.displayWidth;
+              c.height = frame.displayHeight;
+              const ctx = c.getContext("2d");
+              if (ctx) {
+                ctx.drawImage(frame, 0, 0);
+                dataUrl = c.toDataURL("image/png");
+                Logger.info(TAG, "Snapshot: WebGL readback was blank, used decoded VideoFrame");
+              }
+            } catch (e) {
+              Logger.warn(TAG, "VideoFrame snapshot fallback failed", e);
+            }
+          }
+        }
       } else if (this.video && this.video.style.display !== "none") {
         // If in video mode, draw video to a temporary canvas
         const canvas = document.createElement("canvas");
@@ -18821,6 +20598,172 @@ export class MoviElement extends HTMLElement {
     } catch (e) {
       Logger.error(TAG, "Error taking snapshot", e);
     }
+  }
+
+  /**
+   * Decode a data-URL into a small sampling canvas and report whether every
+   * pixel is (near-)black — i.e. the capture came out empty. Used to detect a
+   * failed WebGL readback so takeSnapshot can fall back to the raw VideoFrame.
+   */
+  private isDataUrlBlank(dataUrl: string | null): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!dataUrl || dataUrl.length < 32) return resolve(true);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const w = 32;
+          const h = 18;
+          const c = document.createElement("canvas");
+          c.width = w;
+          c.height = h;
+          const ctx = c.getContext("2d", { willReadFrequently: true });
+          if (!ctx) return resolve(false); // can't sample — trust the capture
+          ctx.drawImage(img, 0, 0, w, h);
+          const d = ctx.getImageData(0, 0, w, h).data;
+          for (let i = 0; i < d.length; i += 4) {
+            if (d[i] > 8 || d[i + 1] > 8 || d[i + 2] > 8) return resolve(false);
+          }
+          resolve(true); // every sampled pixel is essentially black
+        } catch {
+          resolve(false); // decode/read failed — don't force the fallback
+        }
+      };
+      img.onerror = () => resolve(true);
+      img.src = dataUrl;
+    });
+  }
+
+  /**
+   * Final safety net for context-menu placement. Whatever a path computed
+   * (strip-mode position:fixed, host-relative absolute, …), the host's
+   * `contain` re-anchors fixed/absolute to the host box — so a clamp done in
+   * window coordinates can still leave the menu spilling off the real viewport
+   * (seen in audio-strip mode on touch). Re-measure the ACTUAL rect and nudge
+   * left/top by the overflow. Translation isn't affected by the containing
+   * block, so this works regardless. The mobile drawer is a deliberate
+   * right-edge panel — skip it.
+   */
+  /**
+   * Below ~290px even the always-visible right cluster (more · fullscreen)
+   * crowds the bar, so fold the fullscreen button into the collapsible
+   * expandable too — leaving only the "more" (>) toggle outside, with
+   * fullscreen reachable (and horizontally scrollable) once expanded. Restored
+   * to its normal slot (last child of the right cluster, after the more button)
+   * once there's room again. Idempotent: only moves when out of place, so it
+   * survives repeated resize ticks without thrashing the DOM.
+   */
+  private syncTinyLayout(): void {
+    const root = this.shadowRoot;
+    if (!root) return;
+    const fsBtn = root.querySelector(".movi-fullscreen-btn");
+    const expandable = root.querySelector(".movi-mobile-expandable");
+    const right = root.querySelector(".movi-controls-right");
+    if (!fsBtn || !expandable || !right) return;
+    const tiny = this.clientWidth > 0 && this.clientWidth < 290;
+    if (tiny) {
+      if (expandable.lastElementChild !== fsBtn) expandable.appendChild(fsBtn);
+    } else if (right.lastElementChild !== fsBtn) {
+      right.appendChild(fsBtn);
+    }
+  }
+
+  /**
+   * A body-level shadow-DOM portal for the desktop context menu. Moving the
+   * menu here lets it escape any overflow:hidden / clipping ancestor of the
+   * player (page wrappers, cards, `body{overflow-x:hidden}`) — the player's own
+   * shadow keeps `container-type` for its @container queries, which makes it a
+   * containing block for fixed descendants, so a menu that stays inside can't
+   * break out. The portal clones the player's shadow styles so the menu looks
+   * identical, and carries over any inline theme custom-properties.
+   */
+  private ensureMenuPortal(): ShadowRoot | null {
+    if (this._menuPortalRoot) return this._menuPortalRoot;
+    if (typeof document === "undefined" || !document.body) return null;
+    const host = document.createElement("div");
+    host.setAttribute("data-movi-menu-portal", "");
+    // Plain fixed box at the origin. The cloned player styles below carry the
+    // player's own `:host { overflow:hidden; contain:paint; container-type:...;
+    // width:100% }` rules, which would apply to THIS host and clip the menu to
+    // a 0×0 box / re-anchor its fixed positioning — so hard-override them inline
+    // (inline beats the non-important :host rules). NO contain/container-type,
+    // so a fixed-positioned menu inside is viewport-relative and clipped by
+    // nothing.
+    host.style.cssText =
+      "position:fixed !important;top:0 !important;left:0 !important;" +
+      "width:0 !important;height:0 !important;overflow:visible !important;" +
+      "contain:none !important;container-type:normal !important;" +
+      "background:none !important;border-radius:0 !important;" +
+      "z-index:2147483647;";
+    const root = host.attachShadow({ mode: "open" });
+    for (const s of Array.from(
+      this.shadowRoot?.querySelectorAll("style") || [],
+    )) {
+      root.appendChild(s.cloneNode(true));
+    }
+    document.body.appendChild(host);
+    this._menuPortalHost = host;
+    this._menuPortalRoot = root;
+    return root;
+  }
+
+  // Submenu panels (Speed / Fit / Audio / Subtitle / Audio-output) are
+  // shadow-root SIBLINGS of the menu, not children — they must travel to the
+  // portal with it, or they'd stay behind and open detached from the menu.
+  private _portaledSubs: Element[] = [];
+
+  /** Move the context menu (+ its submenu panels) into the body portal and mirror theme vars. */
+  private portalContextMenu(menu: HTMLElement): void {
+    const root = this.ensureMenuPortal();
+    if (!root) return;
+    if (menu.parentNode !== root) {
+      this._menuHome = menu.parentNode;
+      this._portaledSubs = this.shadowRoot
+        ? Array.from(
+            this.shadowRoot.querySelectorAll(
+              ".movi-context-menu-submenu, .movi-context-menu-submenu-audio, .movi-context-menu-submenu-subtitle, .movi-context-menu-submenu-audiodevice",
+            ),
+          )
+        : [];
+      root.appendChild(menu);
+      for (const sub of this._portaledSubs) root.appendChild(sub);
+    }
+    // Carry over inline theme overrides (e.g. themecolor -> --movi-primary) so
+    // the portaled menu matches; the cloned styles supply the defaults.
+    const hostStyle = this._menuPortalHost?.style;
+    if (hostStyle) {
+      for (const prop of Array.from(this.style)) {
+        if (prop.startsWith("--movi")) {
+          hostStyle.setProperty(prop, this.style.getPropertyValue(prop));
+        }
+      }
+    }
+  }
+
+  /** Return the context menu (+ submenus) from the portal to the shadow root. */
+  private unportalContextMenu(menu: HTMLElement): void {
+    if (!this._menuHome) return;
+    if (menu.parentNode !== this._menuHome) this._menuHome.appendChild(menu);
+    for (const sub of this._portaledSubs) {
+      if (sub.parentNode !== this._menuHome) this._menuHome.appendChild(sub);
+    }
+    this._portaledSubs = [];
+  }
+
+  private clampMenuToViewport(menu: HTMLElement): void {
+    if (menu.classList.contains("movi-context-menu-mobile")) return;
+    const m = 8;
+    const r = menu.getBoundingClientRect();
+    if (r.width === 0) return;
+    const curLeft = parseFloat(menu.style.left) || 0;
+    const curTop = parseFloat(menu.style.top) || 0;
+    let dx = 0;
+    let dy = 0;
+    if (r.right > window.innerWidth - m) dx = window.innerWidth - m - r.right;
+    if (r.left + dx < m) dx = m - r.left;
+    if (r.bottom > window.innerHeight - m) dy = window.innerHeight - m - r.bottom;
+    if (r.top + dy < m) dy = m - r.top;
+    if (dx) menu.style.left = `${curLeft + dx}px`;
+    if (dy) menu.style.top = `${curTop + dy}px`;
   }
 
   private updateHDRVisibility(): void {

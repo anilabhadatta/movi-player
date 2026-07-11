@@ -6,8 +6,11 @@
 ##### No transcoding. No server processing. <br /> Just `<movi-player src="video.mkv" controls>`.
 
 [![npm version](https://img.shields.io/npm/v/movi-player.svg?style=flat-square&color=cb3837&logo=npm)](https://www.npmjs.com/package/movi-player)
-[![npm downloads](https://img.shields.io/npm/dm/movi-player.svg?style=flat-square&color=blue)](https://www.npmjs.com/package/movi-player)
-[![bundle size](https://img.shields.io/badge/bundle-50--410KB-success?style=flat-square)](https://www.npmjs.com/package/movi-player)
+[![npm downloads](https://img.shields.io/npm/dm/movi-player.svg?style=flat-square&color=blue&logo=npm&label=npm%20downloads)](https://www.npmjs.com/package/movi-player)
+[![jsDelivr hits](https://img.shields.io/jsdelivr/npm/hy/movi-player?style=flat-square&color=ff5627&logo=jsdelivr&label=jsDelivr%2Fyear)](https://www.jsdelivr.com/package/npm/movi-player)
+[![TypeScript](https://img.shields.io/npm/types/movi-player?style=flat-square&logo=typescript&color=3178c6)](https://www.npmjs.com/package/movi-player)
+[![js bundle](https://img.shields.io/badge/js%20bundle-50--410KB-success?style=flat-square)](https://www.npmjs.com/package/movi-player)
+[![with wasm](https://img.shields.io/badge/with%20wasm-~1.8--3.2MB-orange?style=flat-square)](#modules)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
 [![GitHub stars](https://img.shields.io/github/stars/MrUjjwalG/movi-player?style=flat-square&color=yellow&logo=github)](https://github.com/MrUjjwalG/movi-player/stargazers)
 
@@ -73,6 +76,8 @@ Also available as a **desktop app** (Windows / macOS / Linux) for playing local 
 
 <movi-player src="video.mp4" controls autoplay muted></movi-player>
 ```
+
+> Prefer the official hosted build? Load it straight from **`https://moviplayer.com/dist/element.js`** — always the latest release, and a drop-in on any page (no COOP/COEP or isolation headers required).
 
 Or with npm:
 
@@ -202,9 +207,9 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
 
 | Module | Size | Gzip | Brotli | What you get |
 |---|---|---|---|---|
-| `movi-player` / `movi-player/element` | ~410KB | 2.57 MB | 1.95 MB | Full player with UI, controls, gestures |
-| `movi-player/player` | ~180KB | 2.52 MB | 1.91 MB | Programmatic playback, no UI |
-| `movi-player/demuxer` | ~50KB | 2.31 MB | 1.74 MB | Metadata extraction, decoding only |
+| `movi-player` / `movi-player/element` | ~410KB | 3.13 MB | 2.37 MB | Full player with UI, controls, gestures |
+| `movi-player/player` | ~180KB | 3.15 MB | 2.38 MB | Programmatic playback, no UI |
+| `movi-player/demuxer` | ~50KB | 2.37 MB | 1.79 MB | Metadata extraction, decoding only |
 
 > **Note:** Module sizes (first column) exclude the embedded WASM binary. Gzip/Brotli columns show the total transfer size including WASM. Enable Brotli compression on your server for optimal delivery.
 
@@ -301,8 +306,10 @@ Use cases: video validators, asset management, HDR detection pipelines, search i
   lcevcurl="https://..."    <!-- URL to lazy-load the lcevc_dec.js decoder library -->
   sw                        <!-- Force software decoding -->
   fps="60"                  <!-- Override frame rate -->
-  gesturefs                 <!-- Gestures only in fullscreen -->
+  playsinline               <!-- Play inline; on any touch device, suppress swipe/volume gestures while inline so they don't fight page scroll (fullscreen unaffected) -->
+  gesturefs                 <!-- DEPRECATED: use playsinline -->
   nohotkeys                 <!-- Disable keyboard shortcuts -->
+  noerrorscreen             <!-- Suppress the built-in error overlays (host renders its own) -->
   encrypted                 <!-- Encrypted playback mode -->
   tokenurl="/api/token"     <!-- Token endpoint (encrypted) -->
   videourl="/api/video"     <!-- Video endpoint (encrypted) -->
@@ -369,6 +376,7 @@ Press `?` during playback to toggle the shortcuts panel (also available from the
 | `S` | Snapshot | `0` / `Home` | Seek to start |
 | `P` | Picture-in-Picture | Arrows | Seek / Volume |
 | `V` | Cycle subtitle track | `Z` / `X` | Subtitle delay -/+ 100ms |
+| `1` – `9` | Seek to 10%–90% | | |
 
 ## Server Requirements
 
@@ -376,12 +384,15 @@ Videos served over HTTP need:
 
 1. **Range requests** -- for seeking
 2. **CORS headers** -- if cross-origin
-3. **COOP/COEP headers** -- required for `SharedArrayBuffer` (FFmpeg WASM threading). Without these the player shows a "Security Headers Missing" screen and refuses to initialize:
-   ```
-   Cross-Origin-Opener-Policy: same-origin
-   Cross-Origin-Embedder-Policy: require-corp
-   ```
-   On static hosts where you can't set response headers (GitHub Pages, Netlify free tier, etc.), use [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) to inject these headers client-side via a service worker.
+
+**COOP/COEP headers are _optional_.** The WASM engine is single-threaded with Asyncify I/O, so it plays fine **without** `SharedArrayBuffer` — no isolation headers, no service worker, no "Security Headers Missing" screen. Setting them only enables an optional **zero-copy `SharedArrayBuffer` fast-path** for HTTP streaming; without them `HttpSource` uses a plain-buffer path and streams normally.
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+On static hosts where you can't set response headers (GitHub Pages, Netlify free tier, etc.), [coi-serviceworker](https://github.com/gzuidhof/coi-serviceworker) can inject these client-side if you want the fast-path — but it's no longer required to play.
 
 ## Browser Support
 

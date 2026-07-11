@@ -1,8 +1,8 @@
 {
   "name": "movi-player-desktop",
   "productName": "MoviPlayer",
-  "version": "0.3.3",
-  "description": "MoviPlayer desktop app — play MKV, HEVC, AV1, 4K HDR locally on Windows, macOS and Linux. WebCodecs + FFmpeg WASM, no transcoding server.",
+  "version": "0.3.4",
+  "description": "MoviPlayer",
   "author": "MoviPlayer",
   "license": "Apache-2.0",
   "main": "src/main.js",

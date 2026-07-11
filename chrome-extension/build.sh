@@ -6,9 +6,15 @@ set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(dirname "$DIR")"
 
-echo "Building movi-player dist..."
-cd "$ROOT"
-npm run build:ts
+# SKIP_BUILD=1 lets the release orchestrator build the player once and reuse it
+# across every target instead of rebuilding here (3× otherwise).
+if [ -z "$SKIP_BUILD" ]; then
+  echo "Building movi-player dist..."
+  cd "$ROOT"
+  npm run build:ts
+else
+  echo "Reusing existing dist/element.js (SKIP_BUILD set)"
+fi
 
 echo "Copying required files to extension..."
 rm -rf "$DIR/dist"

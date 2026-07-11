@@ -51,8 +51,16 @@ features:
 ---
 
 <div style="margin-top: 60px; display: flex; flex-direction: column; align-items: center;">
-  <h2 style="font-size: 32px; font-weight: 700; margin-bottom: 24px; text-align: center;">Professional UI Out of the Box</h2>
-  <img src="./images/element.gif" style="max-width: 100%; border-radius: 12px; box-shadow: 0 20px 50px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1);" alt="Movi Player Element" />
+  <h2 style="font-size: 32px; font-weight: 700; margin-bottom: 8px; text-align: center;">Professional UI Out of the Box</h2>
+  <p style="opacity: .7; margin-bottom: 24px; text-align: center; max-width: 620px;">A real <code>&lt;movi-player&gt;</code> element, decoding an MKV right here in your browser — no plugins, no server. It plays HEVC, AV1 and HDR the same way.</p>
+  <iframe
+    src="/movi-player/demo-embed.html"
+    title="Live Movi-Player demo"
+    loading="lazy"
+    allow="fullscreen; picture-in-picture; autoplay"
+    allowfullscreen
+    style="width: 100%; max-width: 900px; aspect-ratio: 16/9; border-radius: 12px; box-shadow: 0 20px 50px rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); background: #000;"
+  ></iframe>
 </div>
 
 <style>

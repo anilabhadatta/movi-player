@@ -35,7 +35,7 @@ import { Logger, LogLevel } from "../utils/Logger";
 import { MoviVideoDecoder } from "../decode/VideoDecoder";
 import { MoviAudioDecoder } from "../decode/AudioDecoder";
 import { SubtitleDecoder } from "../decode/SubtitleDecoder";
-import { CanvasRenderer } from "../render/CanvasRenderer";
+import { CanvasRenderer, type VRView } from "../render/CanvasRenderer";
 import { AudioRenderer } from "../render/AudioRenderer";
 import { updateAllBindingsLogLevel, ThumbnailBindings } from "../wasm/bindings";
 import { loadWasmModuleNew } from "../wasm/FFmpegLoader";
@@ -102,6 +102,19 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private mediaInfo: MediaInfo | null = null;
   private fileSize: number = -1; // Cached file size for buffer calculations
   private lastBufferedTime: number = 0;
+
+  /**
+   * Enable/disable seek-bar scrub previews on an already-constructed player.
+   * Lets the `thumb` attribute be toggled at runtime (or applied after `src`,
+   * whose callback creates the player first) without recreating the player.
+   * The thumbnail pipeline stays lazy — it only spins up on the first hover.
+   */
+  setPreviewsEnabled(enabled: boolean): void {
+    this.config.enablePreviews = enabled;
+    // Turning previews back on clears the "gave up" latch so a prior failed
+    // init (or a never-attempted one) can retry on the next hover.
+    if (enabled) this.previewInitGaveUp = false;
+  }
 
   private previewsAllowed(): boolean {
     if (!this.config.enablePreviews) return false;
@@ -182,6 +195,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   private _stallStartTime: number = 0; // When stall was first detected
   private _bufferingEntryTime: number = 0; // When we entered buffering state
   private _playStartTime: number = 0; // When play() was called — grace period for stall detection
+  private _primingAudio = false; // true while the first-play buffer is filling its startup cushion
   private _decoderStuckSince: number = 0; // When video decoder was first detected stuck
   private _lastDesyncSeekTime: number = 0; // performance.now() of last desync-triggered resync
 
@@ -512,6 +526,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           );
         }
       }
+
+      // Re-apply demuxer discard: re-enable the newly-selected audio track and
+      // discard the previously-active one (issue #11).
+      this.applyStreamDiscard();
     });
 
     this.trackManager.on("tracksChange", (tracks) => {
@@ -905,6 +923,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       Logger.info(TAG, "Audio processing disabled for debugging");
     }
 
+    // Drop unused audio tracks from the demuxer read path (issue #11).
+    this.applyStreamDiscard();
+
     // Configure subtitle decoder
     const subtitleTrack = this.trackManager.getActiveSubtitleTrack();
     if (subtitleTrack && this.subtitleDecoder) {
@@ -1111,6 +1132,17 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       // wasPlayingBeforeSeek from the entry state ("ended" → false), which is
       // why we must force it true here up front rather than after the await.
       this.wasPlayingBeforeSeek = true;
+      // Re-arm the play grace so the stall/desync detectors don't fire on the
+      // replay-seek transient. Right after "Replaying from beginning" the video
+      // renderer's currentTime is still stale at the ended position (~duration)
+      // while audio resets to 0 — without a fresh grace the desync detector sees
+      // a ~full-duration "behind" and kicks off a spurious resync seek (an
+      // audible trip at the start of every replay).
+      this._playStartTime = performance.now();
+      // The replay seek(0) flushes the audio decoder like any seek, so heavy
+      // software audio (TrueHD/DTS) re-primes automatically via the seek-resume
+      // path — no separate first-play re-arm needed. Codec-gated, so
+      // hardware/lightweight audio replays stay instant.
       try {
         await this.seek(0, { suppressSpinner: true });
         // The separate native <audio> track ended with the video; seek(0)
@@ -1331,6 +1363,31 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
+
+    // Resuming while the tab is hidden (e.g. a Media Session / lock-screen play,
+    // or a media-key press with the tab in the background): the rAF-driven
+    // processLoop is throttled to ~1fps in background tabs, so decode falls
+    // behind and audio starves and stops within seconds. Drive decode off the
+    // un-throttled background Worker timer instead — pause() tore it down, and
+    // if the tab was hidden while already paused it was never started. Mirror
+    // the hide path's setup (drop video presentation; frames are discarded while
+    // hidden anyway). Gated on audio, matching handleVisibilityChange — a
+    // no-audio hidden source would just race the demuxer to EOF.
+    const resumingHidden =
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden" &&
+      !this.isPiPActive;
+    if (resumingHidden) {
+      this.isBackgrounded = true;
+      if (this.videoRenderer) {
+        this.videoRenderer.stopPresentationLoop();
+        this.videoRenderer.clearQueue();
+      }
+      const hasAudio =
+        !!this.trackManager.getActiveAudioTrack() && !this.disableAudio;
+      if (hasAudio) this.startBackgroundTimer();
+    }
+
     this.processLoop();
 
     Logger.info(TAG, "Playing");
@@ -1590,17 +1647,57 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.wasPlayingBeforeRebuffer = true; // resume intent for buffering→play
       this._bufferingEntryTime = performance.now();
       this.stateManager.setState("buffering");
+      // Heavy software audio is flushed-cold by the seek. This branch waits for
+      // the first video frame — which on an open-GOP CRA source can take a few
+      // seconds (HW decoder recreate + CRA wait). Without priming, the audio
+      // context keeps running through that wait and drains its buffer, so when
+      // the first frame finally lands and we resume, the sub-realtime cold
+      // decode underruns into gap-fill jitter. Hold the context suspended so
+      // the catch-up decode instead accumulates a cushion, and flag the resume
+      // gate to wait for it (issue #11, seek case).
+      if (this.activeAudioNeedsColdPrime()) {
+        this.beginAudioPrime();
+      }
       if (this._playStartTime === 0) {
         this._playStartTime = performance.now();
       }
     } else if (this.wasPlayingBeforeSeek || this.wasPlayingBeforeRebuffer) {
-      Logger.info(TAG, "Resuming playback after seek");
       // Consume the resume intent so it doesn't leak into the next seek. It's
       // never reset elsewhere, so a stale `true` would make a later paused
       // user-seek wrongly auto-resume (and would defeat seek()'s re-derivation
       // guard that now skips re-deriving when this is already true).
       this.wasPlayingBeforeSeek = false;
       this.wasPlayingBeforeRebuffer = false;
+      if (this._playStartTime === 0) {
+        this._playStartTime = performance.now();
+      }
+
+      // Cold-start audio prime for heavy software audio (TrueHD/DTS via WASM),
+      // which decodes sub-realtime for ~1-2s while the decode path warms up. If
+      // we start now, the fast HW video races ahead while audio underruns —
+      // gap-fills ("atak-atak") then a ~2s A/V resync once the buffer empties.
+      // Route the resume through the same buffering machinery the stall path
+      // uses: hold the AudioContext suspended (isPlaying=true so decoded audio
+      // still accumulates), hold the clock and video presentation, and let the
+      // buffering→resume gate below start both together once a real audio
+      // cushion exists. NOT one-shot — every seek flushes the decoder, so each
+      // post-seek resume is a cold start that needs the cushion too, else a
+      // mid-playback seek resumes thin and underruns into ~2s of jitter (issue
+      // #11, seek case). Hardware audio (AAC) and lightweight software codecs
+      // (Opus/FLAC/AC-3/E-AC-3) decode faster than realtime even cold, so
+      // activeAudioNeedsColdPrime() gates them out — no needless buffer for them.
+      if (this.activeAudioNeedsColdPrime()) {
+        this.beginAudioPrime();
+        this.wasPlayingBeforeRebuffer = true; // resume intent for buffering→play
+        this._bufferingEntryTime = performance.now();
+        this.stateManager.setState("buffering");
+        this.clock.pause();
+        if (this.videoRenderer) this.videoRenderer.stopPresentationLoop();
+        Logger.info(TAG, "Audio cold-prime: buffering until cushion");
+        return;
+      }
+
+      Logger.info(TAG, "Resuming playback after seek");
       this.stateManager.setState("playing");
       // Mark that playback has actually started. When play() is pressed during
       // the initial poster-seek it early-returns before reaching the body that
@@ -1654,6 +1751,66 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   }
 
   /**
+   * Heavy lossless/complex software audio codecs (TrueHD/MLP, DTS/DCA) decode
+   * sub-realtime for ~1-2s from a cold start. Every seek flushes the decoder,
+   * so each post-seek resume is a cold start that needs the audio prime cushion
+   * — not just the first play/replay. Hardware audio (AAC) and lightweight
+   * software codecs (Opus/FLAC/AC-3/E-AC-3) decode faster than realtime even
+   * cold and don't need it. (issue #11)
+   */
+  private activeAudioNeedsColdPrime(): boolean {
+    const codec = (
+      this.trackManager.getActiveAudioTrack()?.codec ?? ""
+    ).toLowerCase();
+    return (
+      !this.disableAudio &&
+      this.audioDecoder.usesSoftware &&
+      /truehd|mlp|dts|dca/.test(codec)
+    );
+  }
+
+  /**
+   * Tell the demuxer to skip every audio track except the active one. A file
+   * with a second, unused audio track (e.g. a dual-TrueHD source with ~933
+   * packets/s PER track) otherwise floods the read path with packets the loop
+   * immediately throws away — roughly doubling the reads needed per second. On
+   * a slower engine (Safari pulls ~half the packets/s of Chromium) that starved
+   * the ACTIVE audio below realtime and stalled every few seconds (issue #11).
+   * AVDISCARD_ALL makes av_read_frame skip them internally so each read returns
+   * a useful packet. Only audio streams are touched — video and subtitles keep
+   * their demuxer defaults (subtitles are read on demand). Re-applied on every
+   * audio-track switch so the newly-selected track is re-enabled.
+   */
+  private applyStreamDiscard(): void {
+    const bindings = this.demuxer?.getBindings();
+    if (!bindings) return;
+    const activeAudioId = this.trackManager.getActiveAudioTrack()?.id;
+    for (const t of this.trackManager.getTracks()) {
+      if (t.type === "audio") {
+        bindings.setStreamDiscard(t.id, t.id !== activeAudioId);
+      }
+    }
+  }
+
+  /**
+   * Begin an audio prime: hold the AudioContext suspended (primeForBuffering,
+   * which never issues a resume() so it can't drain/race), flush any pending
+   * post-seek audio packets into the decoder so the cushion starts filling, and
+   * flag _primingAudio so the buffering→resume gate waits for a real cushion
+   * (2s) rather than the thin 0.1s default before resuming.
+   */
+  private beginAudioPrime(): void {
+    this.audioRenderer.primeForBuffering();
+    if (this.pendingAudioPackets.length > 0) {
+      for (const pkt of this.pendingAudioPackets) {
+        this.audioDecoder.decode(pkt.data, pkt.timestamp, pkt.keyframe);
+      }
+      this.pendingAudioPackets = [];
+    }
+    this._primingAudio = true;
+  }
+
+  /**
    * Main Playback Loop
    */
   private processLoop = async () => {
@@ -1691,17 +1848,34 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     } else if (this.stateManager.getState() === "buffering" && this.wasPlayingBeforeRebuffer) {
       // Resume after minimum dwell time to accumulate enough data
       const hasAudioTrack = !!this.trackManager.getActiveAudioTrack();
-      const audioReady = this.disableAudio || !hasAudioTrack || this.audioRenderer.getBufferedDuration() > 0.1;
+      // The first-play cold prime needs a REAL cushion before it starts: the
+      // software decode is still sub-realtime (and gets even slower once video
+      // decode/render competes for CPU), so resuming on a thin 0.1s buffer just
+      // underruns again → a second stall + a ~2s A/V resync. Require ~1.5s
+      // buffered for the prime (with a generous max-dwell fallback so a very
+      // slow decoder still eventually starts). A normal mid-playback rebuffer
+      // keeps the lighter 0.1s threshold for responsiveness.
+      const audioTargetS = this._primingAudio ? 2.0 : 0.1;
+      const audioReady =
+        this.disableAudio ||
+        !hasAudioTrack ||
+        this.audioRenderer.getBufferedDuration() > audioTargetS;
       const videoReady = !this.videoRenderer || this.videoRenderer.getQueueSize() > 0;
       const dwellMs = performance.now() - this._bufferingEntryTime;
       const minDwell = 1500; // Wait at least 1.5s to accumulate buffer
-      // Resume if: (1) both ready after minDwell, or (2) audio ready after longer wait
-      // Video decoder output is async — don't block forever if frames are delayed
+      // Cap the prime startup so a very CPU-bound decoder doesn't spin forever;
+      // it starts with whatever cushion it built (a residual stall is possible
+      // on such machines — the real fix is off-thread audio decode).
+      const maxDwell = this._primingAudio ? 4000 : 3000;
+      // Resume if: (1) both ready after minDwell, (2) audio ready after longer
+      // wait, or (3) the max-dwell fallback (don't wait forever).
       const canResume = dwellMs >= minDwell && (
         (audioReady && videoReady) ||
-        (audioReady && dwellMs >= 3000)
+        (audioReady && dwellMs >= 3000) ||
+        dwellMs >= maxDwell
       );
       if (canResume) {
+        this._primingAudio = false;
         this.stateManager.setState("paused");
         this.wasPlayingBeforeRebuffer = false;
         // Resume AudioContext before play() so audio picks up from where it was
@@ -2122,7 +2296,18 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
           if (inPlayGrace && !this.muted && !this.disableAudio && !isSoftware) {
             burstSize = 20 * fpsScale; // Gentler ramp during initial fill with audio
           } else {
-            burstSize = (isSoftware ? 80 : 40) * fpsScale;
+            // Burst is a PACKET cap, but what matters for a cushion is how many
+            // VIDEO packets it reads — and in a heavily-interleaved file that
+            // can be a tiny fraction. e.g. a dual-audio 1080p TrueHD source
+            // reads ~933 pkt/s PER audio track vs ~19 video pkt/s, so a
+            // 40-packet burst pulls only ~0.4 video packets and video can never
+            // read ahead of realtime → no cushion → a stall on any hiccup
+            // (issue #11, "stalls every ~60s" on a 2×TrueHD file). A larger cap
+            // lets video outpace consumption and build a cushion; it stays
+            // self-limiting because the outer backpressure gate stops reading
+            // once videoBuffered/audioBuffered pass their targets, and the
+            // periodic MessageChannel yield below keeps the tick non-blocking.
+            burstSize = (isSoftware ? 160 : 160) * fpsScale;
           }
         }
       }
@@ -2299,8 +2484,21 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
               // keyframes for long stretches (seeking deep into a DoVi P8 .ts),
               // where waiting for an IDR never resumes and the video stays black.
               const idrWaitElapsed = elapsed > MoviPlayer.SEEK_IDR_WAIT_MS;
+              // A CRA at/before the seek target IS the demuxer's restart point —
+              // decode straight from it (pre-target frames are dropped by the
+              // onFrame filter). The IDR-preference below only helps when a true
+              // IDR sits within a few frames of the target; a CRA-only stream
+              // has none, and skipping the target CRA then lets the demux loop
+              // (which outruns the 400ms wall-clock IDR wait) race through the
+              // whole file, skipping every CRA to EOF with no frame decoded →
+              // permanent "buffering". So accept the target CRA outright rather
+              // than hunt for an IDR that never arrives.
+              const isTargetCra =
+                packet.keyframe &&
+                this.seekTargetTime !== -1 &&
+                packet.timestamp <= this.seekTargetTime + 0.05;
               const acceptThisKeyframe =
-                packet.keyframe && (packet.isIdr || idrWaitElapsed);
+                packet.keyframe && (packet.isIdr || idrWaitElapsed || isTargetCra);
               if (elapsed > MoviPlayer.KEYFRAME_SEEK_TIMEOUT) {
                 Logger.warn(
                   TAG,
@@ -2817,7 +3015,10 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /**
    * Generates a preview frame for the given time using C for demuxing and WebCodecs for decoding.
    */
-  async getPreviewFrame(time: number): Promise<Blob | null> {
+  async getPreviewFrame(
+    time: number,
+    view?: VRView | null,
+  ): Promise<Blob | null> {
     if (this._audioOnly) return null; // Data-saver: never decode video for previews
     if (!this.previewsAllowed()) return null; // Disabled, or source too large for a 2nd WASM context
     // Adaptive streams: use the manifest's own thumbnail track via Shaka
@@ -2868,6 +3069,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
         Logger.warn(TAG, "Thumbnail bindings or renderer not available");
         return null;
       }
+
+      // 360°: reproject the equirect keyframe to the current viewing angle so
+      // the seek-bar preview matches what's on screen. Must be set BEFORE the
+      // decode/render below — draw() happens synchronously inside the WebCodecs
+      // output callback. Null (2D sources) keeps the flat passthrough path.
+      this.thumbnailRenderer.setProjection(view ?? null);
 
       // Read keyframe from thumbnailer
       // Convert time to media time (PTS) by adding startTime
@@ -3646,6 +3853,7 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     this.seekTargetTime = -1; // clear any lingering pre-target frame-drop filter
     this.waitingForVideoSync = false; // no stale seek-completion armed
     this._playStartTime = 0; // keep first-play branch eligible
+    this._primingAudio = false;
     this.pendingAudioPackets = []; // poster-era audio is stale; play() re-seeks
     this.pendingPrebufferPackets = [];
     // The poster seek advanced HttpSource's monotonic buffered-end to ~poster
@@ -3874,6 +4082,14 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   }
 
   /**
+   * The currently-displayed decoded VideoFrame, or null. Fallback capture
+   * source for snapshots when the WebGL canvas reads back blank.
+   */
+  getCurrentVideoFrame(): VideoFrame | null {
+    return this.videoRenderer?.getCurrentFrame() ?? null;
+  }
+
+  /**
    * Get current video rotation
    */
   getVideoRotation(): number {
@@ -3908,6 +4124,12 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
 
   isVR360Enabled(): boolean {
     return this.videoRenderer?.isVR360Enabled() ?? false;
+  }
+
+  /** Live 360° camera + projection snapshot for reprojecting seek-bar previews
+   *  to the current view. Null when not in 360. */
+  getVR360View(): VRView | null {
+    return this.videoRenderer?.getVRView() ?? null;
   }
 
   /** Select the VR projection/layout: half = VR180, fisheye = equidistant
@@ -4062,7 +4284,9 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.wireNativeAudioEvents(this.nativeAudioEl);
     }
     this.nativeAudioEl.preload = "auto";
-    this.nativeAudioEl.volume = this.muted ? 0 : this.audioRenderer.getVolume();
+    // HTMLMediaElement.volume caps at [0,1]; getVolume() can be up to 2 (boost),
+    // which the AudioContext gain handles — the native element just clamps.
+    this.nativeAudioEl.volume = this.muted ? 0 : Math.min(1, this.audioRenderer.getVolume());
     this.nativeAudioEl.muted = this.muted;
     this.disableAudio = true;
 
@@ -4281,6 +4505,16 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
       this.hasNativeAudio() ||
       this.streamWrapper !== null
     );
+  }
+
+  /**
+   * True when audio plays through a native HTMLMediaElement — an adaptive
+   * stream (HLS/DASH via the stream wrapper's <video>) or native split-source
+   * audio — rather than the AudioContext. Such audio can't be boosted above
+   * 100% (HTMLMediaElement.volume caps at [0,1]), so the volume UI caps at 100%.
+   */
+  usesNativeAudio(): boolean {
+    return this.streamWrapper !== null || this.isNativeAudioActive();
   }
 
   /** True for a live (dynamic) adaptive stream — drives the LIVE indicator. */
@@ -4618,7 +4852,8 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
     }
     this.audioRenderer.setVolume(volume);
     if (this.nativeAudioEl) {
-      this.nativeAudioEl.volume = volume;
+      // Native element caps at [0,1]; >1 boost lives in the AudioContext gain.
+      this.nativeAudioEl.volume = Math.min(1, Math.max(0, volume));
     }
   }
 
@@ -4697,6 +4932,21 @@ export class MoviPlayer extends EventEmitter<PlayerEventMap> {
   /**
    * Get comprehensive player stats for "Stats for nerds" overlay
    */
+  /**
+   * Raw render-health numbers for the stutter-hint monitor — distinct from
+   * getStats(), which formats display strings. framesPresented is cumulative
+   * (resets to 0 on seek/reset), so callers must handle it going backwards.
+   * Null when there's no video renderer (audio-only / adaptive streams).
+   */
+  getRenderHealth(): { framesPresented: number; sourceFps: number } | null {
+    if (!this.videoRenderer || this.streamWrapper) return null;
+    const vt = this.trackManager.getActiveVideoTrack() as VideoTrack | null;
+    return {
+      framesPresented: this.videoRenderer.getStats().framesPresented,
+      sourceFps: vt?.frameRate && vt.frameRate > 0 ? vt.frameRate : 30,
+    };
+  }
+
   getStats(): Record<string, string | number | boolean> {
     // HLS mode: delegate to HLS wrapper
     if (this.streamWrapper) {

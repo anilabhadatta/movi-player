@@ -236,7 +236,11 @@ Sets the initial playback speed. Persists across reloads like `volume`.
 
 #### `playsinline`
 
-Prevents fullscreen on iOS (plays inline instead).
+Prevents auto-fullscreen on iOS (plays inline instead). It also — on **any touch
+device** — **suppresses touch gestures (swipe-seek / volume) while the player is
+inline** so they don't interfere with the page's scroll. Fullscreen gestures are
+unaffected — they keep working as normal. (This replaces the deprecated
+[`gesturefs`](#gesturefs-deprecated).)
 
 ```html
 <movi-player src="video.mp4" playsinline></movi-player>
@@ -462,7 +466,11 @@ Overrides the video frame rate with a custom value.
 
 ---
 
-#### `gesturefs`
+#### `gesturefs` (deprecated)
+
+> **Deprecated — use [`playsinline`](#playsinline) instead.** An inline player now
+> restricts touch gestures to fullscreen on its own. `gesturefs` is still honoured
+> for backward compatibility.
 
 Restricts touch gestures to fullscreen mode only. When enabled, tap/swipe/pinch gestures will only work when the player is in fullscreen.
 
@@ -490,6 +498,22 @@ Disables all keyboard shortcuts for playback control.
 - Arrow Up/Down - Volume ±10%
 - F - Fullscreen
 - M - Mute/Unmute
+
+---
+
+#### `noerrorscreen`
+
+Suppresses the built-in error overlays (the "unsupported source", decode-failure, and network-error screens), so an embedder can render its own error UI instead. Errors are still emitted on the [`error`](#events) event.
+
+```html
+<movi-player src="video.mp4" controls noerrorscreen></movi-player>
+```
+
+**Use Case:** Custom-branded players and headless embeds that surface failures through their own host UI rather than the player's default screens.
+
+::: tip Headless / bare player
+A `<movi-player>` with **no `controls` attribute** is a pure display surface — it shows no resume dialog, no "No Video" empty state, no loading spinner, and ignores all mouse interaction (click, double-click, right-click, drag). Combine with `noerrorscreen` for a fully host-driven render canvas (background/hero video, custom chrome).
+:::
 
 ---
 
@@ -1009,7 +1033,10 @@ player.fps = 0; // Auto (from metadata)
 
 ---
 
-#### `gesturefs: boolean`
+#### `gesturefs: boolean` (deprecated)
+
+> **Deprecated — use `playsInline` instead**, which now restricts gestures to
+> fullscreen on its own. Kept for backward compatibility.
 
 Gets/sets whether touch gestures are restricted to fullscreen mode only.
 
@@ -1701,6 +1728,7 @@ Press `?` during playback to view the shortcuts panel.
 | `U` | Toggle stable volume | `G` | Toggle ambient mode |
 | `H` | Toggle HDR | `P` | Picture-in-Picture |
 | `+` / `-` | Speed up / down | `Z` / `X` | Subtitle delay -/+ 100ms |
+| `1` – `9` | Seek to 10%–90% | | |
 
 ---
 

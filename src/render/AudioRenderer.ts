@@ -15,6 +15,10 @@ const TAG = "AudioRenderer";
 
 export class AudioRenderer {
   private audioContext: AudioContext | null = null;
+  // Fixed fan-in bus: every decoded source connects here. Keeping the input
+  // separate from the volume node lets us reorder the compressor/gain chain
+  // (stable-audio toggle) without re-touching the live sources.
+  private inputNode: GainNode | null = null;
   private gainNode: GainNode | null = null;
   private compressorNode: DynamicsCompressorNode | null = null;
   private scheduledTime: number = 0;
@@ -89,9 +93,14 @@ export class AudioRenderer {
   private ensureKeepalive(): HTMLAudioElement | null {
     if (this.keepaliveEl) return this.keepaliveEl;
     try {
-      // 0.5s of 8kHz mono 8-bit silence (4044 bytes including 44-byte WAV header)
+      // 5s of 8kHz mono 8-bit silence (~40KB including 44-byte WAV header).
+      // Duration matters: Chrome grants FULL audio focus — the state that
+      // actually surfaces the OS media session (macOS Now Playing, Windows
+      // SMTC, Linux MPRIS) — only for media ≥5s. A shorter anchor gets merely
+      // transient focus, so the OS controls may never appear even though the
+      // navigator.mediaSession metadata/handlers are all set correctly.
       const sampleRate = 8000;
-      const numSamples = sampleRate / 2;
+      const numSamples = sampleRate * 5;
       const buf = new ArrayBuffer(44 + numSamples);
       const view = new DataView(buf);
       const writeStr = (off: number, s: string) => {
@@ -164,6 +173,11 @@ export class AudioRenderer {
         // already handle that case.
         latencyHint: "interactive",
       });
+      this.inputNode = this.audioContext.createGain();
+      // Volume / mute / makeup gain — ALWAYS the last node before destination.
+      // A >100% boost lives here, applied AFTER the limiter, so stable audio's
+      // compressor can't cancel it (a gain *before* the limiter would be
+      // crushed straight back down — ~+6dB becomes ~+0.6dB).
       this.gainNode = this.audioContext.createGain();
 
       // Create compressor for stable audio (loudness normalization).
@@ -179,15 +193,7 @@ export class AudioRenderer {
       this.compressorNode.attack.value = 0.001;   // 1ms — catch transients before they hit the ear
       this.compressorNode.release.value = 0.15;   // 150ms — quick recovery, no pumping
 
-      // Wire audio chain based on stable audio state
-      if (this._stableAudio) {
-        // source -> compressor -> gain -> destination
-        this.gainNode.connect(this.compressorNode);
-        this.compressorNode.connect(this.audioContext.destination);
-      } else {
-        // source -> gain -> destination
-        this.gainNode.connect(this.audioContext.destination);
-      }
+      this.wireGraph();
 
       // Apply muted state if set before initialization
       this.gainNode.gain.value = this._muted ? 0 : this.perceptualGain(this.volume);
@@ -310,6 +316,9 @@ export class AudioRenderer {
       // which DOES respect channelCount, so we promote it
       // explicitly — otherwise a 5.1 source would lose its
       // surround when piped through stable-audio compression.
+      if (this.inputNode) {
+        this.inputNode.channelCount = clamped;
+      }
       if (this.gainNode) {
         this.gainNode.channelCount = clamped;
       }
@@ -457,7 +466,7 @@ export class AudioRenderer {
 
     const source = this.audioContext.createBufferSource();
     source.buffer = processedBuffer;
-    source.connect(this.gainNode);
+    source.connect(this.inputNode ?? this.gainNode);
     source.playbackRate.value = usedStretcher ? 1.0 : this._playbackRate;
 
     const now = this.audioContext.currentTime;
@@ -476,7 +485,7 @@ export class AudioRenderer {
             );
             const silenceSource = this.audioContext.createBufferSource();
             silenceSource.buffer = silenceBuffer;
-            silenceSource.connect(this.gainNode);
+            silenceSource.connect(this.inputNode ?? this.gainNode);
             silenceSource.start(this.scheduledTime);
             silenceSource.onended = () => {
               try { silenceSource.disconnect(); } catch { /* ignore */ }
@@ -576,7 +585,7 @@ export class AudioRenderer {
 
       const source = this.audioContext.createBufferSource();
       source.buffer = audioBuffer;
-      source.connect(this.gainNode);
+      source.connect(this.inputNode ?? this.gainNode);
       source.playbackRate.value = this._playbackRate;
 
       const currentTime = this.audioContext.currentTime;
@@ -652,8 +661,14 @@ export class AudioRenderer {
       }
     }
 
-    // Stop the BT keepalive — main context is taking the audio session back.
-    this.stopKeepalive();
+    // Play the silent anchor <audio> for the duration of playback. WebCodecs +
+    // Web Audio never request Android Audio Focus on their own, so without a
+    // real playing media element the OS Media Session notification never
+    // appears / can't be controlled. This element is the anchor; it is PAUSED
+    // again in pause() so the notification's play/pause state mirrors the real
+    // player (Chrome derives that state from the element, not from
+    // navigator.mediaSession.playbackState, on many platforms).
+    this.startKeepalive();
 
     // Warmup context (Safari fix) - only if not muted
     if (!this._muted && this.audioContext) {
@@ -794,16 +809,22 @@ export class AudioRenderer {
   pause(): void {
     this.isPlaying = false;
 
+    // Pause the silent media-session anchor <audio> so the OS notification's
+    // play/pause state mirrors the real player. On many platforms Chrome drives
+    // the lock-screen state from the media element's own play/paused state, NOT
+    // from navigator.mediaSession.playbackState — so a continuously-playing
+    // anchor leaves the notification frozen on "playing". Mirroring it (play on
+    // play, pause on pause) is what makes the OS UI actually update on each
+    // action. Trade-off: A2DP Bluetooth may re-negotiate on resume; a correct
+    // lock-screen state is worth more than avoiding that.
+    this.stopKeepalive();
+
     // Don't stop sources or clear buffers!
     // Just suspend the context to pause time.
     // This preserves the audio buffer (scheduled nodes) so we resume exactly where we left off.
     // If we clear sources, we lose the buffered audio (e.g. 2 seconds worth), causing the
     // player to jump forward by that amount on resume.
     if (this.audioContext && this.audioContext.state === "running") {
-      // Start silent <audio> keepalive BEFORE suspending so the OS audio
-      // session never goes idle — without this, A2DP Bluetooth devices drop
-      // the connection on every pause/resume cycle.
-      this.startKeepalive();
       this.intentionalSuspend = true;
       this.audioContext.suspend().catch((err) => {
         Logger.error(TAG, "Failed to suspend audio context", err);
@@ -833,6 +854,46 @@ export class AudioRenderer {
   }
 
   /**
+   * Prepare for the first-play / replay audio prime: mark the renderer playing
+   * so render() accepts decoded audio and the buffer fills, but hold the
+   * AudioContext suspended so nothing drains until resumeFromBuffering().
+   *
+   * Unlike play() + suspendForBuffering(), this NEVER issues an async resume().
+   * That pair raced on replay: after `ended`, pause() leaves the context
+   * suspended; the prime's fire-and-forget play() then kicks off an async
+   * resume(), and the immediately-following suspendForBuffering() sees the
+   * context still "suspended" (resume in flight) so its state===running guard
+   * skips the suspend — the late resume then wins and the context stays
+   * running for the whole prime, draining the primed audio and underrunning
+   * the sub-realtime software decoder into a flood of gap-fills. Priming
+   * without ever resuming removes the race entirely.
+   */
+  primeForBuffering(): void {
+    this.isPlaying = true;
+    this.intentionalSuspend = true;
+    if (!this.audioContext && !this._muted) {
+      // Context deferred (never created yet) — bring it up, then hold it
+      // suspended. Any audio decoded before init resolves has nowhere to
+      // schedule, but by the prime path the context already exists in every
+      // observed flow (first play created it during the poster seek); this is
+      // just a safety net.
+      this.init()
+        .then(() => {
+          if (this.intentionalSuspend && this.audioContext?.state === "running") {
+            this.audioContext.suspend().catch(() => {});
+          }
+        })
+        .catch(() => {});
+    } else if (this.audioContext && this.audioContext.state === "running") {
+      this.audioContext.suspend().catch((err) => {
+        Logger.error(TAG, "Failed to suspend audio context for prime", err);
+      });
+    }
+    this.lastDecodeTime = performance.now();
+    Logger.debug(TAG, "Primed for buffering (context held suspended)");
+  }
+
+  /**
    * Resume audio after buffering. Clears the intentional suspend flag.
    */
   resumeFromBuffering(): void {
@@ -849,7 +910,8 @@ export class AudioRenderer {
    * Set volume (0-1) with smooth ramping to prevent clicks/pops
    */
   setVolume(volume: number): void {
-    this.volume = Math.max(0, Math.min(1, volume));
+    // 0–2: values above 1 boost up to 200% (VLC-style).
+    this.volume = Math.max(0, Math.min(2, volume));
     if (this.gainNode && !this._muted) {
       const g = this.perceptualGain(this.volume);
       if (this._stableAudio) {
@@ -1258,32 +1320,53 @@ export class AudioRenderer {
   // ─── Stable Audio Methods ────────────────────────────────────────────
 
   /**
+   * (Re)connect the audio graph for the current stable-audio state.
+   *   stable ON : sources → input → compressor → gain(makeup) → destination
+   *   stable OFF: sources → input → gain(volume)  → destination
+   *
+   * The volume/makeup gainNode is ALWAYS the final node before destination, so
+   * a >100% boost is applied *after* the limiter instead of being cancelled by
+   * it. Measured: with the old gain-before-limiter order, 100%→200% yielded
+   * only ~+0.6dB; with gain after the limiter it's the full ~+6dB. Because the
+   * limiter has already tamed peaks to ≈-15dBFS, a 2× makeup still lands well
+   * under 0dBFS, so it does not re-introduce clipping.
+   */
+  private wireGraph(): void {
+    if (
+      !this.audioContext ||
+      !this.inputNode ||
+      !this.gainNode ||
+      !this.compressorNode
+    )
+      return;
+    try {
+      // Bare disconnect() is a safe no-op when nothing is connected yet.
+      this.inputNode.disconnect();
+      this.compressorNode.disconnect();
+      this.gainNode.disconnect();
+      if (this._stableAudio) {
+        this.inputNode.connect(this.compressorNode);
+        this.compressorNode.connect(this.gainNode);
+        this.gainNode.connect(this.audioContext.destination);
+      } else {
+        this.inputNode.connect(this.gainNode);
+        this.gainNode.connect(this.audioContext.destination);
+      }
+    } catch {
+      Logger.warn(TAG, "Failed to (re)wire audio chain");
+    }
+  }
+
+  /**
    * Enable/disable stable audio mode (dynamic range compression / loudness normalization)
    */
   setStableAudio(enabled: boolean): void {
     this._stableAudio = enabled;
     Logger.info(TAG, `Stable audio: ${enabled ? "enabled" : "disabled"}`);
 
-    // Dynamically rewire audio chain
-    if (this.audioContext && this.gainNode && this.compressorNode) {
-      try {
-        // Disconnect gainNode from current destination
-        this.gainNode.disconnect();
-
-        if (enabled) {
-          // source -> gain -> compressor -> destination
-          this.gainNode.connect(this.compressorNode);
-          this.compressorNode.connect(this.audioContext.destination);
-        } else {
-          // source -> gain -> destination (bypass compressor)
-          this.compressorNode.disconnect();
-          this.gainNode.connect(this.audioContext.destination);
-        }
-        Logger.debug(TAG, `Audio chain rewired: compressor ${enabled ? "active" : "bypassed"}`);
-      } catch {
-        Logger.warn(TAG, "Failed to rewire audio chain");
-      }
-    }
+    // Rewire for the new state (live sources stay attached to inputNode).
+    this.wireGraph();
+    Logger.debug(TAG, `Audio chain rewired: compressor ${enabled ? "active" : "bypassed"}`);
 
     if (enabled && this.audioContext) {
       this.setupContextStateMonitoring();
@@ -1314,7 +1397,10 @@ export class AudioRenderer {
    */
   private perceptualGain(v: number): number {
     if (v <= 0) return 0;
-    if (v >= 1) return 1;
+    // Above 100% we boost LINEARLY (VLC-style, up to 200% = 2x gain). Unity at
+    // v=1. Loud content near 0 dBFS can clip when boosted — enabling stable
+    // audio inserts the limiter that tames it.
+    if (v >= 1) return v;
     // ~60 dB usable range: gain = (e^(k*v) - 1) / (e^k - 1), k tuned for feel.
     const k = 6.908; // ln(1000) -> ~60 dB dynamic range
     return (Math.exp(k * v) - 1) / (Math.exp(k) - 1);
@@ -1459,6 +1545,7 @@ export class AudioRenderer {
       this.audioContext = null;
     }
 
+    this.inputNode = null;
     this.gainNode = null;
     this.compressorNode = null;
     if (this.signalsmith) {
