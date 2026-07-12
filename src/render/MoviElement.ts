@@ -90,6 +90,10 @@ export class MoviElement extends HTMLElement {
   // Blurred-backdrop element behind the sharp-art canvas — CSS filter:blur()
   // (cross-browser Gaussian, unlike canvas ctx.filter).
   private _coverArtBgEl: HTMLDivElement | null = null;
+  // A small data URL of the embedded album art, generated once per source, so
+  // the CSS-blurred backdrop can point at it too (background-image needs a URL;
+  // the embedded art arrives as an ImageBitmap with none).
+  private _coverArtBgUrl: string = "";
   // True once cover-art extraction has settled for the current source (bitmap
   // arrived OR extraction failed). Until then, if the source has an art track,
   // we hold the audio-strip layout off so the player doesn't flash strip→cover.
@@ -3867,7 +3871,7 @@ export class MoviElement extends HTMLElement {
               `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>`,
               `${deg}°`,
             );
-            const statusEl = this.shadowRoot?.querySelector(".movi-rotate-status");
+            const statusEl = this.contextMenuRoot().querySelector(".movi-rotate-status");
             if (statusEl) statusEl.textContent = `${deg}°`;
             this.syncThumbnailRotation(deg);
           }
@@ -4343,7 +4347,15 @@ export class MoviElement extends HTMLElement {
         // useless. Switch to position:fixed in viewport coordinates so
         // the menu can spill into the empty page area below the strip.
         const isStripMode = this.classList.contains("movi-audio-strip");
-        if (isStripMode) {
+        // In fullscreen the player host IS the fullscreen element (the browser's
+        // top layer), so the body-level portal renders OUTSIDE it and the menu
+        // never appears. There are also no page clipping ancestors to escape here
+        // (the host fills the screen). So keep the menu in the shadow root, lift
+        // the host's paint clip so it isn't chopped at the host edge, and position
+        // it with fixed viewport coordinates — the fullscreen host box == viewport.
+        const inFullscreen = this.isFullscreenActive();
+        if (isStripMode || inFullscreen) {
+          if (inFullscreen) this.classList.add("movi-menu-overflow");
           contextMenu.style.position = "fixed";
           contextMenu.style.maxHeight = `${Math.max(180, window.innerHeight - 40)}px`;
           contextMenu.style.display = "block";
@@ -4923,7 +4935,7 @@ export class MoviElement extends HTMLElement {
       } else if (action === "rotate-video") {
         if (this.player && !this._pipWindow) {
           const deg = this.player.rotateVideo();
-          const statusEl = shadowRoot.querySelector(".movi-rotate-status");
+          const statusEl = this.contextMenuRoot().querySelector(".movi-rotate-status");
           if (statusEl) statusEl.textContent = `${deg}°`;
           this.syncThumbnailRotation(deg);
           this.showOSD(
@@ -13081,7 +13093,7 @@ export class MoviElement extends HTMLElement {
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 16px;
         padding: 8px 4px;
-        min-width: 160px;
+        min-width: 230px;
         visibility: hidden;
         opacity: 0;
         box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
@@ -13111,7 +13123,7 @@ export class MoviElement extends HTMLElement {
         border: 1px solid rgba(255, 255, 255, 0.12);
         border-radius: 16px;
         padding: 8px 4px;
-        min-width: 160px;
+        min-width: 230px;
         visibility: hidden;
         opacity: 0;
         box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
@@ -15504,6 +15516,27 @@ export class MoviElement extends HTMLElement {
     img.src = url;
   }
 
+  /** Downscale an album-art bitmap to a tiny JPEG data URL for the blurred
+   *  backdrop. The backdrop is blurred to 40px, so ~96px is indistinguishable
+   *  from full-res while keeping the URL small and the draw cheap. */
+  private makeCoverArtBgUrl(bitmap: ImageBitmap): string {
+    try {
+      const max = 96;
+      const ar = bitmap.width / bitmap.height;
+      const w = Math.max(1, ar >= 1 ? max : Math.round(max * ar));
+      const h = Math.max(1, ar >= 1 ? Math.round(max / ar) : max);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const cx = c.getContext("2d");
+      if (!cx) return "";
+      cx.drawImage(bitmap, 0, 0, w, h);
+      return c.toDataURL("image/jpeg", 0.7);
+    } catch {
+      return "";
+    }
+  }
+
   private updateCoverArtOverlay(): void {
     const overlay = this.coverArtOverlay;
     const canvas = this.coverArtCanvas;
@@ -15647,11 +15680,12 @@ export class MoviElement extends HTMLElement {
 
     // Blurred backdrop is now a CSS-blurred DOM element BEHIND this canvas — a
     // real Gaussian in every browser (canvas ctx.filter "blur()" is unsupported
-    // in Safari < 17 and looked bad faked). Point it at the poster URL; embedded
-    // art (an ImageBitmap, currently disabled) has no URL, so it falls back to
-    // the overlay's plain dark background. The canvas paints only the sharp art.
+    // in Safari < 17 and looked bad faked). Point it at the poster URL, or at a
+    // baked-down data URL of the embedded album art (an ImageBitmap has no URL
+    // of its own), so both cover-art sources get the same blurred surround. The
+    // canvas paints only the sharp art.
     if (this._coverArtBgEl) {
-      const bgUrl = this.coverArtBitmap ? "" : this._posterCoverUrl;
+      const bgUrl = this.coverArtBitmap ? this._coverArtBgUrl : this._posterCoverUrl;
       this._coverArtBgEl.style.backgroundImage = bgUrl
         ? `url("${bgUrl.replace(/"/g, '\\"')}")`
         : "none";
@@ -16739,6 +16773,10 @@ export class MoviElement extends HTMLElement {
       // and reuses one on subsequent loads. Our reference can be dropped
       // safely; the player will close() when it stomps its own slot.
       this.coverArtBitmap = bitmap;
+      // Bake a tiny data URL from the art so the CSS-blurred backdrop can use
+      // it (the poster path already had a URL; embedded art didn't). Generated
+      // once here, not on every resize.
+      this._coverArtBgUrl = bitmap ? this.makeCoverArtBgUrl(bitmap) : "";
       // Extraction has settled (success or failure) — release the strip-layout
       // hold so a failed extraction falls back to the strip cleanly.
       this._coverArtResolved = true;
@@ -16778,6 +16816,7 @@ export class MoviElement extends HTMLElement {
     // owned by MoviPlayer; we just clear our own pointer and hide the
     // overlay so the new load doesn't briefly show last track's art.
     this.coverArtBitmap = null;
+    this._coverArtBgUrl = "";
     this._coverArtResolved = false;
     // Drop the poster-as-album-art bitmap too — we own it, so close to free it.
     if (this._posterCoverBitmap) { try { this._posterCoverBitmap.close(); } catch {} }
@@ -18897,19 +18936,35 @@ export class MoviElement extends HTMLElement {
     this.updateLoopUI();
   }
 
+  /**
+   * The root the context menu currently lives in. On desktop the menu portals
+   * to a body-level shadow root while open, so its items are NOT in this.shadowRoot
+   * at that moment — a toggle-state updater querying the shadow root would find
+   * nothing and silently no-op (the reason menu toggles didn't reflect their new
+   * state after a click). Query menu items through this so they're found whether
+   * the menu is portaled or still home in the shadow root.
+   */
+  private contextMenuRoot(): ShadowRoot {
+    if (this._menuPortalRoot?.querySelector(".movi-context-menu")) {
+      return this._menuPortalRoot;
+    }
+    return this.shadowRoot!;
+  }
+
   private updateLoopUI(): void {
     const shadowRoot = this.shadowRoot;
     if (!shadowRoot) return;
+    const menuRoot = this.contextMenuRoot();
 
     const loopBtn = shadowRoot.querySelector(".movi-loop-btn");
-    const loopMenuItem = shadowRoot.querySelector(
+    const loopMenuItem = menuRoot.querySelector(
       '.movi-context-menu-item[data-action="loop-toggle"]',
     );
-    const loopStatus = shadowRoot.querySelector(".movi-loop-status");
+    const loopStatus = menuRoot.querySelector(".movi-loop-status");
 
     // Context menu icons
-    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-loop-outline") as HTMLElement;
-    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-loop-filled") as HTMLElement;
+    const ctxOutline = menuRoot.querySelector(".movi-context-menu-loop-outline") as HTMLElement;
+    const ctxFilled = menuRoot.querySelector(".movi-context-menu-loop-filled") as HTMLElement;
 
     if (this._loop) {
       loopBtn?.classList.add("active");
@@ -18929,11 +18984,12 @@ export class MoviElement extends HTMLElement {
   private updateAmbientUI(): void {
     const shadowRoot = this.shadowRoot;
     if (!shadowRoot) return;
+    const menuRoot = this.contextMenuRoot();
 
-    const menuItem = shadowRoot.querySelector('.movi-context-menu-item[data-action="ambient-toggle"]');
-    const status = shadowRoot.querySelector(".movi-ambient-status");
-    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-ambient-outline") as HTMLElement;
-    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-ambient-filled") as HTMLElement;
+    const menuItem = menuRoot.querySelector('.movi-context-menu-item[data-action="ambient-toggle"]');
+    const status = menuRoot.querySelector(".movi-ambient-status");
+    const ctxOutline = menuRoot.querySelector(".movi-context-menu-ambient-outline") as HTMLElement;
+    const ctxFilled = menuRoot.querySelector(".movi-context-menu-ambient-filled") as HTMLElement;
 
     if (this._ambientMode) {
       menuItem?.classList.add("movi-context-menu-active");
@@ -18951,16 +19007,17 @@ export class MoviElement extends HTMLElement {
   private updateStableAudioUI(shadowRoot: ShadowRoot | null = this.shadowRoot): void {
     if (!shadowRoot) return;
     const isEnabled = this.player?.getStableAudio() ?? true;
+    const menuRoot = this.contextMenuRoot();
 
     const stableBtn = shadowRoot.querySelector(".movi-stable-audio-btn");
-    const stableMenuItem = shadowRoot.querySelector(
+    const stableMenuItem = menuRoot.querySelector(
       '.movi-context-menu-item[data-action="stable-audio-toggle"]',
     );
-    const stableStatus = shadowRoot.querySelector(".movi-stable-audio-status");
+    const stableStatus = menuRoot.querySelector(".movi-stable-audio-status");
 
     // Context menu icons
-    const ctxOutline = shadowRoot.querySelector(".movi-context-menu-stable-outline") as HTMLElement;
-    const ctxFilled = shadowRoot.querySelector(".movi-context-menu-stable-filled") as HTMLElement;
+    const ctxOutline = menuRoot.querySelector(".movi-context-menu-stable-outline") as HTMLElement;
+    const ctxFilled = menuRoot.querySelector(".movi-context-menu-stable-filled") as HTMLElement;
 
     if (isEnabled) {
       stableBtn?.classList.add("active");
@@ -20511,9 +20568,10 @@ export class MoviElement extends HTMLElement {
   }
 
   private updateHDRUI(): void {
+    const menuRoot = this.contextMenuRoot();
     const hdrBtn = this.shadowRoot?.querySelector(".movi-hdr-btn");
-    const hdrStatus = this.shadowRoot?.querySelector(".movi-hdr-status");
-    const hdrMenuItem = this.shadowRoot?.querySelector(
+    const hdrStatus = menuRoot.querySelector(".movi-hdr-status");
+    const hdrMenuItem = menuRoot.querySelector(
       '.movi-context-menu-item[data-action="hdr-toggle"]',
     );
 

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-11
+
+### Added
+- **Captions rotate with the video**: rotating the video (`R` / menu) now turns the subtitles with it and keeps them on the rotated video's bottom edge — for both text and image (PGS/VobSub) subtitles.
+- **Blurred backdrop for embedded album art**: audio files with *embedded* cover art now get the same blurred-artwork backdrop that poster-based audio already had, instead of a plain dark background.
+
+### Fixed
+- **Fullscreen: the right-click / gear menu wouldn't open**: the desktop context menu portals to a body-level layer to escape page clipping, but in fullscreen the player itself is the fullscreen element, so the body-level menu rendered outside it and never appeared. In fullscreen the menu now stays within the player and positions itself directly.
+- **Context-menu toggles didn't reflect their new state**: toggling Ambient Mode / Stable Volume / Loop / Rotate / HDR from the menu didn't update the row's On/Off label and highlight (the state was written to the wrong place while the menu was portaled) — it now updates correctly.
+- **Volume slider offered a 200% boost on native audio**: a single external audio source (one `<source kind="audio">`) plays through a native `<audio>` element, which can't apply the WebAudio boost — the slider now caps at 100% there instead of promising a boost that won't happen.
+
+### Changed
+- **Wider context-menu submenus**: the audio-track and audio-output submenus are wider so long track / device names (e.g. "MacBook Air Speakers (Built-in)") no longer wrap.
+
 ## [0.3.4] - 2026-07-11
 
 ### Added
