@@ -708,6 +708,8 @@ export class ShakaPlayerWrapper extends EventEmitter<PlayerEventMap> {
         language: lang,
         label,
         subtitleType: isImage ? "image" : "text",
+        forced: !!t.forced || (t.roles || []).includes("forced"),
+        sdh: (t.roles || []).includes("sdh") || /sdh/i.test(label) || /hearing/i.test(label),
       } as SubtitleTrack);
     });
 

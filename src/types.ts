@@ -18,6 +18,8 @@ export interface Track {
   level?: number;
   language?: string;
   label?: string;
+  forced?: boolean;
+  sdh?: boolean;
   // Video-specific
   width?: number;
   height?: number;
